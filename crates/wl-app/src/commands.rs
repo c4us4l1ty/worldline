@@ -34,7 +34,9 @@ pub(crate) async fn identity_generate(
     // 12 words (Item 6 — no longer deterministic).
     let mut rng = rand::thread_rng();
     let verify_indices: Vec<usize> = rand::seq::index::sample(&mut rng, 12, 3).into_vec();
-    state.repos.insert_identity(&identity, false)?;
+    state
+        .repos
+        .insert_identity(&identity, false, &verify_indices)?;
     // Vault first: a crash between memory and disk must not lose the
     // only recoverable copy shown to the user once.
     state
@@ -60,31 +62,42 @@ pub struct GeneratedIdentity {
     verify_indices: Vec<usize>,
 }
 
-/// Verifies the 3-word backup challenge and marks the mnemonic
-/// verified (PRD §3.1 onboarding step).
+/// Verifies the 3-word backup challenge POSITIONALLY (the word at
+/// challenge position i must match the phrase word at position i) and
+/// marks the mnemonic verified (PRD §3.1 onboarding step). Membership
+/// anywhere in the phrase is not verification — order is the check.
 #[tauri::command]
 pub(crate) async fn identity_verify_backup(
     state: State<'_, std::sync::Arc<AppState>>,
+    indices: Vec<usize>,
     words: Vec<String>,
 ) -> ShellResult<bool> {
     let guard = state.identity.lock().unwrap();
     let Some(id) = guard.as_ref() else {
         return Err(ShellError::Locked);
     };
-    let phrase = id.phrase().to_string();
-    let all_present = words
-        .iter()
-        .all(|w| phrase.split_whitespace().any(|p| p == w));
-    if all_present {
-        state
-            .repos
-            .conn
-            .lock()
-            .unwrap()
-            .execute("UPDATE identity_config SET bip39_mnemonic_verified = 1", [])
-            .map_err(|e| ShellError::Store(e.into()))?;
+    // Challenge positions come from persisted identity_config — never
+    // from the caller — so a hostile UI payload can't pick its own.
+    let stored = state
+        .repos
+        .identity()?
+        .ok_or(ShellError::Locked)?
+        .verify_indices;
+    let indices: Vec<usize> = if !stored.is_empty() {
+        stored
+    } else {
+        // Legacy rows predate persisted indices: the UI's positions
+        // are the best available (recorded for future re-checks).
+        if indices.is_empty() {
+            return Ok(false);
+        }
+        indices
+    };
+    let ok = id.verify_backup_words(&indices, &words);
+    if ok {
+        state.repos.set_mnemonic_verified(true)?;
     }
-    Ok(all_present)
+    Ok(ok)
 }
 
 /// Restores an identity from a 12-word mnemonic (account recovery).
@@ -95,7 +108,12 @@ pub(crate) async fn identity_restore(
 ) -> ShellResult<String> {
     let identity = Identity::from_phrase(&phrase).map_err(|_| ShellError::BadMnemonic)?;
     let account_id = identity.account_id_hex();
-    state.repos.insert_identity(&identity, true)?;
+    // Fresh challenge positions for the re-verified backup check.
+    let mut rng = rand::thread_rng();
+    let verify_indices: Vec<usize> = rand::seq::index::sample(&mut rng, 12, 3).into_vec();
+    state
+        .repos
+        .insert_identity(&identity, true, &verify_indices)?;
     state
         .vault
         .save_mnemonic(&phrase)

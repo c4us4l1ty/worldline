@@ -14,5 +14,6 @@ ALTER TABLE identity_config ADD COLUMN verify_indices TEXT NOT NULL DEFAULT '[]'
 
 CREATE TABLE sync_cursor (
     id INTEGER PRIMARY KEY CHECK(id = 1),
-    cursor TEXT NOT NULL
+    cursor TEXT NOT NULL,
+    op_id TEXT NOT NULL DEFAULT ''
 );

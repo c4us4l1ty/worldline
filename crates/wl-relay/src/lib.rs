@@ -63,9 +63,15 @@ async fn challenge(
     match state.auth.issue_challenge(&req.public_key) {
         Ok((nonce, expires_at)) => {
             // Register the account on first challenge (public key =
-            // account id; zero personal data).
+            // account id; zero personal data). The store enforces a
+            // registration cap (unauthenticated DoS guard).
             if let Err(e) = state.blobs.register_account(&req.public_key) {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                return match e {
+                    store::StoreError::AccountQuota => {
+                        err(StatusCode::TOO_MANY_REQUESTS, "account quota exceeded")
+                    }
+                    other => err(StatusCode::INTERNAL_SERVER_ERROR, &other.to_string()),
+                };
             }
             (
                 StatusCode::OK,
@@ -74,6 +80,9 @@ async fn challenge(
                 .into_response()
         }
         Err(AuthError::BadPublicKey) => err(StatusCode::BAD_REQUEST, "invalid public key"),
+        Err(AuthError::RateLimited) => {
+            err(StatusCode::TOO_MANY_REQUESTS, "too many challenge requests")
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -161,9 +170,14 @@ async fn push(
         });
     }
     match state.blobs.insert_ops(&ops) {
-        Ok(accepted) => {
-            (StatusCode::OK, Json(wl_protocol::PushResponse { accepted })).into_response()
-        }
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(wl_protocol::PushResponse {
+                accepted: outcome.accepted,
+                duplicates: outcome.duplicates,
+            }),
+        )
+            .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -178,7 +192,10 @@ async fn pull(
         Err(resp) => return resp,
     };
     let limit = req.limit.clamp(1, PULL_HARD_CAP);
-    match state.blobs.pull_ops(&account, &req.since_hlc, limit) {
+    match state
+        .blobs
+        .pull_ops(&account, &req.since_hlc, &req.since_op_id, limit)
+    {
         Ok(stored) => {
             let exhausted = (stored.len() as u32) < limit;
             let ops: Vec<wl_protocol::PushOp> = stored
@@ -191,15 +208,19 @@ async fn pull(
                     sealed_b64: base64::engine::general_purpose::STANDARD.encode(&o.sealed),
                 })
                 .collect();
-            let next_cursor = stored
-                .last()
-                .map(|o| o.hlc.clone())
-                .unwrap_or_else(|| req.since_hlc.clone());
+            // Composite cursor: (hlc, operation_id) of the last op.
+            // Same-HLC ties are advanced by the op id, so no op is
+            // unreachable no matter how many share a timestamp.
+            let (next_cursor, next_op_id) = match stored.last() {
+                Some(o) => (o.hlc.clone(), o.operation_id.clone()),
+                None => (req.since_hlc.clone(), req.since_op_id.clone()),
+            };
             (
                 StatusCode::OK,
                 Json(wl_protocol::PullResponse {
                     ops,
                     next_cursor,
+                    next_op_id,
                     exhausted,
                 }),
             )

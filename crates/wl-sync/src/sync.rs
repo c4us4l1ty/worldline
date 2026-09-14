@@ -4,7 +4,7 @@
 use wl_core::crypto::aead::{self, Sealed};
 use wl_core::crypto::identity::Identity;
 use wl_core::hlc::{Hlc, HlcTimestamp};
-use wl_core::store::repo::{OutboxOp, Repos};
+use wl_core::store::repo::Repos;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -41,9 +41,13 @@ pub struct SyncStats {
 /// Runs one push+pull cycle against the relay.
 ///
 /// Push: drains all pending outbox ops (encrypted at enqueue time —
-/// we only re-encode to base64 for the wire). Pull: fetches ops after
-/// the local cursor, decrypts, applies via the CRDT merge, records
-/// them in `crdt_applied` for idempotence.
+/// we only re-encode to base64 for the wire). Both `accepted` AND
+/// `duplicates` from the relay mark ops pushed: a push that landed
+/// server-side but whose response was lost must drain on the retry,
+/// not wedge the op pending forever. Pull: fetches ops after the
+/// persisted `(hlc, op_id)` cursor, decrypts, applies via LWW
+/// arbitration, records them in `crdt_applied` for idempotence, and
+/// persists the new cursor before returning.
 pub fn sync_cycle<T: Transport>(
     repos: &Repos,
     identity: &Identity,
@@ -59,7 +63,7 @@ pub fn sync_cycle<T: Transport>(
     if !pending.is_empty() {
         let ops: Vec<wl_protocol::PushOp> = pending
             .iter()
-            .map(|o: &OutboxOp| wl_protocol::PushOp {
+            .map(|o: &wl_core::store::repo::OutboxOp| wl_protocol::PushOp {
                 operation_id: o.operation_id.clone(),
                 hlc: o.hlc_timestamp.to_string(),
                 table: o.table_name.clone(),
@@ -77,15 +81,21 @@ pub fn sync_cycle<T: Transport>(
             .map_err(SyncError::Transport)?;
         let resp: wl_protocol::PushResponse =
             serde_json::from_str(&resp_text).map_err(|e| SyncError::Protocol(e.to_string()))?;
-        repos.mark_outbox_pushed(&resp.accepted)?;
-        pushed = resp.accepted.len();
+        // Accepted + duplicates = everything the relay now durably
+        // holds from this batch. Marking only `accepted` would strand
+        // ops whose earlier push response was lost.
+        let mut drained = resp.accepted;
+        drained.extend(resp.duplicates.iter().cloned());
+        repos.mark_outbox_pushed(&drained)?;
+        pushed = drained.len();
     }
 
     // ---- Pull ----
-    let mut cursor = current_cursor(repos)?;
+    let (mut cursor_hlc, mut cursor_op) = current_cursor(repos)?;
     loop {
         let body = serde_json::to_value(wl_protocol::PullRequest {
-            since_hlc: cursor.clone(),
+            since_hlc: cursor_hlc.clone(),
+            since_op_id: cursor_op.clone(),
             limit: batch_limit as u32,
         })
         .map_err(|e| SyncError::Protocol(e.to_string()))?;
@@ -124,7 +134,11 @@ pub fn sync_cycle<T: Transport>(
             applied += 1;
         }
         pulled += resp.ops.len();
-        cursor = resp.next_cursor.clone();
+        cursor_hlc = resp.next_cursor.clone();
+        cursor_op = resp.next_op_id.clone();
+        // Persist incrementally so a crash mid-cycle never re-pulls
+        // from "" (and never skips batches already applied).
+        save_cursor(repos, &cursor_hlc, &cursor_op)?;
         if resp.exhausted || resp.ops.is_empty() {
             break;
         }
@@ -134,21 +148,24 @@ pub fn sync_cycle<T: Transport>(
         pushed,
         pulled,
         applied,
-        cursor,
+        cursor: cursor_hlc,
     })
 }
 
-/// Applies a merged CRDT op to the local SQLite tables. The mapping is
-/// table-aware per the CRDT registry; unknown rows are upserted
-/// generically into their table via full-field JSON.
+/// Applies a remote CRDT op to the local SQLite tables under LWW
+/// arbitration: each upsert is guarded by `hlc_timestamp < op.ts`, so
+/// an op older than the row's current state is ignored (convergent on
+/// every delivery order, matching the in-memory `TableState` contract).
+/// The op is still marked applied — stale ops must not be re-fetched
+/// or re-arbitrated forever.
 fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncError> {
     use wl_core::crdt::CrdtTable;
     let Some(table) = CrdtTable::from_str(&op.table) else {
         return Ok(()); // unknown table: ignore deterministically
     };
     // The relay only stores ops the owner encrypted; all fields are
-    // ours. Direct SQL upsert per table keeps merge explicit and
-    // deterministic.
+    // ours. Guarded upserts per table keep merge explicit and
+    // deterministic; the guard IS the LWW check.
     let f = op
         .fields
         .as_ref()
@@ -163,7 +180,8 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
             conn.execute(
                 "INSERT INTO goals (id,title,description,target_date,status,hlc_timestamp)
                  VALUES (?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(id) DO UPDATE SET title=?2,description=?3,target_date=?4,status=?5,hlc_timestamp=?6",
+                 ON CONFLICT(id) DO UPDATE SET title=?2,description=?3,target_date=?4,status=?5,hlc_timestamp=?6
+                 WHERE goals.hlc_timestamp < ?6",
                 rusqlite::params![
                     op.record_id, get("title"), get("description"), get("target_date"),
                     get("status").unwrap_or("active".into()), ts_s
@@ -174,7 +192,8 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
             conn.execute(
                 "INSERT INTO milestones (id,goal_id,title,description,order_index,status,hlc_timestamp)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(id) DO UPDATE SET goal_id=?2,title=?3,description=?4,order_index=?5,status=?6,hlc_timestamp=?7",
+                 ON CONFLICT(id) DO UPDATE SET goal_id=?2,title=?3,description=?4,order_index=?5,status=?6,hlc_timestamp=?7
+                 WHERE milestones.hlc_timestamp < ?7",
                 rusqlite::params![
                     op.record_id, get("goal_id"), get("title"), get("description"),
                     f["order_index"].as_i64().unwrap_or(0),
@@ -189,7 +208,8 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                  ON CONFLICT(id) DO UPDATE SET milestone_id=?2,title=?3,execution_context=?4,
                     estimated_minutes=?5,progressive_step=?6,progressive_total=?7,state=?8,
-                    scheduled_for_date=?9,hlc_timestamp=?10",
+                    scheduled_for_date=?9,hlc_timestamp=?10
+                 WHERE directives.hlc_timestamp < ?10",
                 rusqlite::params![
                     op.record_id,
                     get("milestone_id"),
@@ -207,13 +227,14 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
         CrdtTable::DirectivePhases => {
             let step = f["step"].as_i64().unwrap_or(0);
             conn.execute(
-                "INSERT INTO directive_phases (directive_id,step,title,instruction,minutes,state)
-                 VALUES (?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(directive_id,step) DO UPDATE SET title=?3,instruction=?4,minutes=?5,state=?6",
+                "INSERT INTO directive_phases (directive_id,step,title,instruction,minutes,state,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(directive_id,step) DO UPDATE SET title=?3,instruction=?4,minutes=?5,state=?6,hlc_timestamp=?7
+                 WHERE directive_phases.hlc_timestamp < ?7",
                 rusqlite::params![
                     op.record_id, step, get("title"), get("instruction"),
                     f["minutes"].as_i64().unwrap_or(0),
-                    get("state").unwrap_or("pending".into())
+                    get("state").unwrap_or("pending".into()), ts_s
                 ],
             )?;
         }
@@ -221,7 +242,8 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
             conn.execute(
                 "INSERT INTO check_ins (id,date,outcome,note,hlc_timestamp)
                  VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(id) DO UPDATE SET date=?2,outcome=?3,note=?4,hlc_timestamp=?5",
+                 ON CONFLICT(id) DO UPDATE SET date=?2,outcome=?3,note=?4,hlc_timestamp=?5
+                 WHERE check_ins.hlc_timestamp < ?5",
                 rusqlite::params![op.record_id, get("date"), get("outcome"), get("note"), ts_s],
             )?;
         }
@@ -229,7 +251,8 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
             conn.execute(
                 "INSERT INTO bailouts (id,directive_id,reason,note,hlc_timestamp)
                  VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(id) DO UPDATE SET directive_id=?2,reason=?3,note=?4,hlc_timestamp=?5",
+                 ON CONFLICT(id) DO UPDATE SET directive_id=?2,reason=?3,note=?4,hlc_timestamp=?5
+                 WHERE bailouts.hlc_timestamp < ?5",
                 rusqlite::params![
                     op.record_id,
                     get("directive_id"),
@@ -255,34 +278,31 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
     Ok(())
 }
 
-/// Tracks the pull cursor across restarts (stored in app_settings-adjacent
-/// table row; we reuse `hlc_clock` id=2 slot for the cursor).
-fn current_cursor(repos: &Repos) -> Result<String, SyncError> {
+/// Reads the persisted pull cursor `(hlc, op_id)` ("" / "" = start).
+fn current_cursor(repos: &Repos) -> Result<(String, String), SyncError> {
     let conn = repos.conn.lock().unwrap();
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS sync_cursor (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL)",
-        [],
-    )?;
-    let cursor: Option<String> = conn
-        .query_row("SELECT cursor FROM sync_cursor WHERE id = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap_or(None);
-    Ok(cursor.unwrap_or_default())
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT cursor, op_id FROM sync_cursor WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.unwrap_or_default())
 }
 
-/// Persists the pull cursor (called by the shell after each cycle;
-/// also tested).
-pub fn save_cursor(repos: &Repos, cursor: &str) -> Result<(), SyncError> {
+/// Persists the pull cursor (idempotent; called by `sync_cycle`
+/// itself so the shell cannot forget).
+pub fn save_cursor(
+    repos: &Repos,
+    cursor: &str,
+    op_id: &str,
+) -> Result<(), SyncError> {
     let conn = repos.conn.lock().unwrap();
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS sync_cursor (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL)",
-        [],
-    )?;
-    conn.execute(
-        "INSERT INTO sync_cursor (id, cursor) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET cursor=?1",
-        [cursor],
+        "INSERT INTO sync_cursor (id, cursor, op_id) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET cursor=?1, op_id=?2",
+        rusqlite::params![cursor, op_id],
     )?;
     Ok(())
 }
@@ -292,3 +312,6 @@ pub fn observe_remote(_repos: &Repos, remote: &HlcTimestamp) -> HlcTimestamp {
     let hlc = Hlc::new();
     hlc.observe(remote, 0)
 }
+
+/// `Option` extension used by [`current_cursor`].
+use rusqlite::OptionalExtension;

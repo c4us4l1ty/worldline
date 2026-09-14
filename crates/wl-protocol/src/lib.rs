@@ -74,8 +74,13 @@ pub struct PushRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PushResponse {
-    /// Operation ids accepted (deduped: re-push is idempotent).
+    /// Operation ids newly accepted (deduped: re-push is idempotent).
     pub accepted: Vec<String>,
+    /// Operation ids the relay already held (idempotent re-push).
+    /// A push whose response was lost leaves ops pending client-side;
+    /// the duplicates list lets the outbox drain them on the retry.
+    #[serde(default)]
+    pub duplicates: Vec<String>,
 }
 
 /// POST /sync/pull — pull ops strictly after an HLC cursor.

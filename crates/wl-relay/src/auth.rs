@@ -159,23 +159,25 @@ impl AuthState {
     /// accumulate stale sessions until some other client challenges.
     pub fn validate(&self, token: &str) -> Result<String, AuthError> {
         let now = now_secs();
-        let (pk, fresh) = {
+        let pk = {
             let mut sessions = self.sessions.lock().expect("auth mutex");
-            match sessions.get_mut(token) {
+            match sessions.get(token).cloned() {
                 Some((pk, exp)) => {
-                    if *exp < now {
+                    if exp < now {
+                        // Remove the dead row on sight: pull-only clients
+                        // must not accumulate expired sessions.
                         sessions.remove(token);
-                        (pk.clone(), false)
+                        None
                     } else {
-                        (pk.clone(), true)
+                        Some(pk)
                     }
                 }
-                None => return Err(AuthError::BadToken),
+                None => None,
             }
         };
-        if !fresh {
+        let Some(pk) = pk else {
             return Err(AuthError::BadToken);
-        }
+        };
         // Throttled sweep: amortized O(1) per validate call.
         if self.validate_calls.fetch_add(1, Ordering::Relaxed) % VALIDATE_GC_INTERVAL
             == VALIDATE_GC_INTERVAL - 1
