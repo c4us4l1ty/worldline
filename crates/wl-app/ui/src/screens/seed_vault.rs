@@ -104,9 +104,11 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
             }
             #[derive(serde::Serialize)]
             struct V {
+                indices: Vec<usize>,
                 words: Vec<String>,
             }
             let payload = V {
+                indices: ch.clone(),
                 words: words.clone(),
             };
             let verified: bool = invoke::<bool>("identity_verify_backup", payload)

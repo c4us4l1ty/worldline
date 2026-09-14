@@ -32,19 +32,19 @@ fn repo_with_two_phase_directive() -> (Repos, String) {
     (r, d.id)
 }
 
-/// Finding: HLC canonical text encoding does NOT sort like the numeric
-/// HLC order once the counter crosses a digit-width boundary (9→10,
-/// 99→100, …). The relay persists/compares/orders `hlc` as TEXT
-/// (`WHERE hlc > ?`, `ORDER BY hlc`), so pull delivery order diverges
-/// from the CRDT's numeric arbitration order.
+/// FIXED (was: HLC text order inverted at counter digit boundaries).
+/// The canonical encoding is now FIXED-WIDTH (`pt(20).ctr(5).dev(5)`,
+/// zero-padded), so every TEXT comparison — relay `WHERE hlc > ?`,
+/// `ORDER BY hlc`, client LWW guards — sorts identically to numeric
+/// HLC order. This test locks the regression.
 #[test]
 fn defect_hlc_text_order_is_not_numeric_order() {
     let numerically_newer = HlcTimestamp::parse("9000000000000001.10.1").unwrap();
     let numerically_older = HlcTimestamp::parse("9000000000000001.2.2").unwrap();
     assert!(numerically_newer > numerically_older);
     assert!(
-        numerically_newer.to_string() < numerically_older.to_string(),
-        "lexicographic order inverts the numeric order (\"10\" < \"2\")"
+        numerically_newer.to_string() > numerically_older.to_string(),
+        "text order must now MATCH numeric order — fixed-width encoding regressed"
     );
 }
 
@@ -198,18 +198,13 @@ fn defect_outbox_ordering_not_deterministic_within_same_ms() {
     )
     .unwrap();
     // Two ops enqueued within the same wall millisecond.
-    let mut a = None;
-    let mut b = None;
     loop {
         let x = r.enqueue_outbox(&id, "goals", "g1", &serde_json::json!({"n": 1}));
         let y = r.enqueue_outbox(&id, "goals", "g2", &serde_json::json!({"n": 2}));
         if x.is_ok() && y.is_ok() {
-            a = Some(x.unwrap());
-            b = Some(y.unwrap());
             break;
         }
     }
-    let _ = (a, b);
     let rows: Vec<(i64, String)> = r
         .conn
         .lock()

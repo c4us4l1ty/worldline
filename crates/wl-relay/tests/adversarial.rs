@@ -39,42 +39,53 @@ async fn body_text(resp: axum::http::Response<Body>) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-/// Finding: unlimited unauthenticated account registration. Anyone can
-/// `POST /auth/challenge {"public_key": any-64-hex}` and mint unlimited
-/// account rows + challenge map entries. Challenges live 120 s, but
-/// ACCOUNT ROWS are never GC'd: a trivial loop fills the relay's
-/// accounts table (storage exhaustion, zero auth required).
+/// FIXED (was: unbounded unauthenticated account registration).
+/// Account registration is now capped (`AccountQuota`): minting rows
+/// requires no auth, so the cap is the storage-exhaustion bound. At
+/// the HTTP layer the flood gets 429s past the cap.
 #[tokio::test]
 async fn defect_unbounded_unauthenticated_account_registration() {
-    let app = relay_app();
-    for i in 0..1_000 {
-        let pk = format!("{:064x}", i);
-        let resp = post(
-            &app,
-            "/auth/challenge",
-            format!("{{\"public_key\":\"{pk}\"}}"),
-            None,
-        )
-        .await;
-        assert_eq!(resp.status(), 200);
-    }
-    // 1_000 rows minted with no authentication and no rate limit.
-    // (Probe directly through the sqlite backend.)
-    let state = wl_relay::AppStateForTest {
-        auth: wl_relay::AuthForTest::new(),
-        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
-    };
+    // Drive registration through the store directly (the HTTP layer
+    // maps AccountQuota → 429; the cap itself lives in the backend).
+    let store = wl_relay::SqliteForTest::open_in_memory().unwrap();
     use wl_relay::store::BlobStore;
-    let probe = wl_relay::SqliteForTest::open_in_memory().unwrap();
-    probe.register_account("aa").ok(); // invalid pk rejected at HTTP, good.
-    assert!(state.blobs.account_exists(&format!("{:064x}", 0)).is_err() == false || true);
+    let mut minted = 0usize;
+    let mut quota_hit = false;
+    for i in 0..20_000i64 {
+        let pk = format!("{:064x}", i);
+        match store.register_account(&pk) {
+            Ok(()) => minted += 1,
+            Err(wl_relay::store::StoreError::AccountQuota) => {
+                quota_hit = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e}"),
+        }
+    }
+    assert!(quota_hit, "registration cap never engaged");
+    assert!(minted <= 10_000, "cap allows {minted} accounts");
+
+    // HTTP surface: over-cap registration is refused (429), not stored.
+    let state = Arc::new(wl_relay::AppStateForTest {
+        auth: wl_relay::AuthForTest::new(),
+        blobs: Box::new(store),
+    });
+    let app = wl_relay::router_for_test(state);
+    let over = format!("{:064x}", 50_000u64);
+    let resp = post(
+        &app,
+        "/auth/challenge",
+        format!("{{\"public_key\":\"{over}\"}}"),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), 429, "over-cap registration must 429");
 }
 
-/// Finding: challenge map is unbounded within the 120 s TTL — no cap on
-/// in-flight challenges per account or globally. A burst of challenge
-/// requests (all unauthenticated, all valid-hex) grows the in-memory
-/// HashMap without limit until the 120 s GC pass. Classic memory-DoS
-/// amplifier: ~200 bytes per row, millions of requests/minute possible.
+/// FIXED (was: challenge map unbounded within the TTL). In-flight
+/// challenges are now capped per account AND globally: a flood of
+/// unauthenticated challenges gets 429s and the in-memory map stays
+/// bounded; legitimate auth + pull keeps working.
 #[tokio::test]
 async fn defect_challenge_flood_grows_state_without_cap() {
     let state = Arc::new(wl_relay::AppStateForTest {
@@ -83,8 +94,10 @@ async fn defect_challenge_flood_grows_state_without_cap() {
     });
     let app = wl_relay::router_for_test(state.clone());
     let pk = format!("{:064x}", 42u64);
-    // Flood: 10_000 unauthenticated challenges, none refused.
-    for _ in 0..10_000 {
+    // Flood: all requests past the per-account cap are refused with 429.
+    let mut ok = 0;
+    let mut limited = 0;
+    for _ in 0..100 {
         let resp = post(
             &app,
             "/auth/challenge",
@@ -92,12 +105,15 @@ async fn defect_challenge_flood_grows_state_without_cap() {
             None,
         )
         .await;
-        assert_eq!(resp.status(), 200);
+        match resp.status().as_u16() {
+            200 => ok += 1,
+            429 => limited += 1,
+            other => panic!("unexpected status {other}"),
+        }
     }
-    // Every one of them minted a live challenge row for 120 s with no
-    // cap — the memory-exhaustion surface. Then prove a full auth+pull
-    // still functions under the flood (relay stays alive, which is
-    // what makes this a pure resource amplifier rather than a crash).
+    assert!(ok <= wl_relay::auth::MAX_CHALLENGES_PER_ACCOUNT);
+    assert!(limited > 0, "flood never hit the per-account cap");
+    // Then prove a full auth+pull still functions (legitimate client).
     use ed25519_dalek::Signer;
     let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
     let real_pk = hex::encode(sk.verifying_key().as_bytes());
@@ -129,7 +145,6 @@ async fn defect_challenge_flood_grows_state_without_cap() {
     assert_eq!(v_resp.status(), 200);
     let session: wl_protocol::SessionToken =
         serde_json::from_str(&body_text(v_resp).await).unwrap();
-    // Pull with an authed session but EMPTY relay store: fine.
     let resp = post(
         &app,
         "/sync/pull",
@@ -142,12 +157,12 @@ async fn defect_challenge_flood_grows_state_without_cap() {
     assert!(empty.ops.is_empty() && empty.exhausted);
 }
 
-/// Finding: pull cursor uses strict `hlc > since` TEXT comparison, so
-/// ops sharing an hlc with the cursor are skipped; additionally
-/// `next_cursor` is set to the LAST OP IN THE BATCH's hlc — when ops
-/// share that hlc text, the next page silently skips the stragglers.
-/// Combined with the lexicographic text ordering, pagination can skip
-/// ops permanently (silent data loss on pull).
+/// FIXED (was: `hlc > since` strictly skipped same-HLC ops, and
+/// pagination set next_cursor to the last op's hlc — stragglers
+/// sharing that hlc were permanently unreachable). The cursor is now
+/// the COMPOSITE (hlc, operation_id): same-HLC ties advance via the
+/// op id, so paginating through N ops that share ONE hlc reaches all
+/// of them.
 #[tokio::test]
 async fn defect_pull_pagination_can_skip_ops_sharing_hlc() {
     let state = Arc::new(wl_relay::AppStateForTest {
@@ -155,36 +170,20 @@ async fn defect_pull_pagination_can_skip_ops_sharing_hlc() {
         blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
     });
     let app = wl_relay::router_for_test(state.clone());
-    use wl_relay::store::BlobStore;
-
-    let pk = format!("{:064x}", 7u64);
-    state.blobs.register_account(&pk).unwrap();
-    let shared_hlc = "1000.5.1";
-    for i in 0..5 {
-        state
-            .blobs
-            .insert_ops(&[wl_relay::store::StoredOp {
-                operation_id: format!("op-{i}"),
-                account: pk.clone(),
-                hlc: shared_hlc.to_string(),
-                table: "goals".into(),
-                record_id: format!("g-{i}"),
-                sealed: vec![1u8; 40],
-            }])
-            .unwrap();
-    }
-    // All 5 share the SAME hlc text. A pull with limit 2 returns 2,
-    // sets next_cursor to that same hlc — and the next pull
-    // (`hlc > cursor`) returns NOTHING: 3 ops permanently unreachable.
     use ed25519_dalek::Signer;
+
     let sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
     let real_pk = hex::encode(sk.verifying_key().as_bytes());
-    // Seed 5 same-hlc ops for the REAL account.
+    // 5 ops sharing the SAME hlc text for the real account.
+    let shared_hlc = "00000000000000001000.00005.00001";
+    let mut expected = std::collections::HashSet::new();
     for i in 0..5 {
+        let op_id = format!("real-op-{i}");
+        expected.insert(op_id.clone());
         state
             .blobs
             .insert_ops(&[wl_relay::store::StoredOp {
-                operation_id: format!("real-op-{i}"),
+                operation_id: op_id,
                 account: real_pk.clone(),
                 hlc: shared_hlc.to_string(),
                 table: "goals".into(),
@@ -193,8 +192,8 @@ async fn defect_pull_pagination_can_skip_ops_sharing_hlc() {
             }])
             .unwrap();
     }
-    // Handshake through the app's own AuthState (the only one the
-    // router's bearer_account consults).
+
+    // Handshake through the app's own AuthState.
     let challenge_resp = post(
         &app,
         "/auth/challenge",
@@ -225,77 +224,70 @@ async fn defect_pull_pagination_can_skip_ops_sharing_hlc() {
     let session: wl_protocol::SessionToken =
         serde_json::from_str(&body_text(verify_resp).await).unwrap();
 
-    // Page 1: limit 2 → 2 ops, next_cursor = shared hlc.
-    let resp = post(
-        &app,
-        "/sync/pull",
-        serde_json::json!({"since_hlc": "", "limit": 2}).to_string(),
-        Some(&session.token),
-    )
-    .await;
-    assert_eq!(resp.status(), 200);
-    let page1: wl_protocol::PullResponse = serde_json::from_str(&body_text(resp).await).unwrap();
-    assert_eq!(page1.ops.len(), 2);
-    assert!(!page1.exhausted);
-    assert_eq!(page1.next_cursor, shared_hlc);
-
-    // Page 2: since_hlc = shared_hlc → ZERO ops. The remaining 3 ops
-    // are unreachable: silent permanent data loss via pagination.
-    let resp = post(
-        &app,
-        "/sync/pull",
-        serde_json::json!({"since_hlc": page1.next_cursor, "limit": 2}).to_string(),
-        Some(&session.token),
-    )
-    .await;
-    assert_eq!(resp.status(), 200);
-    let page2: wl_protocol::PullResponse = serde_json::from_str(&body_text(resp).await).unwrap();
+    // Page through ALL 5 same-hlc ops with limit 2 per page.
+    let mut got = std::collections::HashSet::new();
+    let (mut cursor, mut op_id) = (String::new(), String::new());
+    for page in 0..10 {
+        let resp = post(
+            &app,
+            "/sync/pull",
+            serde_json::json!({"since_hlc": cursor, "since_op_id": op_id, "limit": 2}).to_string(),
+            Some(&session.token),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let pr: wl_protocol::PullResponse = serde_json::from_str(&body_text(resp).await).unwrap();
+        for op in &pr.ops {
+            assert!(got.insert(op.operation_id.clone()), "duplicate delivery");
+        }
+        cursor = pr.next_cursor.clone();
+        op_id = pr.next_op_id.clone();
+        if pr.exhausted || pr.ops.is_empty() {
+            break;
+        }
+        assert!(page < 4, "pagination did not terminate");
+    }
     assert_eq!(
-        page2.ops.len(),
-        0,
-        "DEFECT: 3 ops sharing the cursor hlc are unreachable — pagination loses them forever"
+        got, expected,
+        "all same-hlc ops must be reachable via the composite cursor"
     );
-    assert!(page2.exhausted);
 }
 
-/// Finding: sessions are never GC'd during their 1h TTL and there is
-/// no logout/revocation. Compounding: `validate` does not remove
-/// expired sessions (comment says "caller may GC") and NO caller does
-/// (gc only runs inside issue_challenge). Stale sessions accumulate
-/// until the next challenge is issued anywhere.
+/// FIXED (was: validate() never removed expired sessions and no GC
+/// ran under pull-only traffic). validate() now removes the expired
+/// row on sight and a throttled sweep runs periodically — a pull-only
+/// client can no longer accumulate dead session rows. (TTL-based
+/// expiry is covered in auth.rs `validate_replaces_expired_sessions_on_sight`.)
 #[tokio::test]
 async fn defect_sessions_gc_never_invoked_by_validate() {
-    // Structural: validate() returns Err without removing the row; gc()
-    // is only called in issue_challenge. A workload of pull-only
-    // traffic (long-lived client with cached token) never triggers GC.
     let auth = wl_relay::AuthForTest::new();
-    // Mint a session, expire it by... TTL is 1h — simulate the stale
-    // row directly: the observable defect is that validate() failure
-    // leaves the row. We assert gc() is not wired into validate by
-    // checking code paths: mints then validates-unknown token → row
-    // stays. We can't fast-forward time; assert the API surface hole.
-    assert!(auth.validate("nonexistent").is_err()); // row never removed (none existed)
-                                                    // (The accumulation is unbounded in the sessions map until any
-                                                    //  challenge is issued — memory grows with every expired session.)
-    assert!(true);
+    // Unknown token: error, nothing to remove.
+    assert!(auth.validate("nonexistent").is_err());
+    // Live session validates and stays until expiry.
+    use ed25519_dalek::Signer;
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let pk = hex::encode(sk.verifying_key().as_bytes());
+    let (nonce, expires) = auth.issue_challenge(&pk).unwrap();
+    let payload = wl_protocol::challenge_signing_payload(&nonce, expires);
+    let sig = sk.sign(&payload).to_bytes();
+    let (token, _) = auth.verify(&pk, &nonce, expires, &sig).unwrap();
+    assert_eq!(auth.validate(&token).unwrap(), pk);
+    // Force-expire, validate again: the row is REMOVED (not retained).
+    auth.expire_session_for_test(&token);
+    assert!(auth.validate(&token).is_err());
+    assert!(!auth.session_row_exists(&token));
 }
 
-/// Finding: `push` with a HUGE ops array (no length cap on PushRequest)
-/// buffers the entire JSON body in memory (axum default body limit is
-/// 2 MB via DefaultBodyLimit — OK) BUT the per-op `sealed` decode then
-/// Vec-allocs each; combined with `insert_ops` holding ONE mutex over
-/// a transaction spanning ALL ops, a 2 MB push of 10k tiny ops holds
-/// the relay's single sqlite write lock for the whole batch — pull
-/// traffic stalls (lock convoy / latency amplification).
+/// KNOWN-LIMITATION (not fixed in this pass): `insert_ops` still holds
+/// ONE transaction (and the store's single write mutex) across the
+/// whole batch — a large push briefly convoys pulls. Recorded here as
+/// the characterization guard; chunked commits are future work (P4).
 #[tokio::test]
 async fn defect_push_holds_global_mutex_across_whole_batch() {
     let state = Arc::new(wl_relay::AppStateForTest {
         auth: wl_relay::AuthForTest::new(),
         blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
     });
-    use wl_relay::store::BlobStore;
-    // Assert the structural fact: insert_ops processes the full batch
-    // in ONE transaction (single write lock). Timed probe:
     let ops: Vec<_> = (0..20_000)
         .map(|i| wl_relay::store::StoredOp {
             operation_id: format!("op-{i}"),
@@ -307,9 +299,8 @@ async fn defect_push_holds_global_mutex_across_whole_batch() {
         })
         .collect();
     let t0 = std::time::Instant::now();
-    state.blobs.insert_ops(&ops).unwrap();
+    let outcome = state.blobs.insert_ops(&ops).unwrap();
     let elapsed = t0.elapsed();
-    // 20k ops in one transaction under one mutex — record the timing
-    // as the convoy evidence (this is the same path a 2 MB HTTP push takes).
+    assert_eq!(outcome.accepted.len(), 20_000);
     assert!(elapsed.as_millis() > 0);
 }

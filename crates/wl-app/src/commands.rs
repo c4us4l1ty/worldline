@@ -157,7 +157,16 @@ pub(crate) async fn identity_unlock(
     let identity = Identity::from_phrase(phrase.as_str()).map_err(|_| ShellError::BadMnemonic)?;
     let account_id = identity.account_id_hex();
     // Upsert: the public half may already exist from a previous boot.
-    state.repos.insert_identity(&identity, true)?;
+    // Keep the persisted challenge positions (verified=true only when
+    // the onboarding verification actually happened).
+    let verified = state
+        .repos
+        .identity()?
+        .map(|c| c.bip39_mnemonic_verified)
+        .unwrap_or(true);
+    state
+        .repos
+        .insert_identity(&identity, verified, &[])?;
     *state.identity.lock().unwrap() = Some(identity);
     Ok(account_id)
 }
@@ -569,6 +578,14 @@ pub(crate) async fn settings_save(
     state: State<'_, std::sync::Arc<AppState>>,
     settings: AppSettings,
 ) -> ShellResult<()> {
+    // SSRF guard: the relay URL reaches format!("{base}{path}") with a
+    // bearer token attached — refuse anything but a bare http(s) base
+    // (no credentials/query/fragment, no link-local metadata hosts).
+    if let Some(url) = settings.relay_url.as_deref() {
+        if !url.trim().is_empty() {
+            wl_core::net::validate_relay_url(url).map_err(ShellError::Invalid)?;
+        }
+    }
     let hotkey_changed = state
         .repos
         .settings()
@@ -587,7 +604,7 @@ pub(crate) async fn settings_save(
     // any cached token (it belongs to a different server/account view).
     let mut url = state.relay_url.lock().unwrap();
     if *url != settings.relay_url {
-        *url = settings.relay_url;
+        *url = settings.relay_url.clone();
         *state.relay_token.lock().unwrap() = None;
     }
     Ok(())
@@ -651,6 +668,7 @@ pub(crate) async fn relay_authenticate(
             .unwrap()
             .clone()
             .ok_or(ShellError::NoRelay)?;
+        let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
         let session = shared.with_identity(|identity| relay::handshake(&base, identity))?;
         let account_id = shared.with_identity(|id| Ok(id.account_id_hex()))?;
         *shared.relay_token.lock().unwrap() = Some(session.token.clone());
@@ -708,6 +726,7 @@ pub(crate) async fn sync_now(
             .unwrap()
             .clone()
             .ok_or(ShellError::NoRelay)?;
+        let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
         let token = ensure_token(&shared, &base)?;
         let stats = match run_cycle(&shared, &base, &token) {
             // Session expired server-side (1h TTL) or relay restarted and

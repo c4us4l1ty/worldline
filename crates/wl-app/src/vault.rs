@@ -46,6 +46,11 @@ impl Vault {
         let stronghold =
             tauri_plugin_stronghold::stronghold::Stronghold::new(&snapshot, key.to_vec())
                 .map_err(|e| VaultError::Stronghold(e.to_string()))?;
+        // Stronghold creates the snapshot with default umask; tighten
+        // it to owner-only — the encrypted blob sits next to its key
+        // file, and one of the two being world-readable undoes the
+        // other's protection on shared systems.
+        restrict_permissions(&snapshot);
         Ok(Self { stronghold })
     }
 
@@ -189,6 +194,22 @@ fn vault_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     getrandom::getrandom(&mut key).map_err(|e| VaultError::Stronghold(e.to_string()))?;
     write_private(&path, &key)?;
     Ok(Zeroizing::new(key))
+}
+
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perm = meta.permissions();
+        perm.set_mode(0o600);
+        let _ = std::fs::set_permissions(path, perm);
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) {
+    // No Unix permission bits; the app-data dir is user-private on
+    // these platforms.
 }
 
 #[cfg(unix)]

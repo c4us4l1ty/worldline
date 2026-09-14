@@ -50,7 +50,7 @@ const VALIDATE_GC_INTERVAL: u64 = 128;
 /// Sessions: token → (public_key, expires_at).
 pub struct AuthState {
     challenges: Mutex<HashMap<String, (String, i64)>>,
-    pub(crate) sessions: Mutex<HashMap<String, (String, i64)>>,
+    sessions: Mutex<HashMap<String, (String, i64)>>,
     /// Monotonic counter for session token uniqueness.
     counter: AtomicU64,
     validate_calls: AtomicU64,
@@ -204,6 +204,24 @@ impl AuthState {
             .expect("auth mutex")
             .retain(|_, (_, e)| *e > now);
     }
+
+    /// Test support: force a session row to expired (TTLs are real
+    /// wall-clock 1h; tests need the row dead NOW).
+    #[doc(hidden)]
+    pub fn expire_session_for_test(&self, token: &str) {
+        if let Some(entry) = self.sessions.lock().expect("auth mutex").get_mut(token) {
+            entry.1 = 0;
+        }
+    }
+
+    /// Test support: does a session row still exist (expired or not)?
+    #[doc(hidden)]
+    pub fn session_row_exists(&self, token: &str) -> bool {
+        self.sessions
+            .lock()
+            .expect("auth mutex")
+            .contains_key(token)
+    }
 }
 
 impl Default for AuthState {
@@ -299,7 +317,8 @@ mod tests {
             Err(AuthError::RateLimited)
         ));
         // A different (legitimate) key is unaffected.
-        let (other, _) = fresh_keypair();
+        let sk = SigningKey::from_bytes(&[11u8; 32]);
+        let other = hex::encode(sk.verifying_key().as_bytes());
         assert!(auth.issue_challenge(&other).is_ok());
     }
 
@@ -334,12 +353,9 @@ mod tests {
         let sig = sk.sign(&payload).to_bytes();
         let (token, _) = auth.verify(&pk, &nonce, expires, &sig).unwrap();
         // Force-expire the row directly (TTL is 1h; tests can't wait).
-        auth.sessions
-            .lock()
-            .unwrap()
-            .insert(token.clone(), (pk.clone(), 0));
+        auth.expire_session_for_test(&token);
         assert!(matches!(auth.validate(&token), Err(AuthError::BadToken)));
         // The row is gone now — the map no longer holds it.
-        assert!(!auth.sessions.lock().unwrap().contains_key(&token));
+        assert!(!auth.session_row_exists(&token));
     }
 }
