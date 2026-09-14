@@ -273,6 +273,54 @@ mod tests {
     }
 
     #[test]
+    fn fixed_width_text_sorts_like_numeric_order() {
+        // Digit-boundary pairs that unpadded decimal inverted.
+        let pairs = [
+            ("9000000000000001.10.1", "9000000000000001.2.2"),
+            ("100000000000000000.100.1", "100000000000000000.99.1"),
+            ("99999999999999999.65535.1", "99999999999999999.9999.2"),
+        ];
+        for (hi, lo) in pairs {
+            let a = HlcTimestamp::parse(hi).unwrap();
+            let b = HlcTimestamp::parse(lo).unwrap();
+            assert!(a > b);
+            assert!(
+                a.to_string() > b.to_string(),
+                "text order must match numeric order: {} vs {}",
+                a,
+                b
+            );
+        }
+        // Fixed widths are exactly as documented.
+        let t = HlcTimestamp::parse("1.2.3").unwrap();
+        assert_eq!(t.to_string(), "00000000000000000001.00002.00003");
+        // All encodings sort as a prefix-free, fixed-width key space:
+        let samples = [
+            HlcTimestamp {
+                physical: 0,
+                counter: 0,
+                device: 0,
+            },
+            HlcTimestamp {
+                physical: u64::MAX,
+                counter: u16::MAX,
+                device: u16::MAX,
+            },
+            HlcTimestamp {
+                physical: 9,
+                counter: 10,
+                device: 9,
+            },
+        ];
+        let mut texts: Vec<_> = samples.iter().map(|t| t.to_string()).collect();
+        let mut sorted = samples;
+        sorted.sort();
+        texts.sort();
+        let re_sorted: Vec<_> = texts.iter().map(|s| HlcTimestamp::parse(s).unwrap()).collect();
+        assert_eq!(re_sorted, sorted);
+    }
+
+    #[test]
     fn concurrent_devices_converge_ordering() {
         // Two devices ticking independently: whenever pt+ctr collide,
         // device tie-break gives a deterministic global order.
