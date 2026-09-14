@@ -73,7 +73,7 @@ fn wal_mode_file_db() {
 fn identity_persists_public_half_only() {
     let r = setup();
     let id = Identity::generate().unwrap();
-    r.insert_identity(&id, true).unwrap();
+    r.insert_identity(&id, true, &[2, 6, 10]).unwrap();
     let stored = r.identity().unwrap().unwrap();
     assert_eq!(stored.public_key, id.account_id_hex());
     assert!(stored.bip39_mnemonic_verified);

@@ -4,7 +4,10 @@ use super::StoreError;
 
 /// Embedded migration runner (no C API dependency — keeps the crate
 /// free of build-time tooling; migrations are plain SQL files).
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_sync_lww.sql"),
+];
 
 pub fn run(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(

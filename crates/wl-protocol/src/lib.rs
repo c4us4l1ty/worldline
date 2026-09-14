@@ -78,11 +78,18 @@ pub struct PushResponse {
     pub accepted: Vec<String>,
 }
 
-/// GET /sync/pull?since=… — pull ops newer than an HLC cursor.
+/// POST /sync/pull — pull ops strictly after an HLC cursor.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PullRequest {
-    /// Inclusive lower-bound HLC timestamp text; "" = from the beginning.
+    /// Exclusive lower-bound HLC timestamp text; "" = from the beginning.
+    /// Same-HLC ops are disambiguated by the cursor's operation id.
     pub since_hlc: String,
+    /// When `since_hlc` is non-empty: the operation id of the last op
+    /// the caller already holds at exactly `since_hlc` — ops sharing
+    /// the cursor's HLC but sorting after this id are still returned.
+    /// Omitted/empty for a fresh pull.
+    #[serde(default)]
+    pub since_op_id: String,
     /// Max ops returned (server enforces a hard cap too).
     pub limit: u32,
 }
@@ -90,8 +97,11 @@ pub struct PullRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PullResponse {
     pub ops: Vec<PushOp>,
-    /// Cursor to pass as `since_hlc` next time (may equal last op).
+    /// Cursor to pass as `since_hlc` next time (the batch's last op).
     pub next_cursor: String,
+    /// Operation id to pass as `since_op_id` next time (the batch's
+    /// last op id) — disambiguates same-HLC ties.
+    pub next_op_id: String,
     /// true when no further ops exist beyond this batch.
     pub exhausted: bool,
 }
@@ -144,10 +154,18 @@ mod tests {
 
         let pull = PullRequest {
             since_hlc: "9.9.9".into(),
+            since_op_id: "op-9".into(),
             limit: 100,
         };
         let back: PullRequest =
             serde_json::from_str(&serde_json::to_string(&pull).unwrap()).unwrap();
         assert_eq!(back.limit, 100);
+        assert_eq!(back.since_op_id, "op-9");
+        // since_op_id defaults when absent (older clients).
+        let back: PullRequest = serde_json::from_str(
+            &serde_json::json!({"since_hlc": "", "limit": 5}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(back.since_op_id, "");
     }
 }

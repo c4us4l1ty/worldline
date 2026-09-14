@@ -42,18 +42,31 @@ impl Repos {
     // ------------------------------------------------------------------
 
     /// Persists the public identity half after onboarding.
-    pub fn insert_identity(&self, identity: &Identity, verified: bool) -> Result<(), StoreError> {
+    /// `verify_indices`: the 3-word backup-challenge positions, so the
+    /// authoritative re-check stays positional across restarts.
+    pub fn insert_identity(
+        &self,
+        identity: &Identity,
+        verified: bool,
+        verify_indices: &[usize],
+    ) -> Result<(), StoreError> {
         let ts = self.hlc.now(self.device);
         self.conn
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO identity_config (public_key, bip39_mnemonic_verified, hlc_timestamp)
-                 VALUES (?1, ?2, ?3)
+                "INSERT INTO identity_config (public_key, bip39_mnemonic_verified, verify_indices, hlc_timestamp)
+                 VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(public_key) DO UPDATE SET
                     bip39_mnemonic_verified = excluded.bip39_mnemonic_verified,
+                    verify_indices = excluded.verify_indices,
                     hlc_timestamp = excluded.hlc_timestamp",
-                params![identity.account_id_hex(), verified, ts.to_string()],
+                params![
+                    identity.account_id_hex(),
+                    verified,
+                    serde_json::to_string(verify_indices).expect("json indices"),
+                    ts.to_string()
+                ],
             )
             .map_err(StoreError::Sqlite)?;
         Ok(())
@@ -64,19 +77,33 @@ impl Repos {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT public_key, bip39_mnemonic_verified, hlc_timestamp
+                "SELECT public_key, bip39_mnemonic_verified, verify_indices, hlc_timestamp
                  FROM identity_config LIMIT 1",
                 [],
                 |r| {
                     Ok(IdentityConfig {
                         public_key: r.get(0)?,
                         bip39_mnemonic_verified: r.get(1)?,
-                        hlc_timestamp: parse_hlc(&r.get::<_, String>(2)?)?,
+                        verify_indices: serde_json::from_str(
+                            &r.get::<_, String>(2)?,
+                        )
+                        .unwrap_or_default(),
+                        hlc_timestamp: parse_hlc(&r.get::<_, String>(3)?)?,
                     })
                 },
             )
             .optional()
             .map_err(StoreError::Sqlite)
+    }
+
+    /// Persists the backup-challenge verification result.
+    pub fn set_mnemonic_verified(&self, verified: bool) -> Result<(), StoreError> {
+        let ts = self.hlc.now(self.device);
+        self.conn.lock().unwrap().execute(
+            "UPDATE identity_config SET bip39_mnemonic_verified = ?2, hlc_timestamp = ?3",
+            params![verified, ts.to_string()],
+        )?;
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -297,10 +324,11 @@ impl Repos {
             params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, ts.to_string()],
         )?;
         for (i, (pt, pi, pm)) in phases.iter().enumerate() {
+            let ts = self.hlc.now(self.device);
             self.conn.lock().unwrap().execute(
-                "INSERT INTO directive_phases (directive_id, step, title, instruction, minutes, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, (i + 1) as i64, pt, pi, pm, if i == 0 { "active" } else { "pending" }],
+                "INSERT INTO directive_phases (directive_id, step, title, instruction, minutes, state, hlc_timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, (i + 1) as i64, pt, pi, pm, if i == 0 { "active" } else { "pending" }, ts.to_string()],
             )?;
         }
         if identity.is_some() {
@@ -429,15 +457,16 @@ impl Repos {
             .directive(id)?
             .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
         let cur = d.progressive_step;
+        let ts = self.hlc.now(self.device);
         self.conn.lock().unwrap().execute(
-            "UPDATE directive_phases SET state = 'done' WHERE directive_id = ?1 AND step = ?2",
-            params![id, cur],
+            "UPDATE directive_phases SET state = 'done', hlc_timestamp = ?3 WHERE directive_id = ?1 AND step = ?2",
+            params![id, cur, ts.to_string()],
         )?;
         if cur < d.progressive_total {
             let ts = self.hlc.now(self.device);
             self.conn.lock().unwrap().execute(
-                "UPDATE directive_phases SET state = 'active' WHERE directive_id = ?1 AND step = ?2",
-                params![id, cur + 1],
+                "UPDATE directive_phases SET state = 'active', hlc_timestamp = ?3 WHERE directive_id = ?1 AND step = ?2",
+                params![id, cur + 1, ts.to_string()],
             )?;
             self.conn.lock().unwrap().execute(
                 "UPDATE directives SET progressive_step = ?2, hlc_timestamp = ?3 WHERE id = ?1",
@@ -473,7 +502,7 @@ impl Repos {
     ) -> Result<Vec<DirectivePhase>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT directive_id, step, title, instruction, minutes, state
+            "SELECT directive_id, step, title, instruction, minutes, state, hlc_timestamp
              FROM directive_phases WHERE directive_id = ?1 ORDER BY step",
         )?;
         let rows = stmt
@@ -485,10 +514,28 @@ impl Repos {
                     instruction: r.get(3)?,
                     minutes: r.get(4)?,
                     state: PhaseState::from_str(&r.get::<_, String>(5)?).expect("db phase state"),
+                    hlc_timestamp: parse_hlc(&r.get::<_, String>(6)?)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// LWW-guarded phase state write: only applies when `ts` is newer
+    /// than the row's current hlc. Returns `true` when written.
+    pub fn set_phase_state_lww(
+        &self,
+        directive_id: &str,
+        step: i64,
+        state: PhaseState,
+        ts: HlcTimestamp,
+    ) -> Result<bool, StoreError> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE directive_phases SET state = ?3, hlc_timestamp = ?4
+             WHERE directive_id = ?1 AND step = ?2 AND hlc_timestamp < ?4",
+            params![directive_id, step, state.as_str(), ts.to_string()],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Count of completed directives for a milestone (velocity data).

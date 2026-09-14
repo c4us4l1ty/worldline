@@ -37,13 +37,16 @@ pub struct Identity {
     /// Ed25519 signing key (relay auth). Zeroized on drop.
     signing_key: SigningKey,
     /// Symmetric payload-encryption key (E2EE of CRDT payloads).
-    /// Zeroized on drop via the array's Zeroize impl.
-    payload_key: [u8; 32],
+    /// Wrapped in `Zeroizing` — the raw `[u8; 32]` has no drop glue,
+    /// so without this the master payload key lingered in freed heap
+    /// memory on every identity drop (unlock/restore churn).
+    payload_key: Zeroizing<[u8; 32]>,
 }
 
 // ed25519-dalek's `zeroize` feature gives SigningKey a Drop impl
-// that wipes its secret, and Zeroizing<String> wipes the phrase — no
-// manual Drop needed on Identity.
+// that wipes its secret; `Zeroizing<String>` wipes the phrase and
+// `Zeroizing<[u8; 32]>` wipes the payload key — no manual Drop needed
+// on Identity.
 impl fmt::Debug for Identity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Never leak key material through Debug.
@@ -78,7 +81,7 @@ impl Identity {
         // BIP-39 seed = PBKDF2-HMAC-SHA512(mnemonic, "mnemonic"+passphrase, 2048)
         let seed = mnemonic.to_seed_normalized("");
         let signing_key = derive_signing_key(&seed)?;
-        let payload_key = derive_payload_key(&seed);
+        let payload_key = Zeroizing::new(derive_payload_key(&seed));
         Ok(Self {
             phrase: Zeroizing::new(mnemonic.to_string()),
             signing_key,
@@ -109,6 +112,24 @@ impl Identity {
         self.signing_key.sign(challenge).to_bytes()
     }
 
+    /// Positional backup-challenge check: each supplied word must
+    /// equal the phrase word at the corresponding challenge index
+    /// (case-insensitive, trimmed). Membership anywhere in the phrase
+    /// does NOT verify — order is the point of the backup check.
+    pub fn verify_backup_words(&self, indices: &[usize], words: &[String]) -> bool {
+        if indices.len() != words.len() || indices.is_empty() {
+            return false;
+        }
+        let phrase: Vec<&str> = self.phrase.split_whitespace().collect();
+        indices
+            .iter()
+            .zip(words.iter())
+            .all(|(&idx, w)| match phrase.get(idx) {
+                Some(expected) => w.trim().eq_ignore_ascii_case(expected),
+                None => false,
+            })
+    }
+
     /// Raw symmetric payload-encryption key reference (internal).
     pub(crate) fn payload_key(&self) -> &[u8; 32] {
         &self.payload_key
@@ -127,7 +148,6 @@ fn derive_payload_key(seed: &[u8]) -> [u8; 32] {
         .try_into()
         .expect("32-byte OKM")
 }
-
 /// Extract-and-expand HKDF with SHA-256. `salt` is the BIP-39 seed
 /// itself (already high-entropy, so IKM=salt reuse is safe here: the
 /// mnemonic entropy is the secret, PBKDF2 output is the public-ish
@@ -252,6 +272,35 @@ mod tests {
         let dbg = format!("{id:?}");
         assert!(!dbg.contains("legal"));
         assert!(dbg.contains("account_id"));
+    }
+
+    #[test]
+    fn backup_verification_is_positional() {
+        let id = Identity::from_phrase(TEST_PHRASE).unwrap();
+        // Positions 2/6/10 of the test phrase: thank/worth/thank.
+        assert!(id.verify_backup_words(
+            &[2, 6, 10],
+            &["thank".into(), "worth".into(), "thank".into()]
+        ));
+        assert!(id.verify_backup_words(
+            &[2, 6, 10],
+            &[" Thank ".into(), "WORTH".into(), "thank".into()]
+        ));
+        // Right words, WRONG positions → must fail (membership is
+        // not verification).
+        assert!(!id.verify_backup_words(
+            &[2, 6, 10],
+            &["worth".into(), "thank".into(), "worth".into()]
+        ));
+        // Word not in the phrase at all.
+        assert!(!id.verify_backup_words(
+            &[2, 6, 10],
+            &["thank".into(), "worth".into(), "pizza".into()]
+        ));
+        // Out-of-range position.
+        assert!(!id.verify_backup_words(&[12], &["word".into()]));
+        // Count mismatch.
+        assert!(!id.verify_backup_words(&[2, 6], &["thank".into()]));
     }
 
     #[test]

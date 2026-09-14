@@ -13,7 +13,11 @@ pub enum StoreError {
     #[cfg(feature = "postgres")]
     #[error("postgres: {0}")]
     Postgres(#[from] sqlx::Error),
+    /// Relay is at its account cap (unauthenticated registration DoS guard).
+    #[error("account quota exceeded")]
+    AccountQuota,
 }
+
 
 /// One stored relay op row.
 #[derive(Debug, Clone)]
@@ -26,23 +30,42 @@ pub struct StoredOp {
     pub sealed: Vec<u8>, // opaque ciphertext blob
 }
 
+/// Push outcome: which ops the relay newly stored vs. already held.
+#[derive(Debug, Clone, Default)]
+pub struct PushOutcome {
+    /// Newly inserted operation ids.
+    pub accepted: Vec<String>,
+    /// Ids the relay already held (idempotent re-push) — callers use
+    /// both lists to drain their outbox (a lost push response must not
+    /// wedge an op in `pushed=0` forever).
+    pub duplicates: Vec<String>,
+}
+
 /// Storage backend trait.
 pub trait BlobStore: Send + Sync {
     /// Ensures the account's challenge row exists (register on first
-    /// auth challenge). Idempotent.
+    /// auth challenge). Idempotent. Fails with an account-quota error
+    /// when the relay is at its account cap (DoS guard).
     fn register_account(&self, public_key: &str) -> Result<(), StoreError>;
 
     /// Checks the account exists.
     fn account_exists(&self, public_key: &str) -> Result<bool, StoreError>;
 
-    /// Inserts ops; returns the subset accepted (new operation ids —
-    /// duplicates are ignored for idempotence).
-    fn insert_ops(&self, ops: &[StoredOp]) -> Result<Vec<String>, StoreError>;
+    /// Inserts ops; reports newly accepted ids separately from
+    /// duplicates (both are durably stored — duplicates were already).
+    fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError>;
 
-    /// Pulls ops for an account with hlc > since (exclusive), ordered
-    /// by hlc text (deterministic), up to `limit`.
-    fn pull_ops(&self, account: &str, since: &str, limit: u32)
-        -> Result<Vec<StoredOp>, StoreError>;
+    /// Pulls ops for an account strictly after the `(since_hlc,
+    /// since_op_id)` cursor, ordered by `(hlc, operation_id)` ascending
+    /// (deterministic), up to `limit`. Same-HLC ties advance via the
+    /// operation id component.
+    fn pull_ops(
+        &self,
+        account: &str,
+        since_hlc: &str,
+        since_op_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredOp>, StoreError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +78,12 @@ pub mod sqlite_backend {
     use rusqlite::Connection;
     use std::path::Path;
     use std::sync::Mutex;
+
+    /// Hard cap on registered accounts. Registration is unauthenticated
+    /// (public key = account id), so an attacker may mint rows for free;
+    /// the cap bounds storage exhaustion. Self-hosted operators can
+    /// raise it via env var.
+    const ACCOUNT_CAP: i64 = 10_000;
 
     pub struct SqliteStore {
         conn: Mutex<Connection>,
@@ -87,7 +116,7 @@ pub mod sqlite_backend {
                     sealed BLOB NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_ops_account_hlc
-                    ON ops(account, hlc);",
+                    ON ops(account, hlc, operation_id);",
             )?;
             Ok(Self {
                 conn: Mutex::new(conn),
@@ -98,10 +127,27 @@ pub mod sqlite_backend {
     impl BlobStore for SqliteStore {
         fn register_account(&self, public_key: &str) -> Result<(), StoreError> {
             let conn = self.conn.lock().expect("store mutex");
-            conn.execute(
+            let changed = conn.execute(
                 "INSERT OR IGNORE INTO accounts (public_key, created_at) VALUES (?1, ?2)",
                 rusqlite::params![public_key, now_ms()],
             )?;
+            if changed == 0 {
+                return Ok(()); // already registered
+            }
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM accounts",
+                [],
+                |r| r.get(0),
+            )?;
+            if count > ACCOUNT_CAP {
+                // Roll this registration back — the cap is a DoS guard,
+                // not a correctness limit.
+                conn.execute(
+                    "DELETE FROM accounts WHERE public_key = ?1",
+                    [public_key],
+                )?;
+                return Err(StoreError::AccountQuota);
+            }
             Ok(())
         }
 
@@ -115,10 +161,10 @@ pub mod sqlite_backend {
             Ok(n > 0)
         }
 
-        fn insert_ops(&self, ops: &[StoredOp]) -> Result<Vec<String>, StoreError> {
+        fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError> {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
-            let mut accepted = Vec::new();
+            let mut out = PushOutcome::default();
             for op in ops {
                 let changed = tx.execute(
                     "INSERT OR IGNORE INTO ops
@@ -134,39 +180,60 @@ pub mod sqlite_backend {
                     ],
                 )?;
                 if changed > 0 {
-                    accepted.push(op.operation_id.clone());
+                    out.accepted.push(op.operation_id.clone());
+                } else {
+                    out.duplicates.push(op.operation_id.clone());
                 }
             }
             tx.commit()?;
-            Ok(accepted)
+            Ok(out)
         }
 
         fn pull_ops(
             &self,
             account: &str,
-            since: &str,
+            since_hlc: &str,
+            since_op_id: &str,
             limit: u32,
         ) -> Result<Vec<StoredOp>, StoreError> {
             let conn = self.conn.lock().expect("store mutex");
-            let mut stmt = conn.prepare(
-                "SELECT operation_id, account, hlc, table_name, record_id, sealed
-                 FROM ops WHERE account = ?1 AND hlc > ?2
-                 ORDER BY hlc ASC LIMIT ?3",
-            )?;
-            let rows = stmt
-                .query_map(rusqlite::params![account, since, limit], |r| {
-                    Ok(StoredOp {
-                        operation_id: r.get(0)?,
-                        account: r.get(1)?,
-                        hlc: r.get(2)?,
-                        table: r.get(3)?,
-                        record_id: r.get(4)?,
-                        sealed: r.get(5)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut stmt = if since_hlc.is_empty() {
+                conn.prepare(
+                    "SELECT operation_id, account, hlc, table_name, record_id, sealed
+                     FROM ops WHERE account = ?1
+                     ORDER BY hlc ASC, operation_id ASC LIMIT ?2",
+                )?
+            } else {
+                conn.prepare(
+                    "SELECT operation_id, account, hlc, table_name, record_id, sealed
+                     FROM ops WHERE account = ?1
+                       AND (hlc > ?2 OR (hlc = ?2 AND operation_id > ?3))
+                     ORDER BY hlc ASC, operation_id ASC LIMIT ?4",
+                )?
+            };
+            let rows = if since_hlc.is_empty() {
+                stmt.query_map(rusqlite::params![account, limit], op_row)?
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                stmt.query_map(
+                    rusqlite::params![account, since_hlc, since_op_id, limit],
+                    op_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+            };
             Ok(rows)
         }
+    }
+
+    fn op_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredOp> {
+        Ok(StoredOp {
+            operation_id: r.get(0)?,
+            account: r.get(1)?,
+            hlc: r.get(2)?,
+            table: r.get(3)?,
+            record_id: r.get(4)?,
+            sealed: r.get(5)?,
+        })
     }
 
     fn now_ms() -> i64 {
@@ -186,6 +253,9 @@ pub mod postgres_backend {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
+
+    /// Same registration cap as the SQLite backend (see there).
+    const ACCOUNT_CAP: i64 = 10_000;
 
     pub struct PostgresStore {
         pool: PgPool,
@@ -225,10 +295,20 @@ pub mod postgres_backend {
     impl BlobStore for PostgresStore {
         fn register_account(&self, public_key: &str) -> Result<(), StoreError> {
             self.rt.block_on(async {
-                sqlx::query("INSERT INTO accounts (public_key) VALUES ($1) ON CONFLICT DO NOTHING")
+                sqlx::query("INSERT INTO accounts (public_key) VALUES ($1) ON CONFLICT (public_key) DO NOTHING")
                     .bind(public_key)
                     .execute(&self.pool)
                     .await?;
+                let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts")
+                    .fetch_one(&self.pool)
+                    .await?;
+                if row.0 > ACCOUNT_CAP {
+                    sqlx::query("DELETE FROM accounts WHERE public_key = $1")
+                        .bind(public_key)
+                        .execute(&self.pool)
+                        .await?;
+                    return Err(StoreError::AccountQuota);
+                }
                 Ok::<_, StoreError>(())
             })
         }
@@ -244,9 +324,9 @@ pub mod postgres_backend {
             })
         }
 
-        fn insert_ops(&self, ops: &[StoredOp]) -> Result<Vec<String>, StoreError> {
+        fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError> {
             self.rt.block_on(async {
-                let mut accepted = Vec::new();
+                let mut out = PushOutcome::default();
                 for op in ops {
                     let res = sqlx::query(
                         "INSERT INTO ops (operation_id, account, hlc, table_name, record_id, sealed)
@@ -262,30 +342,47 @@ pub mod postgres_backend {
                     .execute(&self.pool)
                     .await?;
                     if res.rows_affected() > 0 {
-                        accepted.push(op.operation_id.clone());
+                        out.accepted.push(op.operation_id.clone());
+                    } else {
+                        out.duplicates.push(op.operation_id.clone());
                     }
                 }
-                Ok::<_, StoreError>(accepted)
+                Ok::<_, StoreError>(out)
             })
         }
 
         fn pull_ops(
             &self,
             account: &str,
-            since: &str,
+            since_hlc: &str,
+            since_op_id: &str,
             limit: u32,
         ) -> Result<Vec<StoredOp>, StoreError> {
             self.rt.block_on(async {
-                let rows = sqlx::query_as::<_, (String, String, String, String, String, Vec<u8>)>(
-                    "SELECT operation_id, account, hlc, table_name, record_id, sealed
-                     FROM ops WHERE account = $1 AND hlc > $2
-                     ORDER BY hlc ASC LIMIT $3",
-                )
-                .bind(account)
-                .bind(since)
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await?;
+                let rows = if since_hlc.is_empty() {
+                    sqlx::query_as::<_, (String, String, String, String, String, Vec<u8>)>(
+                        "SELECT operation_id, account, hlc, table_name, record_id, sealed
+                         FROM ops WHERE account = $1
+                         ORDER BY hlc ASC, operation_id ASC LIMIT $2",
+                    )
+                    .bind(account)
+                    .bind(limit as i64)
+                    .fetch_all(&self.pool)
+                    .await?
+                } else {
+                    sqlx::query_as::<_, (String, String, String, String, String, Vec<u8>)>(
+                        "SELECT operation_id, account, hlc, table_name, record_id, sealed
+                         FROM ops WHERE account = $1
+                           AND (hlc > $2 OR (hlc = $2 AND operation_id > $3))
+                         ORDER BY hlc ASC, operation_id ASC LIMIT $4",
+                    )
+                    .bind(account)
+                    .bind(since_hlc)
+                    .bind(since_op_id)
+                    .bind(limit as i64)
+                    .fetch_all(&self.pool)
+                    .await?
+                };
                 Ok::<_, StoreError>(
                     rows.into_iter()
                         .map(

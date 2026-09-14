@@ -180,6 +180,7 @@ pub struct DirectivePhase {
     pub minutes: i64,
     /// `pending` | `active` | `done`
     pub state: PhaseState,
+    pub hlc_timestamp: HlcTimestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +342,9 @@ pub struct IdentityConfig {
     pub public_key: String,
     pub bip39_mnemonic_verified: bool,
     pub hlc_timestamp: HlcTimestamp,
+    /// Onboarding backup-challenge word positions (persisted so the
+    /// authoritative re-check is positional, not membership-based).
+    pub verify_indices: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
