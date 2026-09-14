@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Worldline",
+  "version": "0.1.0",
+  "identifier": "com.worldline.app",
+  "build": {
+    "beforeDevCommand": {
+      "script": "dx serve --port 1420",
+      "cwd": "ui"
+    },
+    "beforeBuildCommand": {
+      "script": "dx build --release",
+      "cwd": "ui"
+    },
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "ui/target/dx/wl-ui/release/web/public"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Worldline",
+        "width": 420,
+        "height": 747,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.png"]
+  },
+  "plugins": {}
+}

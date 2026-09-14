@@ -1,0 +1,52 @@
+[package]
+name = "wl-app"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+description = "Worldline desktop client (Tauri v2 + Dioxus)"
+default-run = "wl-app"
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+wl-core = { path = "../wl-core" }
+wl-sync = { path = "../wl-sync" }
+wl-protocol = { path = "../wl-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+zeroize = "1"
+getrandom = "0.2"
+iota_stronghold = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-stronghold = "2"
+tauri-plugin-global-shortcut = "2"
+
+[dev-dependencies]
+wl-relay = { path = "../wl-relay" }
+axum = { version = "0.8", features = ["json", "tokio"] }
+
+[features]
+# compiled with cargo tauri build / dev
+custom-protocol = ["tauri/custom-protocol"]
+
+# Match the root workspace's release discipline (this crate is its own
+# workspace, so the root [profile.release] does not apply here).
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"

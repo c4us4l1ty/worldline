@@ -1,0 +1,153 @@
+//! Wire protocol shared by client and relay (PRD §3.2).
+//!
+//! Auth: challenge → Ed25519 signature → PASETO v4 session token.
+//! Data: opaque encrypted CRDT blobs. The relay validates signatures
+//! and routes ciphertext; it can never read payloads.
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Auth handshake
+// ---------------------------------------------------------------------------
+
+/// POST /auth/challenge — request a nonce.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChallengeRequest {
+    /// Hex-encoded Ed25519 public key (the opaque Account ID).
+    pub public_key: String,
+}
+
+/// Relay's cryptographic challenge: unguessable nonce + expiry.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Challenge {
+    /// Hex-encoded 32-byte nonce.
+    pub nonce: String,
+    /// UNIX epoch seconds after which the challenge expires.
+    pub expires_at: i64,
+}
+
+/// POST /auth/verify — signed challenge submission.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerifyRequest {
+    pub public_key: String,
+    /// Signature over `nonce || expires_at` (little-endian i64 BE
+    /// concat — exact bytes documented here once, used by both sides).
+    pub signature: String,
+}
+
+/// Successful auth: short-lived bearer session token.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionToken {
+    /// PASETO v4.local token (or JWT in alternative deployments).
+    pub token: String,
+    /// Epoch seconds until expiry.
+    pub expires_at: i64,
+}
+
+// ---------------------------------------------------------------------------
+// CRDT transport (blind relay)
+// ---------------------------------------------------------------------------
+
+/// AAD routing header prefix bound into every sealed payload:
+/// `table_name:record_id`. Relay only ever sees these fields plus
+/// ciphertext — authenticated via AEAD, unreadable.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PushOp {
+    /// Globally unique operation id.
+    pub operation_id: String,
+    /// HLC timestamp text (`pt.ctr.device`).
+    pub hlc: String,
+    /// Synced table name (routing only).
+    pub table: String,
+    /// Row id (routing only).
+    pub record_id: String,
+    /// ChaCha20-Poly1305 sealed payload (nonce ‖ tag ‖ ciphertext).
+    /// Base64 over the [`wl_core::crypto::aead::Sealed`] wire bytes.
+    pub sealed_b64: String,
+}
+
+/// POST /sync/push — batch push of pending outbox ops.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PushRequest {
+    pub ops: Vec<PushOp>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PushResponse {
+    /// Operation ids accepted (deduped: re-push is idempotent).
+    pub accepted: Vec<String>,
+}
+
+/// GET /sync/pull?since=… — pull ops newer than an HLC cursor.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullRequest {
+    /// Inclusive lower-bound HLC timestamp text; "" = from the beginning.
+    pub since_hlc: String,
+    /// Max ops returned (server enforces a hard cap too).
+    pub limit: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullResponse {
+    pub ops: Vec<PushOp>,
+    /// Cursor to pass as `since_hlc` next time (may equal last op).
+    pub next_cursor: String,
+    /// true when no further ops exist beyond this batch.
+    pub exhausted: bool,
+}
+
+/// Canonical challenge-signing payload: nonce bytes ‖ expiry bytes.
+/// Both client and relay derive signing/verification material from
+/// this single function — no format drift possible.
+pub fn challenge_signing_payload(nonce_hex: &str, expires_at: i64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + 8);
+    buf.extend_from_slice(&hex::decode(nonce_hex).unwrap_or_default());
+    buf.extend_from_slice(&expires_at.to_be_bytes());
+    buf
+}
+
+/// Standard error envelope.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiError {
+    pub error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn challenge_payload_is_deterministic() {
+        let a = challenge_signing_payload("deadbeef", 42);
+        let b = challenge_signing_payload("deadbeef", 42);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 4 + 8);
+        // Expiry encoded big-endian: stable across platforms.
+        assert_eq!(&a[4..], &42i64.to_be_bytes());
+    }
+
+    #[test]
+    fn serde_roundtrips() {
+        let push = PushRequest {
+            ops: vec![PushOp {
+                operation_id: "op-1".into(),
+                hlc: "1.2.3".into(),
+                table: "directives".into(),
+                record_id: "dir-9".into(),
+                sealed_b64: "c2VhbGVk".into(),
+            }],
+        };
+        let json = serde_json::to_string(&push).unwrap();
+        let back: PushRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ops[0].operation_id, "op-1");
+        assert_eq!(back.ops[0].hlc, "1.2.3");
+
+        let pull = PullRequest {
+            since_hlc: "9.9.9".into(),
+            limit: 100,
+        };
+        let back: PullRequest =
+            serde_json::from_str(&serde_json::to_string(&pull).unwrap()).unwrap();
+        assert_eq!(back.limit, 100);
+    }
+}

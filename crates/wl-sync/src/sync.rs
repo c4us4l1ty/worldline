@@ -1,0 +1,294 @@
+//! Sync session: push pending outbox ops, pull and apply remote ops.
+//! Transport is injected (native: reqwest; tests: in-process axum).
+
+use wl_core::crypto::aead::{self, Sealed};
+use wl_core::crypto::identity::Identity;
+use wl_core::hlc::{Hlc, HlcTimestamp};
+use wl_core::store::repo::{OutboxOp, Repos};
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("store: {0}")]
+    Store(#[from] wl_core::store::StoreError),
+    #[error("crypto: {0}")]
+    Crypto(#[from] aead::AeadError),
+    #[error("transport: {0}")]
+    Transport(String),
+    #[error("protocol decode: {0}")]
+    Protocol(String),
+}
+impl From<rusqlite::Error> for SyncError {
+    fn from(e: rusqlite::Error) -> Self {
+        SyncError::Store(e.into())
+    }
+}
+
+/// Transport trait — one round-trip abstraction, mockable in tests.
+pub trait Transport {
+    /// Auth + execute a POST; returns response body text.
+    fn post(&self, path: &str, body: &serde_json::Value) -> Result<String, String>;
+}
+
+/// Result of one full sync cycle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncStats {
+    pub pushed: usize,
+    pub pulled: usize,
+    pub applied: usize,
+    pub cursor: String,
+}
+
+/// Runs one push+pull cycle against the relay.
+///
+/// Push: drains all pending outbox ops (encrypted at enqueue time —
+/// we only re-encode to base64 for the wire). Pull: fetches ops after
+/// the local cursor, decrypts, applies via the CRDT merge, records
+/// them in `crdt_applied` for idempotence.
+pub fn sync_cycle<T: Transport>(
+    repos: &Repos,
+    identity: &Identity,
+    transport: &T,
+    batch_limit: usize,
+) -> Result<SyncStats, SyncError> {
+    let mut pushed = 0;
+    let mut pulled = 0;
+    let mut applied = 0;
+
+    // ---- Push ----
+    let pending = repos.pending_outbox(batch_limit as i64)?;
+    if !pending.is_empty() {
+        let ops: Vec<wl_protocol::PushOp> = pending
+            .iter()
+            .map(|o: &OutboxOp| wl_protocol::PushOp {
+                operation_id: o.operation_id.clone(),
+                hlc: o.hlc_timestamp.to_string(),
+                table: o.table_name.clone(),
+                record_id: o.record_id.clone(),
+                sealed_b64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &o.encrypted_payload,
+                ),
+            })
+            .collect();
+        let body = serde_json::to_value(wl_protocol::PushRequest { ops })
+            .map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let resp_text = transport
+            .post("/sync/push", &body)
+            .map_err(SyncError::Transport)?;
+        let resp: wl_protocol::PushResponse =
+            serde_json::from_str(&resp_text).map_err(|e| SyncError::Protocol(e.to_string()))?;
+        repos.mark_outbox_pushed(&resp.accepted)?;
+        pushed = resp.accepted.len();
+    }
+
+    // ---- Pull ----
+    let mut cursor = current_cursor(repos)?;
+    loop {
+        let body = serde_json::to_value(wl_protocol::PullRequest {
+            since_hlc: cursor.clone(),
+            limit: batch_limit as u32,
+        })
+        .map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let resp_text = transport
+            .post("/sync/pull", &body)
+            .map_err(SyncError::Transport)?;
+        let resp: wl_protocol::PullResponse =
+            serde_json::from_str(&resp_text).map_err(|e| SyncError::Protocol(e.to_string()))?;
+        for op in &resp.ops {
+            if repos.is_op_applied(&op.operation_id)? {
+                continue; // idempotent apply
+            }
+            let bytes =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &op.sealed_b64)
+                    .map_err(|_| SyncError::Protocol("bad base64 in pulled op".into()))?;
+            let sealed = Sealed::from_bytes(&bytes)?;
+            let aad = format!("{}:{}", op.table, op.record_id);
+            let plaintext = aead::unseal(identity, &sealed, aad.as_bytes())?;
+            let fields: serde_json::Value = serde_json::from_slice(&plaintext)
+                .map_err(|e| SyncError::Protocol(format!("decrypted payload not JSON: {e}")))?;
+            let crdt_op = wl_core::crdt::CrdtOp {
+                operation_id: op.operation_id.clone(),
+                table: op.table.clone(),
+                record_id: op.record_id.clone(),
+                hlc: op.hlc.clone(),
+                device: HlcTimestamp::parse(&op.hlc)
+                    .map_err(|e| SyncError::Protocol(e.to_string()))?
+                    .device,
+                fields: Some(fields),
+                tombstone: false,
+            };
+            apply_op_to_db(repos, &crdt_op)?;
+            let ts =
+                HlcTimestamp::parse(&op.hlc).map_err(|e| SyncError::Protocol(e.to_string()))?;
+            repos.mark_op_applied(&op.operation_id, ts)?;
+            applied += 1;
+        }
+        pulled += resp.ops.len();
+        cursor = resp.next_cursor.clone();
+        if resp.exhausted || resp.ops.is_empty() {
+            break;
+        }
+    }
+
+    Ok(SyncStats {
+        pushed,
+        pulled,
+        applied,
+        cursor,
+    })
+}
+
+/// Applies a merged CRDT op to the local SQLite tables. The mapping is
+/// table-aware per the CRDT registry; unknown rows are upserted
+/// generically into their table via full-field JSON.
+fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncError> {
+    use wl_core::crdt::CrdtTable;
+    let Some(table) = CrdtTable::from_str(&op.table) else {
+        return Ok(()); // unknown table: ignore deterministically
+    };
+    // The relay only stores ops the owner encrypted; all fields are
+    // ours. Direct SQL upsert per table keeps merge explicit and
+    // deterministic.
+    let f = op
+        .fields
+        .as_ref()
+        .ok_or_else(|| SyncError::Protocol("upsert op without fields".into()))?;
+    let ts = HlcTimestamp::parse(&op.hlc).map_err(|e| SyncError::Protocol(e.to_string()))?;
+    let ts_s = ts.to_string();
+    let get = |k: &str| f[k].as_str().map(|s| s.to_string());
+
+    let conn = repos.conn.lock().unwrap();
+    match table {
+        CrdtTable::Goals => {
+            conn.execute(
+                "INSERT INTO goals (id,title,description,target_date,status,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET title=?2,description=?3,target_date=?4,status=?5,hlc_timestamp=?6",
+                rusqlite::params![
+                    op.record_id, get("title"), get("description"), get("target_date"),
+                    get("status").unwrap_or("active".into()), ts_s
+                ],
+            )?;
+        }
+        CrdtTable::Milestones => {
+            conn.execute(
+                "INSERT INTO milestones (id,goal_id,title,description,order_index,status,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(id) DO UPDATE SET goal_id=?2,title=?3,description=?4,order_index=?5,status=?6,hlc_timestamp=?7",
+                rusqlite::params![
+                    op.record_id, get("goal_id"), get("title"), get("description"),
+                    f["order_index"].as_i64().unwrap_or(0),
+                    get("status").unwrap_or("pending".into()), ts_s
+                ],
+            )?;
+        }
+        CrdtTable::Directives => {
+            conn.execute(
+                "INSERT INTO directives (id,milestone_id,title,execution_context,estimated_minutes,
+                    progressive_step,progressive_total,state,scheduled_for_date,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(id) DO UPDATE SET milestone_id=?2,title=?3,execution_context=?4,
+                    estimated_minutes=?5,progressive_step=?6,progressive_total=?7,state=?8,
+                    scheduled_for_date=?9,hlc_timestamp=?10",
+                rusqlite::params![
+                    op.record_id,
+                    get("milestone_id"),
+                    get("title"),
+                    get("execution_context"),
+                    f["estimated_minutes"].as_i64().unwrap_or(0),
+                    f["progressive_step"].as_i64().unwrap_or(1),
+                    f["progressive_total"].as_i64().unwrap_or(1),
+                    get("state").unwrap_or("queued".into()),
+                    get("scheduled_for_date").unwrap_or("1970-01-01".into()),
+                    ts_s
+                ],
+            )?;
+        }
+        CrdtTable::DirectivePhases => {
+            let step = f["step"].as_i64().unwrap_or(0);
+            conn.execute(
+                "INSERT INTO directive_phases (directive_id,step,title,instruction,minutes,state)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(directive_id,step) DO UPDATE SET title=?3,instruction=?4,minutes=?5,state=?6",
+                rusqlite::params![
+                    op.record_id, step, get("title"), get("instruction"),
+                    f["minutes"].as_i64().unwrap_or(0),
+                    get("state").unwrap_or("pending".into())
+                ],
+            )?;
+        }
+        CrdtTable::CheckIns => {
+            conn.execute(
+                "INSERT INTO check_ins (id,date,outcome,note,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(id) DO UPDATE SET date=?2,outcome=?3,note=?4,hlc_timestamp=?5",
+                rusqlite::params![op.record_id, get("date"), get("outcome"), get("note"), ts_s],
+            )?;
+        }
+        CrdtTable::Bailouts => {
+            conn.execute(
+                "INSERT INTO bailouts (id,directive_id,reason,note,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(id) DO UPDATE SET directive_id=?2,reason=?3,note=?4,hlc_timestamp=?5",
+                rusqlite::params![
+                    op.record_id,
+                    get("directive_id"),
+                    get("reason"),
+                    get("note"),
+                    ts_s
+                ],
+            )?;
+        }
+        CrdtTable::AppSettings => {
+            conn.execute(
+                "INSERT INTO app_settings (id,theme,hotkey,always_on_top,ai_provider,tier1_model,tier2_model,relay_url)
+                 VALUES (1,?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(id) DO UPDATE SET theme=?1,hotkey=?2,always_on_top=?3,ai_provider=?4,tier1_model=?5,tier2_model=?6,relay_url=?7",
+                rusqlite::params![
+                    get("theme").unwrap_or("dark".into()), get("hotkey").unwrap_or("alt+space".into()),
+                    f["always_on_top"].as_i64().unwrap_or(0),
+                    get("ai_provider"), get("tier1_model"), get("tier2_model"), get("relay_url")
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Tracks the pull cursor across restarts (stored in app_settings-adjacent
+/// table row; we reuse `hlc_clock` id=2 slot for the cursor).
+fn current_cursor(repos: &Repos) -> Result<String, SyncError> {
+    let conn = repos.conn.lock().unwrap();
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_cursor (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL)",
+        [],
+    )?;
+    let cursor: Option<String> = conn
+        .query_row("SELECT cursor FROM sync_cursor WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(None);
+    Ok(cursor.unwrap_or_default())
+}
+
+/// Persists the pull cursor (called by the shell after each cycle;
+/// also tested).
+pub fn save_cursor(repos: &Repos, cursor: &str) -> Result<(), SyncError> {
+    let conn = repos.conn.lock().unwrap();
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_cursor (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO sync_cursor (id, cursor) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET cursor=?1",
+        [cursor],
+    )?;
+    Ok(())
+}
+
+/// HLC convenience for the sync layer (shell owns the real clock).
+pub fn observe_remote(_repos: &Repos, remote: &HlcTimestamp) -> HlcTimestamp {
+    let hlc = Hlc::new();
+    hlc.observe(remote, 0)
+}

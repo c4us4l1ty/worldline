@@ -1,0 +1,17 @@
+# Worldline relay — production Postgres for prod-parity testing on a dev machine.
+# (Development/tests default to the zero-infrastructure SQLite backend;
+#  run this only when you want to exercise the postgres feature.)
+services:
+  wl-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: worldline
+      POSTGRES_PASSWORD: worldline
+      POSTGRES_DB: worldline_relay
+    ports:
+      - "5433:5432"
+    volumes:
+      - wl-pgdata:/var/lib/postgresql/data
+
+volumes:
+  wl-pgdata:

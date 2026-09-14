@@ -1,0 +1,26 @@
+[application]
+name = "worldline-ui"
+default_platform = "web"
+
+[web.app]
+title = "Worldline"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "public"]
+
+# Everything the webview must fetch at runtime ships from `public/`
+# (dx copies it verbatim into both dev and release bundles — unlike
+# [web.resource], which only tag-injects and is dev-served). Contents:
+#   wl.css            — design-system stylesheet
+#   invoke-shim.js    — the window.wlInvoke IPC bridge (required by the
+#                       native shell; a release build without it breaks
+#                       every command)
+#   fonts/*.ttf       — bundled DM Sans / Doppio One (no CDN, skill §6)
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+style = []
+script = []
