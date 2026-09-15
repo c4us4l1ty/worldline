@@ -30,11 +30,54 @@ fn new_id(prefix: &str) -> String {
 
 impl Repos {
     pub fn new(conn: Connection, device: u16) -> Self {
-        Self {
+        let repos = Self {
             conn: Mutex::new(conn),
             hlc: Hlc::new(),
             device,
+        };
+        // E5: resume the persisted clock head so a restart under a
+        // regressed wall clock cannot issue timestamps older than
+        // pre-restart ops (LWW would otherwise invert).
+        if let Ok(Some((wall, ctr))) = repos.read_hlc_head() {
+            repos.hlc.restore(wall, ctr);
         }
+        repos
+    }
+
+    /// Issues a timestamp and persists the new clock head to `hlc_clock`
+    /// (E5). All mutation paths go through here instead of calling
+    /// `self.hlc.now` directly, so every process boot resumes at least
+    /// at the last-issued head.
+    fn tick(&self) -> HlcTimestamp {
+        let ts = self.hlc.now(self.device);
+        // Best-effort: persistence must never fail a domain write; a
+        // missed head only risks monotonicity after a crash + clock
+        // regression, never correctness of the current op.
+        let _ = self.write_hlc_head();
+        ts
+    }
+
+    fn read_hlc_head(&self) -> Result<Option<(u64, u16)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(i64, i64, i64)> = conn
+            .query_row(
+                "SELECT last_wall_nanos, counter, device FROM hlc_clock WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        Ok(row.map(|(w, c, _)| (w as u64, c as u16)))
+    }
+
+    fn write_hlc_head(&self) -> Result<(), StoreError> {
+        let (wall, ctr) = self.hlc.head();
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
+            params![wall as i64, ctr as i64, self.device as i64],
+        )?;
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -50,7 +93,7 @@ impl Repos {
         verified: bool,
         verify_indices: &[usize],
     ) -> Result<(), StoreError> {
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         self.conn
             .lock()
             .unwrap()
@@ -84,10 +127,8 @@ impl Repos {
                     Ok(IdentityConfig {
                         public_key: r.get(0)?,
                         bip39_mnemonic_verified: r.get(1)?,
-                        verify_indices: serde_json::from_str(
-                            &r.get::<_, String>(2)?,
-                        )
-                        .unwrap_or_default(),
+                        verify_indices: serde_json::from_str(&r.get::<_, String>(2)?)
+                            .unwrap_or_default(),
                         hlc_timestamp: parse_hlc(&r.get::<_, String>(3)?)?,
                     })
                 },
@@ -98,7 +139,7 @@ impl Repos {
 
     /// Persists the backup-challenge verification result.
     pub fn set_mnemonic_verified(&self, verified: bool) -> Result<(), StoreError> {
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE identity_config SET bip39_mnemonic_verified = ?2, hlc_timestamp = ?3",
             params![verified, ts.to_string()],
@@ -118,7 +159,7 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Goal, StoreError> {
         let id = new_id("goal");
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         let goal = Goal {
             id: id.clone(),
             title: title.to_string(),
@@ -189,7 +230,7 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Milestone, StoreError> {
         let id = new_id("ms");
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         let m = Milestone {
             id: id.clone(),
             goal_id: goal_id.to_string(),
@@ -232,7 +273,7 @@ impl Repos {
         status: MilestoneStatus,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE milestones SET status = ?2, hlc_timestamp = ?3 WHERE id = ?1",
             params![id, status.as_str(), ts.to_string()],
@@ -304,7 +345,7 @@ impl Repos {
             )));
         }
         let id = new_id("dir");
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         let d = Directive {
             id: id.clone(),
             milestone_id: milestone_id.to_string(),
@@ -324,7 +365,7 @@ impl Repos {
             params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, ts.to_string()],
         )?;
         for (i, (pt, pi, pm)) in phases.iter().enumerate() {
-            let ts = self.hlc.now(self.device);
+            let ts = self.tick();
             self.conn.lock().unwrap().execute(
                 "INSERT INTO directive_phases (directive_id, step, title, instruction, minutes, state, hlc_timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -400,7 +441,7 @@ impl Repos {
         state: DirectiveState,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE directives SET state = ?2, hlc_timestamp = ?3 WHERE id = ?1",
             params![id, state.as_str(), ts.to_string()],
@@ -419,7 +460,11 @@ impl Repos {
     }
 
     /// Requeue a directive with a new estimate and date (scope
-    /// downsizing path). Single statement + write-through.
+    /// downsizing path). Resets progressive progress to phase 1 and
+    /// rescales phase minutes to the new total (E3): leaving step=2 with
+    /// 5+25 min rows under a 15-min total contradicted itself forever.
+    /// Single statement for the directive row + phase reset, then
+    /// write-through of everything touched.
     pub fn reschedule_directive(
         &self,
         id: &str,
@@ -427,12 +472,46 @@ impl Repos {
         scheduled_for_date: &str,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE directives SET state='queued', estimated_minutes=?2, scheduled_for_date=?3,
-                hlc_timestamp=?4 WHERE id=?1",
+                progressive_step=1, hlc_timestamp=?4 WHERE id=?1",
             params![id, estimated_minutes, scheduled_for_date, ts.to_string()],
         )?;
+        // Rescale phase minutes proportionally so the rows sum to the
+        // new total (floor 1 min per phase; the last phase absorbs
+        // rounding drift). Monolithic directives have no rows: no-op.
+        let phases = self.phases_for_directive(id)?;
+        if !phases.is_empty() {
+            let old_total: i64 = phases.iter().map(|p| p.minutes).sum();
+            if old_total > 0 {
+                let mut acc = 0i64;
+                for (i, p) in phases.iter().enumerate() {
+                    let scaled = if i + 1 == phases.len() {
+                        (estimated_minutes - acc).max(1)
+                    } else {
+                        ((p.minutes as f64 * estimated_minutes as f64 / old_total as f64).round()
+                            as i64)
+                            .max(1)
+                    };
+                    acc += scaled;
+                    let ts = self.tick();
+                    let state = if p.step == 1 { "active" } else { "pending" };
+                    self.conn.lock().unwrap().execute(
+                        "UPDATE directive_phases SET minutes=?3, state=?4, hlc_timestamp=?5
+                         WHERE directive_id=?1 AND step=?2",
+                        params![id, p.step, scaled, state, ts.to_string()],
+                    )?;
+                }
+            } else {
+                let ts = self.tick();
+                self.conn.lock().unwrap().execute(
+                    "UPDATE directive_phases SET state=(CASE WHEN step=1 THEN 'active' ELSE 'pending' END),
+                        hlc_timestamp=?2 WHERE directive_id=?1",
+                    params![id, ts.to_string()],
+                )?;
+            }
+        }
         if identity.is_some() {
             if let Some(d) = self.directive(id)? {
                 self.emit(
@@ -440,6 +519,14 @@ impl Repos {
                     crate::crdt::CrdtTable::Directives,
                     &d.id,
                     &Self::directive_json(&d),
+                )?;
+            }
+            for p in self.phases_for_directive(id)? {
+                self.emit(
+                    identity,
+                    crate::crdt::CrdtTable::DirectivePhases,
+                    id,
+                    &Self::phase_json(&p),
                 )?;
             }
         }
@@ -452,18 +539,22 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<bool, StoreError> {
         // Mark current phase done, activate next; returns true when a
-        // next phase exists (directive itself continues).
+        // next phase exists (directive itself continues). The final
+        // phase is marked done too (E2) and always replicated when an
+        // identity is present — otherwise the done-state never reaches
+        // peers.
         let d = self
             .directive(id)?
             .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
         let cur = d.progressive_step;
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE directive_phases SET state = 'done', hlc_timestamp = ?3 WHERE directive_id = ?1 AND step = ?2",
             params![id, cur, ts.to_string()],
         )?;
-        if cur < d.progressive_total {
-            let ts = self.hlc.now(self.device);
+        let advanced = cur < d.progressive_total;
+        if advanced {
+            let ts = self.tick();
             self.conn.lock().unwrap().execute(
                 "UPDATE directive_phases SET state = 'active', hlc_timestamp = ?3 WHERE directive_id = ?1 AND step = ?2",
                 params![id, cur + 1, ts.to_string()],
@@ -472,28 +563,26 @@ impl Repos {
                 "UPDATE directives SET progressive_step = ?2, hlc_timestamp = ?3 WHERE id = ?1",
                 params![id, cur + 1, ts.to_string()],
             )?;
-            if identity.is_some() {
-                if let Some(dd) = self.directive(id)? {
-                    self.emit(
-                        identity,
-                        crate::crdt::CrdtTable::Directives,
-                        &dd.id,
-                        &Self::directive_json(&dd),
-                    )?;
-                }
-                for p in self.phases_for_directive(id)? {
-                    self.emit(
-                        identity,
-                        crate::crdt::CrdtTable::DirectivePhases,
-                        id,
-                        &Self::phase_json(&p),
-                    )?;
-                }
-            }
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        if identity.is_some() {
+            if let Some(dd) = self.directive(id)? {
+                self.emit(
+                    identity,
+                    crate::crdt::CrdtTable::Directives,
+                    &dd.id,
+                    &Self::directive_json(&dd),
+                )?;
+            }
+            for p in self.phases_for_directive(id)? {
+                self.emit(
+                    identity,
+                    crate::crdt::CrdtTable::DirectivePhases,
+                    id,
+                    &Self::phase_json(&p),
+                )?;
+            }
+        }
+        Ok(advanced)
     }
 
     pub fn phases_for_directive(
@@ -571,7 +660,7 @@ impl Repos {
             })
             .optional()
             .map_err(StoreError::Sqlite)?;
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         match existing {
             Some(id) => {
                 self.conn.lock().unwrap().execute(
@@ -659,7 +748,7 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Bailout, StoreError> {
         let id = new_id("bail");
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         let b = Bailout {
             id: id.clone(),
             directive_id: directive_id.to_string(),
@@ -713,12 +802,13 @@ impl Repos {
         s: &AppSettings,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
+        let ts = self.tick();
         self.conn.lock().unwrap().execute(
-            "INSERT INTO app_settings (id, theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO app_settings (id, theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET theme=?1, hotkey=?2, always_on_top=?3,
-                ai_provider=?4, tier1_model=?5, tier2_model=?6, relay_url=?7",
-            params![s.theme, s.hotkey, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url],
+                ai_provider=?4, tier1_model=?5, tier2_model=?6, relay_url=?7, hlc_timestamp=?8",
+            params![s.theme, s.hotkey, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
         )?;
         self.emit(
             identity,
@@ -833,7 +923,7 @@ impl Repos {
         record_id: &str,
         payload_json: &serde_json::Value,
     ) -> Result<String, StoreError> {
-        let ts = self.hlc.now(self.device);
+        let ts = self.tick();
         let op_id = new_id("op");
         let aad = format!("{table_name}:{record_id}");
         let plaintext = serde_json::to_vec(payload_json).expect("json ser");
@@ -847,12 +937,17 @@ impl Repos {
         Ok(op_id)
     }
 
-    /// Pending (unpushed) outbox operations, oldest first.
+    /// Pending (unpushed) outbox operations, oldest first. The tie-break
+    /// on `(hlc_timestamp, operation_id)` is load-bearing: ops enqueued
+    /// within the same wall millisecond share `created_at_epoch_ms`, and
+    /// a bare `ORDER BY created_at_epoch_ms` lets SQLite return either
+    /// order — retries could then re-push the same ops shuffled.
     pub fn pending_outbox(&self, limit: i64) -> Result<Vec<OutboxOp>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT operation_id, hlc_timestamp, table_name, record_id, encrypted_payload
-             FROM crdt_outbox WHERE pushed = 0 ORDER BY created_at_epoch_ms LIMIT ?1",
+             FROM crdt_outbox WHERE pushed = 0
+             ORDER BY created_at_epoch_ms, hlc_timestamp, operation_id LIMIT ?1",
         )?;
         let rows = stmt
             .query_map([limit], |r| {

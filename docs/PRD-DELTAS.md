@@ -89,3 +89,58 @@ Locked decisions from the planning session are marked [approved].
 20. **In-process transport for convergence tests** — US-4's "<300 ms" is
     asserted on the merge path (excluding real network RTT) in
     `wl-sync/tests/convergence.rs`.
+
+## Sync hardening (battle-test pass, 2026-09-15)
+
+21. **HLC text is fixed-width `pt(20).ctr(5).dev(5)`** — unpadded decimal
+    broke TEXT ordering at every digit boundary (9→10), inverting relay
+    delivery order; fixed width makes every `WHERE hlc > ?` / `ORDER BY
+    hlc` / LWW guard sort identically to numeric HLC order (C4).
+22. **Pull cursor is the composite `(hlc, operation_id)`** — strict `hlc >
+    since` permanently skipped same-HLC ops; ties now advance via the op
+    id and the cursor persists in `sync_cursor` after every batch (C2+C3).
+23. **Push drains the whole outbox per cycle** — one batch per "Sync now"
+    click stranded offline bursts; the push phase loops until drained or
+    no progress, and both `accepted` + `duplicates` mark ops pushed so a
+    lost push response never wedges an op pending forever (C5+P3).
+24. **Pull applies under LWW arbitration (incl. `app_settings`)** — the
+    wire path previously blind-upserted by arrival order; every table now
+    guards with `hlc_timestamp < op.hlc` (migration 0003 adds the missing
+    column to the singleton settings row) (C1).
+25. **HLC head persists in `hlc_clock`; counter saturates, never wraps** —
+    restarts under a regressed wall clock used to re-issue older
+    timestamps (LWW inversion); the head is now read at boot and written
+    on every tick, and counter exhaustion steps physical forward (E5+E6).
+26. **Relay registration + challenge flood caps** — unauthenticated account
+    minting is capped (10 000 accounts → 429) and in-flight challenges are
+    bounded per-account (4) and globally (100 000); sessions GC on sight
+    in `validate` with a throttled sweep (S3+S5).
+27. **Relay URL allow-list** — `relay_url` must be a bare http(s) base, no
+    credentials/query/fragment, no link-local metadata hosts; enforced in
+    `settings_save`, `relay_authenticate`, and `sync_now` (S4).
+28. **Payload key zeroized on drop** — `Identity.payload_key` is
+    `Zeroizing<[u8; 32]>` (the doc comment previously claimed drop glue
+    the type never had) (S1).
+29. **Backup verification is positional, server-of-record is the shell** —
+    challenge indices persist in `identity_config.verify_indices` and the
+    shell re-checks `verify_backup_words`; caller-supplied indices are
+    honored only for pre-persistence legacy rows, and `identity_unlock`
+    preserves (never wipes) the stored indices (S2).
+30. **Read-path activation write-throughs** — `current_directive` passes
+    the unlocked identity into the engine so canvas-load activation emits
+    an outbox op like every other transition; the one-active-directive
+    invariant now holds across devices (E4).
+31. **Downsize resets + rescales phases** — scope-downsize requeues at
+    phase 1 with phase minutes rescaled to sum to the new estimate (was:
+    resumed mid-phase with rows totaling the old estimate); final-phase
+    completion marks the phase `done` before closing the directive, and
+    `complete()` reports post-advance phase minutes (E1+E2+E3).
+32. **No shell `hud-tick` timer** — the 1 Hz Tauri event emitter had no
+    listener (the UI owns its own second loop); removed to eliminate a
+    permanent wake-up source toward the near-0-CPU goal (P1).
+33. **Known limitations kept as characterization guards, not fixed here**:
+    relay push holds one transaction/mutex across the batch (P4 —
+    `defect_push_holds_global_mutex_across_whole_batch`); velocity
+    `estimate_adjustment` is computed and displayed but not applied to
+    future estimates (E7); `blocked` directives have no unblock path and
+    `skipped` never completes a milestone (E8).

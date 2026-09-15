@@ -298,7 +298,7 @@ mod tests {
             serde_json::json!({"state": "queued"}),
         ));
         s.apply(&tomb("2", "directives", "d1", "200.0.1", 1));
-        assert!(s.rows.get("d1").is_none());
+        assert!(!s.rows.contains_key("d1"));
         // Older upsert cannot resurrect.
         assert!(!s.apply(&op(
             "3",
@@ -308,7 +308,7 @@ mod tests {
             2,
             serde_json::json!({"state": "zombie"})
         )));
-        assert!(s.rows.get("d1").is_none());
+        assert!(!s.rows.contains_key("d1"));
         // Newer upsert resurrects.
         assert!(s.apply(&op(
             "4",

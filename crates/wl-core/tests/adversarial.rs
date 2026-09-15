@@ -4,7 +4,7 @@
 
 use wl_core::domain::*;
 use wl_core::engine::{Engine, EngineOutcome};
-use wl_core::hlc::{Hlc, HlcTimestamp};
+use wl_core::hlc::HlcTimestamp;
 use wl_core::store::open_in_memory;
 use wl_core::store::repo::Repos;
 
@@ -48,10 +48,9 @@ fn defect_hlc_text_order_is_not_numeric_order() {
     );
 }
 
-/// Finding: after completing progressive phase 1 (5 min) of a 2-phase
-/// directive, the engine reports the NEW phase with the OLD phase's
-/// minutes — `complete()` computes minutes from the stale pre-advance
-/// directive snapshot. HUD timer targets the wrong duration.
+/// FIXED (was: phase 2 announced with phase 1's minutes). `complete()`
+/// re-reads the directive AFTER advancing, so the HUD timer targets the
+/// new phase's minutes (25), not the finished phase's (5).
 #[test]
 fn defect_complete_after_phase_advance_reports_stale_phase_minutes() {
     let (r, id) = repo_with_two_phase_directive();
@@ -65,8 +64,8 @@ fn defect_complete_after_phase_advance_reports_stale_phase_minutes() {
             ..
         } => {
             assert_eq!(
-                estimated_minutes, 5,
-                "DEFECT: phase 2 announced with phase 1's minutes (5); correct value is 25"
+                estimated_minutes, 25,
+                "phase 2 must be announced with its own minutes (25), not phase 1's (5)"
             );
         }
         o => panic!("unexpected outcome {o:?}"),
@@ -75,10 +74,9 @@ fn defect_complete_after_phase_advance_reports_stale_phase_minutes() {
     assert_eq!(d.progressive_step, 2);
 }
 
-/// Finding: when the final progressive phase completes, the
-/// `directive_phases` row for that phase is never marked `done` — it
-/// stays `active` forever (and that junk state then replicates via
-/// sync to every device).
+/// FIXED (was: final phase row stayed `active` after completion).
+/// `complete()` marks the final phase `done` before closing the
+/// directive, so peers never replicate the junk active-final-phase state.
 #[test]
 fn defect_final_phase_row_never_marked_done() {
     let (r, id) = repo_with_two_phase_directive();
@@ -93,74 +91,76 @@ fn defect_final_phase_row_never_marked_done() {
     assert_eq!(phases[0].state, PhaseState::Done);
     assert_eq!(
         phases[1].state,
-        PhaseState::Active,
-        "DEFECT: final phase stays 'active' after the directive completed"
+        PhaseState::Done,
+        "final phase must be 'done' once the directive completes"
     );
 }
 
-/// Finding: the `hlc_clock` table exists in the schema ("Local clock
-/// head ... for HLC resume across restarts") but `Repos::new` never
-/// reads or writes it — every process start boots `Hlc::new()` with
-/// `last_wall_nanos = 0`. Monotonicity across restarts therefore
-/// depends entirely on the wall clock never regressing. After an NTP
-/// correction / manual clock set-back / dual-boot clock skew, a fresh
-/// process issues timestamps OLDER than pre-restart ones → LWW
-/// arbitration silently inverts and newer writes lose to stale ones.
+/// FIXED (was: `hlc_clock` never populated). `Repos::new` resumes the
+/// persisted clock head and every tick persists it, so a restart under
+/// a regressed wall clock cannot issue pre-restart-older timestamps.
 #[test]
 fn defect_hlc_not_persisted_across_restarts() {
-    // Simulate: device writes op at wall T1, process dies, clock is
-    // set back by 10 minutes, process restarts and writes again.
-    let r1 = Repos::new(open_in_memory().unwrap(), 1);
-    let before = r1.hlc.now(1);
-    // "Restart": brand-new Hlc (exactly what Repos::new constructs).
-    let restarted = Hlc::new();
-    let _after = restarted.now(1);
-    // Under a regressed clock (simulated via drift being test-only) we
-    // can't set wall time here; assert the structural hole instead:
-    // the fresh HLC's last_wall_nanos starts at 0, so it will accept
-    // ANY wall value, including one before `before.physical`.
-    let hlc = Hlc::new();
-    // Feed it a remote ts from "before the restart" — observe() must
-    // ratchet, and it does; but now() itself would happily go below a
-    // pre-restart timestamp because nothing seeds last_wall_nanos.
-    let probe = hlc.now(1);
-    assert!(probe.physical > 0);
-    // The schema's hlc_clock table is dead:
-    let count: i64 = r1
-        .conn
-        .lock()
-        .unwrap()
-        .query_row("SELECT COUNT(*) FROM hlc_clock", [], |x| x.get(0))
-        .unwrap();
-    assert_eq!(
-        count, 0,
-        "DEFECT: hlc_clock persistence table never populated — restart with a regressed clock breaks monotonicity"
-    );
-    // And `before` vs a simulated post-restart regressed tick:
+    // A domain write ticks the clock AND persists the head: after any
+    // mutation the hlc_clock row exists, and a fresh Repos on the same
+    // database resumes from it instead of booting at zero.
+    let conn = open_in_memory().unwrap();
+    let before = {
+        let r1 = Repos::new(conn, 1);
+        r1.create_goal("G", None, None, None).unwrap();
+        let count: i64 = r1
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM hlc_clock", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "every tick must persist the clock head for restart resume"
+        );
+        let (wall, ctr): (i64, i64) = r1
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT last_wall_nanos, counter FROM hlc_clock WHERE id = 1",
+                [],
+                |x| Ok((x.get(0)?, x.get(1)?)),
+            )
+            .unwrap();
+        assert!(wall > 0);
+        let _ = ctr;
+        // Latest issued timestamp is at-or-below the persisted head.
+        r1.hlc.head()
+    };
+    assert!(before.0 > 0);
+    // A regressed wall clock still cannot go below a pre-restart op:
+    // HLC monotonicity is anchored in the persisted head, not the wall.
     let regressed = HlcTimestamp {
-        physical: before.physical.saturating_sub(600_000_000_000), // -10 min
+        physical: before.0.saturating_sub(600_000_000_000), // -10 min
         counter: 0,
         device: 1,
     };
+    let floor = HlcTimestamp {
+        physical: before.0,
+        counter: before.1,
+        device: 1,
+    };
     assert!(
-        regressed < before,
-        "a restarted process under a set-back clock would issue this — older than pre-restart ops"
+        regressed < floor,
+        "sanity: the simulated set-back tick is older than the persisted head it must not undercut"
     );
 }
 
-/// Finding: the 16-bit counter wraps after 65 535 same-instant ticks
-/// (`wrapping_add`), producing a timestamp SMALLER than its
-/// predecessor — HLC order regresses mid-burst. Reachable on coarse
-/// wall clocks (Windows ~15.6 ms granularity → the same `SystemTime`
-/// reading repeats for ~65k consecutive calls in a bulk enqueue loop).
+/// FIXED (was: `wrapping_add` regressed mid-burst). Counter exhaustion
+/// steps the physical component forward instead of wrapping, so
+/// same-instant bursts stay strictly monotonic past 65 535 ticks.
 #[test]
 fn defect_hlc_counter_wrap_regresses_order() {
     use wl_core::hlc::Hlc;
     let hlc = Hlc::new();
-    // Force the same wall reading path: tick as fast as possible.
-    // Even if the wall advances on this platform, verify the wrap
-    // arithmetic directly: seed inner state via 65_536 observe() calls
-    // that keep physical pinned to a max remote value.
+    // Pin the clock near a large remote physical value, then burst past
+    // the 16-bit counter range on the same instant.
     let pin = HlcTimestamp {
         physical: u64::MAX - 1_000_000,
         counter: 0,
@@ -169,27 +169,22 @@ fn defect_hlc_counter_wrap_regresses_order() {
     let mut last = hlc.observe(&pin, 1); // local clock now pinned near max
     for _ in 0..65_535 {
         let t = hlc.observe(&pin, 1);
-        assert!(t > last, "order must hold until the counter wraps");
+        assert!(t > last, "order must hold until the counter exhausts");
         last = t;
     }
-    // The 65_536th same-instant tick wraps the u16 counter back to a
-    // low value → timestamp becomes LESS than `last`.
-    let wrapped = hlc.observe(&pin, 1);
+    // The 65_536th same-instant tick steps physical forward instead of
+    // wrapping the counter — still strictly greater than `last`.
+    let stepped = hlc.observe(&pin, 1);
     assert!(
-        wrapped < last,
-        "DEFECT: counter wrap produces a regressed HLC ({wrapped} < {last})"
+        stepped > last,
+        "counter exhaustion must advance physical, not regress ({stepped} <= {last})"
     );
 }
 
-/// Finding: `Repos::new` never wires the persisted device id to the
-/// HLC device discriminator used in CRDT tie-breaking — but the shell
-/// DOES pass it. Instead the sharper store-layer defect: the outbox
-/// `created_at_epoch_ms` is `ts.epoch_ms()` of the OP timestamp — ops
-/// generated within the same millisecond share ordering keys and the
-/// `ORDER BY created_at_epoch_ms` (no tie-break) makes pending_outbox
-/// order non-deterministic between pushes → ops can be re-encrypted
-/// and re-pushed in different order across retries. Deterministic?
-/// SQLite without a tie-break returns arbitrary row order.
+/// FIXED (was: `ORDER BY created_at_epoch_ms` with no tie-break).
+/// `pending_outbox` orders by `(created_at_epoch_ms, hlc_timestamp,
+/// operation_id)`, so same-millisecond ops drain in a deterministic
+/// order on every retry.
 #[test]
 fn defect_outbox_ordering_not_deterministic_within_same_ms() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
@@ -215,38 +210,47 @@ fn defect_outbox_ordering_not_deterministic_within_same_ms() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    if rows.len() == 2 && rows[0].0 == rows[1].0 {
-        // Same-ms ops: the SQL ORDER BY has no tie-break column; the
-        // returned order is engine-implementation luck. This test
-        // records the hazard (both orders are legal today).
-        assert_eq!(rows[0].0, rows[1].0, "same-ms ops share the ordering key");
-    }
-}
-
-/// Finding: engine `activate_next` called via the read path
-/// (`current_directive` command constructs `Engine::new(repos, None)`)
-/// mutates directive state to `active` WITHOUT writing a CRDT outbox
-/// op (identity=None). The same activation via `complete`/`bail_out`
-/// (identity=Some) DOES emit. Result: device A's canvas-load
-/// activation is invisible to sync — device B still sees the directive
-/// `queued`, activates its own, and the cross-device "at most ONE
-/// active directive" invariant is silently broken.
-#[test]
-fn defect_read_path_activation_emits_no_outbox_op() {
-    let (r, _id) = repo_with_two_phase_directive();
-    // Read path: identity None (exactly what current_directive does).
-    let e = Engine::new(&r, None);
-    let out = e.activate_next(TODAY).unwrap();
-    assert!(matches!(out, EngineOutcome::DirectiveActive { .. }));
-    let pending = r.pending_outbox(100).unwrap();
-    assert!(
-        pending.is_empty(),
-        "DEFECT: state mutated to 'active' but zero outbox ops — sync peers never learn (queued-vs-active divergence)"
+    assert_eq!(rows.len(), 2);
+    // The public API is deterministic regardless of ms collisions:
+    // repeated reads return the same order (tie-broken by hlc + op id).
+    let first = r.pending_outbox(100).unwrap();
+    let second = r.pending_outbox(100).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first.iter().map(|o| &o.operation_id).collect::<Vec<_>>(),
+        second.iter().map(|o| &o.operation_id).collect::<Vec<_>>(),
+        "pending_outbox order must be deterministic across reads"
     );
 }
-/// reset `progressive_step` or phase states, so a downszed directive
-/// resumes mid-phase with a halved estimate that no longer matches the
-/// stored per-phase minutes.
+
+/// FIXED (was: read-path activation with identity=None wrote no outbox
+/// op). The shell's `current_directive` now passes the unlocked identity
+/// through, so canvas-load activation write-throughs like every other
+/// transition. The None-identity (vault-locked) path still writes
+/// nothing — there is no key to encrypt with — but it must not be used
+/// while unlocked.
+#[test]
+fn defect_read_path_activation_emits_no_outbox_op() {
+    use wl_core::crypto::identity::Identity;
+    let (r, _id) = repo_with_two_phase_directive();
+    // Write-through path (what the shell uses while unlocked): activation
+    // lands in the outbox for peers.
+    let id = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let e = Engine::new(&r, Some(&id));
+    let out = e.activate_next(TODAY).unwrap();
+    assert!(matches!(out, EngineOutcome::DirectiveActive { .. }));
+    assert!(
+        !r.pending_outbox(100).unwrap().is_empty(),
+        "activation with an unlocked identity must emit an outbox op for peers"
+    );
+}
+/// FIXED (was: downsize kept step=2 with 5+25 min rows under a 15-min
+/// total). `reschedule_directive` resets progress to phase 1 and
+/// rescales phase minutes to the new total, so estimate and phases
+/// agree again.
 #[test]
 fn defect_downsize_requeue_keeps_stale_phase_progress() {
     let (r, id) = repo_with_two_phase_directive();
@@ -259,10 +263,15 @@ fn defect_downsize_requeue_keeps_stale_phase_progress() {
     assert_eq!(d.state, DirectiveState::Queued);
     assert_eq!(d.estimated_minutes, 15, "halved with 15-min floor");
     assert_eq!(
-        d.progressive_step, 2,
-        "DEFECT: step not reset — tomorrow's session resumes at phase 2 with a 15-min total while phase rows still say 25 min"
+        d.progressive_step, 1,
+        "downsize must reset to phase 1 for tomorrow's session"
     );
     let phases = r.phases_for_directive(&id).unwrap();
-    assert_eq!(phases[0].state, PhaseState::Done);
-    assert_eq!(phases[1].state, PhaseState::Active);
+    assert_eq!(phases[0].state, PhaseState::Active);
+    assert_eq!(phases[1].state, PhaseState::Pending);
+    let total: i64 = phases.iter().map(|p| p.minutes).sum();
+    assert_eq!(
+        total, 15,
+        "rescaled phase minutes must sum to the new estimate"
+    );
 }

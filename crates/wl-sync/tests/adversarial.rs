@@ -43,7 +43,7 @@ impl Transport for AxumTransport {
                     String::from_utf8_lossy(&bytes)
                 ));
             }
-            Ok(String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?)
+            String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
         };
         match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut)) {
             Ok(v) => Ok(v),
@@ -75,7 +75,7 @@ impl Transport for AxumTransport {
                             String::from_utf8_lossy(&bytes)
                         ));
                     }
-                    Ok(String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?)
+                    String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
                 })
             }
             Err(e) => Err(e),
@@ -137,11 +137,9 @@ async fn authenticate(app: &Router, identity: &Identity) -> String {
 
 const PHRASE: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
 
-/// Finding: `sync_cycle` advances the pull cursor but NEVER persists it
-/// (`save_cursor` exists but no caller uses it). Every cycle re-pulls
-/// the ENTIRE remote op history from "" — only the `crdt_applied`
-/// watermark keeps it from re-applying. Costs grow unboundedly with
-/// history; `stats.pulled` is permanently inflated.
+/// FIXED (was: cursor never persisted, every cycle re-pulled full history).
+/// `sync_cycle` persists the composite `(hlc, op_id)` cursor after every
+/// batch, so repeat cycles pull nothing new.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_pull_cursor_never_persisted_full_history_repulled() {
     let app = relay_app();
@@ -172,22 +170,21 @@ async fn defect_pull_cursor_never_persisted_full_history_repulled() {
     let s1 = sync_cycle(&b, &identity, &transport, 100).unwrap();
     assert_eq!(s1.pulled, 1);
 
-    // A second, third, and Nth cycle: still re-pulls the SAME 1 op.
+    // A second, third, and Nth cycle: cursor persisted, nothing re-pulled.
     let s2 = sync_cycle(&b, &identity, &transport, 100).unwrap();
     assert_eq!(
-        s2.pulled, 1,
-        "DEFECT: cursor not persisted; every cycle re-downloads all history (applied=0 only thanks to the watermark)"
+        s2.pulled, 0,
+        "cursor must be persisted; repeat cycles pull nothing new"
     );
     assert_eq!(s2.applied, 0);
     let s3 = sync_cycle(&b, &identity, &transport, 100).unwrap();
-    assert_eq!(s3.pulled, 1);
+    assert_eq!(s3.pulled, 0);
 }
 
-/// Finding: `apply_op_to_db` writes remote rows with NO LWW check — it
-/// blind-upserts by the local SQL's own logic and never consults
-/// `TableState`/HLC arbitration. An older remote op (or an op pulled
-/// late) overwrites NEWER local state. The CRDT engine only exists in
-/// tests; production sync bypasses it.
+/// FIXED (was: blind upsert with no LWW check). `apply_op_to_db` guards
+/// every upsert with `hlc_timestamp < op.hlc`, so a stale remote op never
+/// overwrites newer local state — convergence matches the in-memory
+/// `TableState` contract on every delivery order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_pull_overwrites_newer_local_state_no_lww_check() {
     let app = relay_app();
@@ -253,36 +250,36 @@ async fn defect_pull_overwrites_newer_local_state_no_lww_check() {
     let after = b.goal(&g.id).unwrap().unwrap();
     assert_eq!(
         after.status.as_str(),
-        "achieved",
-        "DEFECT: remote op with OLDER hlc overwrote newer local 'archived' state — apply_op_to_db has no LWW arbitration"
+        "archived",
+        "LWW must keep the newer local 'archived' state against the stale remote op"
     );
-    // And the row's hlc_timestamp is now the OLDER remote one.
-    assert!(after.hlc_timestamp < newer_ts);
+    // And the row's hlc_timestamp is still the newer local one.
+    assert!(after.hlc_timestamp >= newer_ts);
 }
 
-/// Finding: relay pull ordering is TEXT lexicographic on `hlc`. With
-/// counters crossing a digit boundary (e.g. `.9.` vs `.10.`) the relay
-/// returns ops out of causal order, and `apply_op_to_db` (no LWW
-/// check) writes whatever arrives last — divergence across devices
-/// with different pull batch sizes.
+/// FIXED (was: TEXT lexicographic order inverted at digit boundaries).
+/// HLC text is fixed-width (`pt(20).ctr(5).dev(5)`), so relay TEXT
+/// comparison/sort matches numeric HLC order at every boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_counter_width_text_order_diverges_from_numeric() {
-    // Relay-side comparison (SQLite TEXT): "pt.10.dev" < "pt.9.dev".
+    use wl_core::hlc::HlcTimestamp;
+    // Fixed-width encodings of a digit-boundary pair.
+    let a = HlcTimestamp::parse("900.10.1").unwrap();
+    let b_ = HlcTimestamp::parse("900.9.1").unwrap();
+    assert!(a > b_);
+    let (sa, sb) = (a.to_string(), b_.to_string());
+    // Relay-side comparison (SQLite TEXT) now agrees with numeric order.
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     let ord: i64 = conn
-        .query_row("SELECT '900.10.1' > '900.9.1'", [], |r| r.get(0))
+        .query_row("SELECT ?1 > ?2", rusqlite::params![sa, sb], |r| r.get(0))
         .unwrap();
-    assert_eq!(ord, 0, "SQLite text compare says '900.10.1' <= '900.9.1'");
-    // Numeric HLC compare says the opposite.
-    let a = wl_core::hlc::HlcTimestamp::parse("900.10.1").unwrap();
-    let b_ = wl_core::hlc::HlcTimestamp::parse("900.9.1").unwrap();
-    assert!(a > b_);
+    assert_eq!(ord, 1, "fixed-width TEXT order must match numeric order");
 }
 
-/// Finding: `mark_outbox_pushed` marks ops pushed based on the relay's
-/// `accepted` list. If the relay already had an op (idempotent re-push
-/// after a partial failure), `accepted` is empty and the op stays
-/// pending FOREVER — infinite re-push on every cycle (never drains).
+/// FIXED (was: duplicates never drained the outbox). `sync_cycle` marks
+/// both `accepted` AND `duplicates` pushed: a push that landed
+/// server-side but whose response was lost drains on the retry instead
+/// of re-pushing forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defected_outbox_never_drains_on_idempotent_repush() {
     let app = relay_app();
@@ -337,34 +334,28 @@ async fn defected_outbox_never_drains_on_idempotent_repush() {
     }
     let _ = DroppingTransport { inner: &transport };
 
-    // Next cycle: relay reports accepted=[] (duplicate op ids), so
-    // mark_outbox_pushed marks NOTHING.
+    // Next cycle: relay reports the op as a duplicate, which drains it.
     let s = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!(
-        s.pushed, 0,
-        "DEFECT: duplicate op not in accepted list → never marked pushed"
+        s.pushed, 1,
+        "duplicate op must drain via the relay's duplicates list"
     );
     let pending = a.pending_outbox(100).unwrap();
-    assert_eq!(
-        pending.len(),
-        1,
-        "DEFECT: outbox never drains — op re-encrypted & re-pushed on every sync forever"
+    assert!(
+        pending.is_empty(),
+        "outbox must drain on idempotent re-push, got {} pending",
+        pending.len()
     );
-    // And it will be re-pushed again on the NEXT cycle too.
+    // And it stays drained on the NEXT cycle too.
     let s2 = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!(s2.pushed, 0);
-    assert_eq!(a.pending_outbox(100).unwrap().len(), 1);
+    assert!(a.pending_outbox(100).unwrap().is_empty());
 }
 
-/// Finding: pull loop termination. If the relay returns `exhausted:
-/// false` with a batch of exactly `limit` ops whose LAST op's hlc equals
-/// the batch-max, the next pull with `since_hlc = next_cursor` uses a
-/// STRICT `hlc > since` comparison. Two ops with the SAME hlc text
-/// (different devices, e.g. `100.0.1` from dev 1 and... wait — same
-/// text means same device). The real hazard: ops with identical hlc
-/// text from the same device (legit: same-pt-same-ctr after restart
-/// resets counter). The second one is NEVER pulled: `hlc > cursor`
-/// skips it forever.
+/// FIXED (was: strict `hlc > since` skipped same-HLC ops forever, and
+/// `save_cursor` was dead code). The pull cursor is the composite
+/// `(hlc, operation_id)` and `sync_cycle` persists it after every batch,
+/// so same-HLC ties advance via the op id and no op is unreachable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_same_hlc_ops_lost_by_strict_cursor() {
     let app = relay_app();
@@ -470,18 +461,17 @@ async fn defect_same_hlc_ops_lost_by_strict_cursor() {
     let resp = transport
         .post(
             "/sync/pull",
-            &serde_json::json!({"since_hlc": shared_ts.to_string(), "limit": 100}),
+            &serde_json::json!({"since_hlc": shared_ts.to_string(), "since_op_id": "", "limit": 100}),
         )
         .unwrap();
     let pulled: serde_json::Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(
         pulled["ops"].as_array().unwrap().len(),
-        0,
-        "DEFECT: op-g-three (same hlc text as cursor) is unreachable by strict `hlc > since` — permanently lost for any device past that cursor"
+        2,
+        "both same-hlc ops must stay reachable via the composite (hlc, op_id) cursor"
     );
 
-    // save_cursor exists but is never called by sync_cycle; assert the
-    // observable consequence: B's cursor is also never persisted.
+    // sync_cycle persists its cursor after every batch.
     let cursor: Option<String> = b
         .conn
         .lock()
@@ -491,21 +481,16 @@ async fn defect_same_hlc_ops_lost_by_strict_cursor() {
         })
         .ok();
     assert!(
-        cursor.is_none(),
-        "DEFECT CONFIRMED: sync_cursor table never written by sync_cycle (save_cursor dead code)"
+        cursor.is_some(),
+        "sync_cursor table must be written by sync_cycle"
     );
     // save_cursor itself works when called explicitly (API exists).
-    save_cursor(&b, "marker").unwrap();
+    save_cursor(&b, "marker", "").unwrap();
 }
 
-/// Finding: `sync_cycle` push phase reads `pending_outbox(batch_limit)`
-/// — a cycle only pushes `batch_limit` ops (200 in the shell) even when
-/// MORE are pending; the SyncStatsView.pending count then reports the
-/// remainder but nothing schedules another push. Large offline bursts
-/// (e.g. an AI master plan: 5 milestones × directives + phases ≈ 20+
-/// ops) can exceed limits only at extreme scale; the sharper defect:
-/// push happens ONCE per cycle while pull loops. Any pending>0 after a
-/// user-triggered sync requires the user to click "Sync now" again.
+/// FIXED (was: one push batch per cycle). `sync_cycle` drains the outbox
+/// in a loop, so a 30-op offline burst with batch limit 10 pushes all 30
+/// in one cycle instead of forcing repeated "Sync now" clicks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_push_drains_only_one_batch_per_cycle() {
     let app = relay_app();
@@ -528,6 +513,6 @@ async fn defect_push_drains_only_one_batch_per_cycle() {
         .unwrap();
     }
     let s = sync_cycle(&a, &identity, &transport, 10).unwrap();
-    assert_eq!(s.pushed, 10);
-    assert_eq!(a.pending_outbox(100).unwrap().len(), 20);
+    assert_eq!(s.pushed, 30);
+    assert!(a.pending_outbox(100).unwrap().is_empty());
 }

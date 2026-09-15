@@ -157,16 +157,19 @@ pub(crate) async fn identity_unlock(
     let identity = Identity::from_phrase(phrase.as_str()).map_err(|_| ShellError::BadMnemonic)?;
     let account_id = identity.account_id_hex();
     // Upsert: the public half may already exist from a previous boot.
-    // Keep the persisted challenge positions (verified=true only when
-    // the onboarding verification actually happened).
-    let verified = state
-        .repos
-        .identity()?
-        .map(|c| c.bip39_mnemonic_verified)
-        .unwrap_or(true);
+    // Keep the persisted challenge positions AND the verified flag (the
+    // onboarding verification actually happened) — overwriting indices
+    // with [] would drop the positional challenge and reopen the S2
+    // membership-bypass via the legacy caller-supplied-indices path.
+    let (verified, indices) = match state.repos.identity()? {
+        Some(cfg) if cfg.public_key == account_id => {
+            (cfg.bip39_mnemonic_verified, cfg.verify_indices)
+        }
+        _ => (true, Vec::new()),
+    };
     state
         .repos
-        .insert_identity(&identity, verified, &[])?;
+        .insert_identity(&identity, verified, &indices)?;
     *state.identity.lock().unwrap() = Some(identity);
     Ok(account_id)
 }
@@ -427,8 +430,16 @@ pub(crate) async fn current_directive(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<DirectiveView> {
     let today = today_local();
-    let e = Engine::new(&state.repos, None);
-    let out = e.current(&today)?;
+    // E4: the read path previously built Engine::new(repos, None), so a
+    // canvas-load activation mutated state to `active` without an outbox
+    // op — peers never learned and the one-active invariant diverged.
+    // Pass the unlocked identity through when available so activation
+    // write-throughs like every other transition (still None while the
+    // vault is locked, where there is nothing to sync with anyway).
+    let out = state.with_identity_opt(|identity| {
+        let e = Engine::new(&state.repos, identity);
+        e.current(&today).map_err(ShellError::from)
+    })?;
     Ok(outcome_view(&out, &state.repos))
 }
 

@@ -8,14 +8,6 @@ use axum::http::Request;
 use axum::Router;
 use tower::util::ServiceExt;
 
-fn relay_app() -> Router {
-    let state = Arc::new(wl_relay::AppStateForTest {
-        auth: wl_relay::AuthForTest::new(),
-        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
-    });
-    wl_relay::router_for_test(state)
-}
-
 async fn post(
     app: &Router,
     path: &str,

@@ -7,6 +7,7 @@ use super::StoreError;
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_sync_lww.sql"),
+    include_str!("migrations/0003_settings_hlc.sql"),
 ];
 
 pub fn run(conn: &Connection) -> Result<(), StoreError> {

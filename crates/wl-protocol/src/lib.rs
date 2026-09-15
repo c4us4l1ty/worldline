@@ -167,10 +167,9 @@ mod tests {
         assert_eq!(back.limit, 100);
         assert_eq!(back.since_op_id, "op-9");
         // since_op_id defaults when absent (older clients).
-        let back: PullRequest = serde_json::from_str(
-            &serde_json::json!({"since_hlc": "", "limit": 5}).to_string(),
-        )
-        .unwrap();
+        let back: PullRequest =
+            serde_json::from_str(&serde_json::json!({"since_hlc": "", "limit": 5}).to_string())
+                .unwrap();
         assert_eq!(back.since_op_id, "");
     }
 }

@@ -48,7 +48,7 @@ impl Transport for AxumTransport {
                     String::from_utf8_lossy(&bytes)
                 ));
             }
-            Ok(String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?)
+            String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
         };
         // Try in-place blocking (multi-thread runtime); fall back to a
         // fresh current-thread runtime for single-threaded contexts.
@@ -82,7 +82,7 @@ impl Transport for AxumTransport {
                             String::from_utf8_lossy(&bytes)
                         ));
                     }
-                    Ok(String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?)
+                    String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
                 })
             }
             Err(e) => Err(e.to_string()),
@@ -158,7 +158,7 @@ async fn offline_write_then_sync_converges_two_devices() {
     // ---- Device A: fully offline burst of writes ----
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    a.insert_identity(&identity, true).unwrap();
+    a.insert_identity(&identity, true, &[]).unwrap();
     let g = a
         .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), None)
         .unwrap();
@@ -367,9 +367,11 @@ async fn write_through_syncs_all_tables() {
         .unwrap();
     a.record_bailout(&d.id, BailoutReason::EnergyDepletion, Some("tired"), id)
         .unwrap();
-    let mut settings = AppSettings::default();
-    settings.relay_url = Some("http://127.0.0.1:8080".into());
-    settings.always_on_top = true;
+    let settings = AppSettings {
+        relay_url: Some("http://127.0.0.1:8080".into()),
+        always_on_top: true,
+        ..AppSettings::default()
+    };
     a.save_settings(&settings, id).unwrap();
 
     // Every table above produced outbox ops with zero manual enqueues.

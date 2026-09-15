@@ -130,21 +130,35 @@ impl<'a> Engine<'a> {
 
     /// Marks the active directive (or its current progressive phase)
     /// complete. For progressive directives, intermediate completions
-    /// advance the phase instead of closing the directive (§5.2).
+    /// advance the phase instead of closing the directive (§5.2). The
+    /// reported minutes always come from the POST-advance row (E1), and
+    /// the final phase row is marked done before the directive closes
+    /// (E2) so peers never replicate a junk active-final-phase state.
     pub fn complete(&self, date: &str) -> Result<EngineOutcome, EngineError> {
         let Some(d) = self.repos.active_directive()? else {
             return self.activate_next(date);
         };
         if d.uses_progressive_activation() && d.progressive_step < d.progressive_total {
-            let advanced = self.repos.advance_progressive_step(&d.id, self.identity)?;
-            debug_assert!(advanced);
-            let estimated_minutes = self.minutes_for_step(&d);
+            self.repos.advance_progressive_step(&d.id, self.identity)?;
+            // Re-read: the pre-advance snapshot still points at the old
+            // step, so its minutes belong to the phase just finished.
+            let fresh = self
+                .repos
+                .directive(&d.id)?
+                .ok_or_else(|| StoreError::NotFound(format!("directive {}", d.id)))?;
+            let estimated_minutes = self.current_phase_minutes(&fresh);
+            let phase = self.phase_view(&fresh);
             return Ok(EngineOutcome::DirectiveActive {
-                directive_id: d.id,
-                milestone_id: d.milestone_id,
-                phase: Some((d.progressive_step + 1, d.progressive_total)),
+                directive_id: fresh.id,
+                milestone_id: fresh.milestone_id,
+                phase,
                 estimated_minutes,
             });
+        }
+        if d.uses_progressive_activation() {
+            // Final phase: close the phase row first (replicated via
+            // write-through inside advance), then the directive itself.
+            self.repos.advance_progressive_step(&d.id, self.identity)?;
         }
         self.repos
             .set_directive_state(&d.id, DirectiveState::Completed, self.identity)?;
@@ -265,11 +279,6 @@ impl<'a> Engine<'a> {
         } else {
             d.estimated_minutes
         }
-    }
-
-    /// Minutes for the NEXT step (used right after advancing).
-    fn minutes_for_step(&self, d: &Directive) -> i64 {
-        self.current_phase_minutes(d) // directive row already advanced
     }
 
     fn ensure_milestone_active(&self, milestone_id: &str) -> Result<(), EngineError> {

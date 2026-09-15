@@ -70,14 +70,24 @@ impl Hlc {
     }
 
     /// Issues a new local timestamp (tick).
+    ///
+    /// Counter exhaustion (65 535 same-instant ticks) advances the
+    /// physical component by one tick instead of wrapping: timestamps
+    /// stay strictly monotonic even on coarse wall clocks during bulk
+    /// enqueues (E6 — `wrapping_add` used to regress mid-burst).
     pub fn now(&self, device: u16) -> HlcTimestamp {
         let mut inner = self.inner.lock().expect("HLC mutex poisoned");
         let wall = self.wall_nanos();
         if wall > inner.last_wall_nanos {
             inner.last_wall_nanos = wall;
             inner.counter = 0;
+        } else if inner.counter == u16::MAX {
+            // Same-instant counter exhausted: step physical forward so
+            // the new timestamp still exceeds every predecessor.
+            inner.last_wall_nanos = inner.last_wall_nanos.saturating_add(1).max(wall);
+            inner.counter = 0;
         } else {
-            inner.counter = inner.counter.wrapping_add(1);
+            inner.counter += 1;
         }
         HlcTimestamp {
             physical: inner.last_wall_nanos,
@@ -88,6 +98,8 @@ impl Hlc {
 
     /// Merges a remote timestamp into the local clock (receive event).
     /// Returns the timestamp to stamp on any resulting local update.
+    /// Same overflow rule as [`Hlc::now`]: never wraps, steps physical
+    /// forward instead.
     pub fn observe(&self, remote: &HlcTimestamp, device: u16) -> HlcTimestamp {
         let mut inner = self.inner.lock().expect("HLC mutex poisoned");
         let wall = self.wall_nanos();
@@ -95,13 +107,36 @@ impl Hlc {
         if pt > inner.last_wall_nanos {
             inner.last_wall_nanos = pt;
             inner.counter = 0;
+        } else if inner.counter == u16::MAX {
+            inner.last_wall_nanos = inner.last_wall_nanos.saturating_add(1).max(pt);
+            inner.counter = 0;
         } else {
-            inner.counter = inner.counter.wrapping_add(1);
+            inner.counter += 1;
         }
         HlcTimestamp {
             physical: inner.last_wall_nanos,
             counter: inner.counter,
             device,
+        }
+    }
+
+    /// Current clock head (for persistence across restarts — E5).
+    pub fn head(&self) -> (u64, u16) {
+        let inner = self.inner.lock().expect("HLC mutex poisoned");
+        (inner.last_wall_nanos, inner.counter)
+    }
+
+    /// Restores a persisted clock head at boot (E5). A fresh process
+    /// seeds `last_wall_nanos` from the `hlc_clock` table so a regressed
+    /// wall clock after restart cannot issue timestamps older than
+    /// pre-restart ops.
+    pub fn restore(&self, last_wall_nanos: u64, counter: u16) {
+        let mut inner = self.inner.lock().expect("HLC mutex poisoned");
+        if last_wall_nanos > inner.last_wall_nanos
+            || (last_wall_nanos == inner.last_wall_nanos && counter > inner.counter)
+        {
+            inner.last_wall_nanos = last_wall_nanos;
+            inner.counter = counter;
         }
     }
 }
@@ -216,7 +251,7 @@ mod tests {
         // Simulate `slow` running 10 seconds behind.
         slow.set_drift_nanos(10_000_000_000);
         let t_fast = fast.now(1);
-        let t_slow = slow.now(2);
+        let _t_slow = slow.now(2);
         // slow (behind) observing fast's timestamp jumps forward.
         let merged = slow.observe(&t_fast, 2);
         assert!(merged >= t_fast);
@@ -316,7 +351,10 @@ mod tests {
         let mut sorted = samples;
         sorted.sort();
         texts.sort();
-        let re_sorted: Vec<_> = texts.iter().map(|s| HlcTimestamp::parse(s).unwrap()).collect();
+        let re_sorted: Vec<_> = texts
+            .iter()
+            .map(|s| HlcTimestamp::parse(s).unwrap())
+            .collect();
         assert_eq!(re_sorted, sorted);
     }
 
@@ -338,7 +376,7 @@ mod tests {
         };
         // Both devices compare these the same way regardless of local state.
         assert_eq!(a.cmp(&b), Ordering::Less);
-        assert_eq!(h1.observe(&a, 1) > a, true);
-        assert_eq!(h2.observe(&b, 2) > b, true);
+        assert!(h1.observe(&a, 1) > a);
+        assert!(h2.observe(&b, 2) > b);
     }
 }

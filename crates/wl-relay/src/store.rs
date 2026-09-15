@@ -18,7 +18,6 @@ pub enum StoreError {
     AccountQuota,
 }
 
-
 /// One stored relay op row.
 #[derive(Debug, Clone)]
 pub struct StoredOp {
@@ -134,18 +133,11 @@ pub mod sqlite_backend {
             if changed == 0 {
                 return Ok(()); // already registered
             }
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM accounts",
-                [],
-                |r| r.get(0),
-            )?;
+            let count: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
             if count > ACCOUNT_CAP {
                 // Roll this registration back — the cap is a DoS guard,
                 // not a correctness limit.
-                conn.execute(
-                    "DELETE FROM accounts WHERE public_key = ?1",
-                    [public_key],
-                )?;
+                conn.execute("DELETE FROM accounts WHERE public_key = ?1", [public_key])?;
                 return Err(StoreError::AccountQuota);
             }
             Ok(())

@@ -59,8 +59,17 @@ pub fn sync_cycle<T: Transport>(
     let mut applied = 0;
 
     // ---- Push ----
-    let pending = repos.pending_outbox(batch_limit as i64)?;
-    if !pending.is_empty() {
+    // P3: drain in a loop, not one batch per cycle. A large offline
+    // burst (AI master plan, long offline stretch) may hold many more
+    // ops than `batch_limit`; pushing once per user-triggered cycle
+    // forces repeated "Sync now" clicks with the pending pill accusing
+    // the user of residue the engine refused to drain.
+    loop {
+        let pending = repos.pending_outbox(batch_limit as i64)?;
+        if pending.is_empty() {
+            break;
+        }
+        let batch_len = pending.len();
         let ops: Vec<wl_protocol::PushOp> = pending
             .iter()
             .map(|o: &wl_core::store::repo::OutboxOp| wl_protocol::PushOp {
@@ -87,7 +96,18 @@ pub fn sync_cycle<T: Transport>(
         let mut drained = resp.accepted;
         drained.extend(resp.duplicates.iter().cloned());
         repos.mark_outbox_pushed(&drained)?;
-        pushed = drained.len();
+        pushed += drained.len();
+        if drained.is_empty() {
+            // Relay stored nothing (validation refuse, oversized batch,
+            // transient 2xx with empty lists): stop instead of hot-looping
+            // the same batch forever; the residue stays pending for the
+            // next cycle and surfaces via the pending count.
+            break;
+        }
+        if batch_len < batch_limit {
+            // Last partial batch: the outbox is drained.
+            break;
+        }
     }
 
     // ---- Pull ----
@@ -264,13 +284,15 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
         }
         CrdtTable::AppSettings => {
             conn.execute(
-                "INSERT INTO app_settings (id,theme,hotkey,always_on_top,ai_provider,tier1_model,tier2_model,relay_url)
-                 VALUES (1,?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(id) DO UPDATE SET theme=?1,hotkey=?2,always_on_top=?3,ai_provider=?4,tier1_model=?5,tier2_model=?6,relay_url=?7",
+                "INSERT INTO app_settings (id,theme,hotkey,always_on_top,ai_provider,tier1_model,tier2_model,relay_url,hlc_timestamp)
+                 VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(id) DO UPDATE SET theme=?1,hotkey=?2,always_on_top=?3,ai_provider=?4,tier1_model=?5,tier2_model=?6,relay_url=?7,hlc_timestamp=?8
+                 WHERE app_settings.hlc_timestamp < ?8",
                 rusqlite::params![
                     get("theme").unwrap_or("dark".into()), get("hotkey").unwrap_or("alt+space".into()),
                     f["always_on_top"].as_i64().unwrap_or(0),
-                    get("ai_provider"), get("tier1_model"), get("tier2_model"), get("relay_url")
+                    get("ai_provider"), get("tier1_model"), get("tier2_model"), get("relay_url"),
+                    ts_s
                 ],
             )?;
         }
@@ -293,11 +315,7 @@ fn current_cursor(repos: &Repos) -> Result<(String, String), SyncError> {
 
 /// Persists the pull cursor (idempotent; called by `sync_cycle`
 /// itself so the shell cannot forget).
-pub fn save_cursor(
-    repos: &Repos,
-    cursor: &str,
-    op_id: &str,
-) -> Result<(), SyncError> {
+pub fn save_cursor(repos: &Repos, cursor: &str, op_id: &str) -> Result<(), SyncError> {
     let conn = repos.conn.lock().unwrap();
     conn.execute(
         "INSERT INTO sync_cursor (id, cursor, op_id) VALUES (1, ?1, ?2)

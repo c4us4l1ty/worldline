@@ -12,7 +12,6 @@
 mod app_state;
 mod commands;
 mod error;
-mod events;
 mod hotkey;
 mod relay;
 mod vault;
@@ -48,7 +47,6 @@ fn main() {
                     let _ = win.set_always_on_top(true);
                 }
             }
-            events::register_emit_timer(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
