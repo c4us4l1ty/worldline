@@ -203,3 +203,20 @@ fn http_failure_maps_to_error() {
     let out = AiDispatcher::master_plan(&provider, "G", None, None, "", execute, &r, None);
     assert!(out.is_err());
 }
+
+#[test]
+fn parse_plan_rejects_phases_contradicting_estimate() {
+    // The phase table replaces the headline estimate at persist time,
+    // so a 60m directive with 10m of phases would silently shrink.
+    let bad = r#"{"milestones":[{"title":"M","directives":[
+      {"title":"Big migration","estimated_minutes":60,"phases":[
+        {"title":"Step one","minutes":5},
+        {"title":"Step two","minutes":5}]}]}]}"#;
+    assert!(parse_plan(bad).is_err());
+    // Within the 2x band: accepted.
+    let ok = r#"{"milestones":[{"title":"M","directives":[
+      {"title":"Big migration","estimated_minutes":60,"phases":[
+        {"title":"Step one","minutes":25},
+        {"title":"Step two","minutes":25}]}]}]}"#;
+    assert!(parse_plan(ok).is_ok());
+}

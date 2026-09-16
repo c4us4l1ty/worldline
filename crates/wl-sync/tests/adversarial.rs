@@ -13,6 +13,8 @@ use wl_core::store::open_in_memory;
 use wl_core::store::repo::Repos;
 use wl_sync::sync::{save_cursor, sync_cycle, Transport};
 
+use base64::Engine as _;
+
 struct AxumTransport {
     app: Router,
     token: String,
@@ -515,4 +517,102 @@ async fn defect_push_drains_only_one_batch_per_cycle() {
     let s = sync_cycle(&a, &identity, &transport, 10).unwrap();
     assert_eq!(s.pushed, 30);
     assert!(a.pending_outbox(100).unwrap().is_empty());
+}
+
+/// FIXED (was: any undecryptable/unparseable pulled op aborted the whole
+/// cycle *before* the cursor advanced — one crafted row bricked every
+/// future pull forever). Poison ops are now watermarked (quarantine)
+/// and skipped; the cycle completes and the cursor advances past them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_poison_op_wedges_pull_cursor_forever() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport {
+        app: app.clone(),
+        token,
+    };
+
+    // Device A: one good write, pushed.
+    let conn_a = open_in_memory().unwrap();
+    let a = Repos::new(conn_a, 1);
+    let g = a.create_goal("Solo", None, None, None).unwrap();
+    a.enqueue_outbox(
+        &identity,
+        "goals",
+        &g.id,
+        &serde_json::json!({"id": g.id, "title": "Solo", "description": null,
+            "target_date": null, "status": "active"}),
+    )
+    .unwrap();
+    sync_cycle(&a, &identity, &transport, 100).unwrap();
+
+    // Attacker (any authenticated client) stores a poison op: valid
+    // base64 the relay accepts, but truncated below the 12+16 sealed
+    // floor so no client can ever decrypt it.
+    let poison_hlc = format!("{:020}.{:05}.{:05}", 1u64, 0u16, 9u16);
+    let body = serde_json::json!({"ops": [{
+        "operation_id": "op-poison-1",
+        "hlc": poison_hlc,
+        "table": "goals",
+        "record_id": "g-poison",
+        "sealed_b64": base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD, b"short"),
+    }]});
+    let resp = transport.post("/sync/push", &body).unwrap();
+    let pushed: wl_protocol::PushResponse = serde_json::from_str(&resp).unwrap();
+    assert_eq!(pushed.accepted, vec!["op-poison-1".to_string()]);
+
+    // Device B pulls: good op applies, poison quarantines, cycle is Ok.
+    let conn_b = open_in_memory().unwrap();
+    let b = Repos::new(conn_b, 2);
+    let s1 = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(s1.pulled, 2);
+    assert_eq!(s1.applied, 1);
+    assert_eq!(s1.quarantined, 1);
+    assert!(b.goal(&g.id).unwrap().is_some());
+
+    // No wedge: the next cycle pulls nothing and also succeeds.
+    let s2 = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(s2.pulled, 0);
+    assert_eq!(s2.quarantined, 0);
+}
+
+/// FIXED (was: pulled remote timestamps were never merged into the
+/// local HLC — `observe_remote` built a throwaway clock). After a pull
+/// from a fast peer, local ticks must exceed the remote timestamp or
+/// LWW arbitration inverts on the next local write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_pull_never_merges_remote_clock() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport {
+        app: app.clone(),
+        token,
+    };
+
+    let conn_a = open_in_memory().unwrap();
+    let a = Repos::new(conn_a, 1);
+    let g = a.create_goal("Clock", None, None, None).unwrap();
+    a.enqueue_outbox(
+        &identity,
+        "goals",
+        &g.id,
+        &serde_json::json!({"id": g.id, "title": "Clock", "description": null,
+            "target_date": null, "status": "active"}),
+    )
+    .unwrap();
+    sync_cycle(&a, &identity, &transport, 100).unwrap();
+
+    let conn_b = open_in_memory().unwrap();
+    let b = Repos::new(conn_b, 2);
+    let s = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(s.applied, 1);
+    let remote = b.goal(&g.id).unwrap().unwrap().hlc_timestamp;
+    let local = b.hlc.now(b.device_id());
+    assert!(
+        local > remote,
+        "local tick {local} must exceed pulled remote {remote}"
+    );
 }

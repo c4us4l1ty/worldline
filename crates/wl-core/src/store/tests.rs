@@ -326,3 +326,136 @@ fn goal_status_transitions() {
         .unwrap();
     assert!(r.active_goal().unwrap().is_none());
 }
+
+#[test]
+fn mnemonic_verified_roundtrip() {
+    // Regression: the UPDATE bound ?2/?3 with only two params, so every
+    // verification write failed with InvalidParameterIndex.
+    let r = setup();
+    let id = Identity::generate().unwrap();
+    r.insert_identity(&id, false, &[2, 6, 10]).unwrap();
+    assert!(!r.identity().unwrap().unwrap().bip39_mnemonic_verified);
+    r.set_mnemonic_verified(true).unwrap();
+    assert!(r.identity().unwrap().unwrap().bip39_mnemonic_verified);
+    r.set_mnemonic_verified(false).unwrap();
+    assert!(!r.identity().unwrap().unwrap().bip39_mnemonic_verified);
+}
+
+#[test]
+fn corrupt_enum_rows_rejected_at_write_time() {
+    // Defense in depth, layer 1: CHECK constraints refuse bogus enum
+    // strings, so the row-mapper error path (layer 2, `parse_enum`) is
+    // unreachable through SQL — a corrupt row can never be constructed
+    // to panic the old `expect()` mappers on.
+    let r = setup();
+    let (g, ms) = goal_with_milestones(&r);
+    let d = r
+        .create_directive(&ms[0].id, "T", None, 20, 1, "2026-09-13", &[], None)
+        .unwrap();
+    assert!(r
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE goals SET status='bogus' WHERE id=?1", [&g.id])
+        .is_err());
+    assert!(r
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE directives SET state='bogus' WHERE id=?1",
+            [&d.id],
+        )
+        .is_err());
+    // Legit rows still read fine.
+    assert!(r.goal(&g.id).is_ok());
+    assert!(r.directive(&d.id).is_ok());
+    assert!(r.milestone(&ms[0].id).is_ok());
+}
+
+#[test]
+fn activating_second_directive_parks_first() {
+    // Stackelberg invariant enforced at the write path: activating B
+    // while A is active re-queues A (with its own HLC bump), so
+    // active_directive() can never hide a second active behind LIMIT 1.
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let a = r
+        .create_directive(&ms[0].id, "A", None, 20, 1, "2026-09-13", &[], None)
+        .unwrap();
+    let b = r
+        .create_directive(&ms[0].id, "B", None, 20, 1, "2026-09-13", &[], None)
+        .unwrap();
+    r.set_directive_state(&a.id, DirectiveState::Active, None)
+        .unwrap();
+    r.set_directive_state(&b.id, DirectiveState::Active, None)
+        .unwrap();
+    assert_eq!(r.active_directive().unwrap().unwrap().id, b.id);
+    assert_eq!(
+        r.directive(&a.id).unwrap().unwrap().state,
+        DirectiveState::Queued
+    );
+    let count: i64 = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM directives WHERE state='active'",
+            [],
+            |x| x.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn enforce_single_active_keeps_newest() {
+    // Simulates a merged remote state with two actives (raw SQL, the
+    // way LWW apply can produce it): the newest HLC wins, losers park.
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let a = r
+        .create_directive(&ms[0].id, "A", None, 20, 1, "2026-09-13", &[], None)
+        .unwrap();
+    let b = r
+        .create_directive(&ms[0].id, "B", None, 20, 1, "2026-09-13", &[], None)
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE directives SET state='active' WHERE id IN (?1, ?2)",
+            [&a.id, &b.id],
+        )
+        .unwrap();
+    let parked = r.enforce_single_active(None).unwrap();
+    assert_eq!(parked, 1);
+    let count: i64 = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM directives WHERE state='active'",
+            [],
+            |x| x.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    // Idempotent when already clean.
+    assert_eq!(r.enforce_single_active(None).unwrap(), 0);
+}
+
+#[test]
+fn observe_remote_hlc_advances_local_clock() {
+    // Receive-event merge: after observing a fast peer's timestamp,
+    // local ticks must exceed it (otherwise LWW inverts).
+    let r = setup();
+    let remote = crate::hlc::HlcTimestamp {
+        physical: 9_999_999_999_999_999_999,
+        counter: 0,
+        device: 7,
+    };
+    r.observe_remote_hlc(&remote);
+    let local = r.hlc.now(r.device_id());
+    assert!(local > remote);
+}
