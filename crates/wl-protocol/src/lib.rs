@@ -145,12 +145,15 @@ mod tests {
 
     #[test]
     fn challenge_payload_is_deterministic() {
-        let a = challenge_signing_payload("deadbeef", 42);
-        let b = challenge_signing_payload("deadbeef", 42);
+        // 32-byte nonce hex, exactly as the relay issues.
+        let nonce = "deadbeef".repeat(8);
+        assert_eq!(nonce.len(), 64);
+        let a = challenge_signing_payload(&nonce, 42);
+        let b = challenge_signing_payload(&nonce, 42);
         assert_eq!(a, b);
-        assert_eq!(a.len(), 4 + 8);
+        assert_eq!(a.len(), 32 + 8);
         // Expiry encoded big-endian: stable across platforms.
-        assert_eq!(&a[4..], &42i64.to_be_bytes());
+        assert_eq!(&a[32..], &42i64.to_be_bytes());
     }
 
     #[test]
