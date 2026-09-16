@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use wl_relay::auth::AuthState;
 use wl_relay::router;
+#[cfg(feature = "sqlite")]
 use wl_relay::store::sqlite_backend::SqliteStore;
 use wl_relay::store::BlobStore;
 use wl_relay::AppState;
@@ -15,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    #[cfg(feature = "sqlite")]
     let db_path = std::env::var("WL_RELAY_DB").unwrap_or_else(|_| "wl-relay.sqlite".into());
     let addr: SocketAddr = std::env::var("WL_RELAY_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())

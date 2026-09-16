@@ -50,9 +50,7 @@ pub fn validate_relay_url(raw: &str) -> Result<String, String> {
     }
     // GCE metadata hostname (exact + subdomains).
     let host_lc = host.to_ascii_lowercase();
-    if host_lc == "metadata.google.internal"
-        || host_lc.ends_with(".metadata.google.internal")
-    {
+    if host_lc == "metadata.google.internal" || host_lc.ends_with(".metadata.google.internal") {
         return Err("cloud metadata hosts are not allowed as relays".into());
     }
     // Cloud instance-metadata IPs, in every representable form

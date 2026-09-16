@@ -122,11 +122,7 @@ pub struct PullResponse {
 /// tests/dev; release decodes leniently but the relay only ever looks
 /// up issued challenges first, so a malformed nonce can never verify.
 pub fn challenge_signing_payload(nonce_hex: &str, expires_at: i64) -> Vec<u8> {
-    debug_assert_eq!(
-        nonce_hex.len(),
-        64,
-        "challenge nonce must be 32 bytes hex"
-    );
+    debug_assert_eq!(nonce_hex.len(), 64, "challenge nonce must be 32 bytes hex");
     let mut buf = Vec::with_capacity(32 + 8);
     buf.extend_from_slice(&hex::decode(nonce_hex).unwrap_or_default());
     buf.extend_from_slice(&expires_at.to_be_bytes());

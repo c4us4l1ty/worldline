@@ -359,11 +359,10 @@ pub mod postgres_backend {
             self.rt.block_on(async {
                 let mut tx = self.pool.begin().await?;
                 if let Some(first) = ops.first() {
-                    let row: (i64,) =
-                        sqlx::query_as("SELECT COUNT(*) FROM ops WHERE account = $1")
-                            .bind(&first.account)
-                            .fetch_one(&mut *tx)
-                            .await?;
+                    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ops WHERE account = $1")
+                        .bind(&first.account)
+                        .fetch_one(&mut *tx)
+                        .await?;
                     if row.0 + ops.len() as i64 > OPS_PER_ACCOUNT_CAP {
                         return Err(StoreError::OpsQuota);
                     }

@@ -362,10 +362,7 @@ fn corrupt_enum_rows_rejected_at_write_time() {
         .conn
         .lock()
         .unwrap()
-        .execute(
-            "UPDATE directives SET state='bogus' WHERE id=?1",
-            [&d.id],
-        )
+        .execute("UPDATE directives SET state='bogus' WHERE id=?1", [&d.id],)
         .is_err());
     // Legit rows still read fine.
     assert!(r.goal(&g.id).is_ok());

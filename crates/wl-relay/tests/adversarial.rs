@@ -362,19 +362,49 @@ async fn push_boundary_rejects_malformed_envelopes() {
     let canon = format!("{:020}.{:05}.{:05}", 1_000_000u64, 0u16, 1u16);
 
     // Unpadded HLC: parses numerically but breaks TEXT ordering.
-    let r = post(&app, "/sync/push", push_body("op-1", "1000000.0.1", "goals", 48), Some(&token)).await;
+    let r = post(
+        &app,
+        "/sync/push",
+        push_body("op-1", "1000000.0.1", "goals", 48),
+        Some(&token),
+    )
+    .await;
     assert_eq!(r.status(), 400);
     // Garbage HLC.
-    let r = post(&app, "/sync/push", push_body("op-2", "not-an-hlc", "goals", 48), Some(&token)).await;
+    let r = post(
+        &app,
+        "/sync/push",
+        push_body("op-2", "not-an-hlc", "goals", 48),
+        Some(&token),
+    )
+    .await;
     assert_eq!(r.status(), 400);
     // Unknown table.
-    let r = post(&app, "/sync/push", push_body("op-3", &canon, "evil_table", 48), Some(&token)).await;
+    let r = post(
+        &app,
+        "/sync/push",
+        push_body("op-3", &canon, "evil_table", 48),
+        Some(&token),
+    )
+    .await;
     assert_eq!(r.status(), 400);
     // Empty ids.
-    let r = post(&app, "/sync/push", push_body("", &canon, "goals", 48), Some(&token)).await;
+    let r = post(
+        &app,
+        "/sync/push",
+        push_body("", &canon, "goals", 48),
+        Some(&token),
+    )
+    .await;
     assert_eq!(r.status(), 400);
     // Oversized blob (> 256 KiB).
-    let r = post(&app, "/sync/push", push_body("op-4", &canon, "goals", 300_000), Some(&token)).await;
+    let r = post(
+        &app,
+        "/sync/push",
+        push_body("op-4", &canon, "goals", 300_000),
+        Some(&token),
+    )
+    .await;
     assert_eq!(r.status(), 413);
     // Oversized batch (> 500 ops).
     let big: Vec<_> = (0..501)
@@ -398,7 +428,13 @@ async fn push_boundary_rejects_malformed_envelopes() {
     assert_eq!(r.status(), 413);
 
     // Canonical envelope: accepted.
-    let r = post(&app, "/sync/push", push_body("op-ok", &canon, "goals", 48), Some(&token)).await;
+    let r = post(
+        &app,
+        "/sync/push",
+        push_body("op-ok", &canon, "goals", 48),
+        Some(&token),
+    )
+    .await;
     assert_eq!(r.status(), 200);
     // Nothing rejected leaked into storage: exactly one op pulls back.
     let r = post(
@@ -430,7 +466,12 @@ async fn push_quota_caps_authenticated_storage_flood() {
             .map(|j| wl_relay::store::StoredOp {
                 operation_id: format!("fill-{i}-{j}"),
                 account: pk.clone(),
-                hlc: format!("{:020}.{:05}.{:05}", 1_000_000u64 + i * 10_000 + j as u64, 0u16, 1u16),
+                hlc: format!(
+                    "{:020}.{:05}.{:05}",
+                    1_000_000u64 + i * 10_000 + j as u64,
+                    0u16,
+                    1u16
+                ),
                 table: "goals".into(),
                 record_id: "r".into(),
                 sealed: vec![0u8; 48],

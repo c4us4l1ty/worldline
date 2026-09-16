@@ -450,9 +450,8 @@ impl Repos {
         if state == DirectiveState::Active {
             let others: Vec<String> = {
                 let conn = self.conn.lock().unwrap();
-                let mut stmt = conn.prepare(
-                    "SELECT id FROM directives WHERE state = 'active' AND id != ?1",
-                )?;
+                let mut stmt =
+                    conn.prepare("SELECT id FROM directives WHERE state = 'active' AND id != ?1")?;
                 let rows = stmt
                     .query_map([id], |r| r.get(0))?
                     .collect::<Result<_, _>>()?;
@@ -499,10 +498,7 @@ impl Repos {
     /// winner is deterministic across replicas (max `hlc_timestamp`,
     /// tie-break min `id`); losers are parked to queued with
     /// write-through. Returns the number parked.
-    pub fn enforce_single_active(
-        &self,
-        identity: Option<&Identity>,
-    ) -> Result<usize, StoreError> {
+    pub fn enforce_single_active(&self, identity: Option<&Identity>) -> Result<usize, StoreError> {
         let actives: Vec<String> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn.prepare(
@@ -665,7 +661,11 @@ impl Repos {
                     title: r.get(2)?,
                     instruction: r.get(3)?,
                     minutes: r.get(4)?,
-                    state: parse_enum("phase state", &r.get::<_, String>(5)?, PhaseState::from_str)?,
+                    state: parse_enum(
+                        "phase state",
+                        &r.get::<_, String>(5)?,
+                        PhaseState::from_str,
+                    )?,
                     hlc_timestamp: parse_hlc(&r.get::<_, String>(6)?)?,
                 })
             })?

@@ -65,6 +65,7 @@ fn err(status: StatusCode, msg: &str) -> axum::response::Response {
 /// current thread"). Store errors map to quota-429s or a generic 500:
 /// raw storage strings never reach the wire (info-leak surface).
 /// Callers move an `Arc` clone into `f` (it is `'static`).
+#[allow(clippy::result_large_err)]
 async fn blocking<F, T>(f: F) -> Result<T, axum::response::Response>
 where
     F: FnOnce() -> Result<T, store::StoreError> + Send + 'static,
@@ -103,9 +104,7 @@ async fn challenge(
             // registration cap (unauthenticated DoS guard).
             let key = req.public_key.clone();
             let owned = state.clone();
-            if let Err(resp) =
-                blocking(move || owned.blobs.register_account(&key)).await
-            {
+            if let Err(resp) = blocking(move || owned.blobs.register_account(&key)).await {
                 return resp;
             }
             (
@@ -324,6 +323,7 @@ pub fn open_store(db_path: &str) -> Result<Box<dyn BlobStore>, store::StoreError
 
 /// Test-support re-exports (integration tests in wl-sync).
 pub use auth::AuthState as AuthForTest;
+#[cfg(feature = "sqlite")]
 pub use store::sqlite_backend::SqliteStore as SqliteForTest;
 pub type AppStateForTest = AppState;
 

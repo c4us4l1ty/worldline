@@ -193,11 +193,8 @@ fn apply_pulled_op(
     identity: &Identity,
     op: &wl_protocol::PushOp,
 ) -> Result<(), SyncError> {
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &op.sealed_b64,
-    )
-    .map_err(|_| SyncError::Protocol("bad base64 in pulled op".into()))?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &op.sealed_b64)
+        .map_err(|_| SyncError::Protocol("bad base64 in pulled op".into()))?;
     let sealed = Sealed::from_bytes(&bytes)?;
     let aad = format!("{}:{}", op.table, op.record_id);
     let plaintext = aead::unseal(identity, &sealed, aad.as_bytes())?;
