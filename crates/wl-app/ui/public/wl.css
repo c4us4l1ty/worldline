@@ -46,6 +46,12 @@
   --wl-radius-card: 1.25rem;
   --wl-radius-btn: 0.75rem;
   --wl-radius-pill: 9999px;
+
+  /* Motion architecture (spec §3.1) */
+  --ease-tactile: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-instant: 120ms;
+  --duration-settle: 200ms;
+  --duration-modal: 260ms;
 }
 
 /* Light theme overrides via [data-theme="light"] on <html> */
@@ -69,6 +75,51 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* Strict programmatic focus ring (spec §1 Tab traversal). */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 1px solid var(--wl-accent-coral);
+  outline-offset: 2px;
+}
+
+.interactive-action {
+  transition: transform var(--duration-instant) var(--ease-tactile),
+              background-color var(--duration-instant) var(--ease-tactile),
+              box-shadow var(--duration-instant) var(--ease-tactile);
+}
+.interactive-action:active {
+  transform: scale(0.985) translateY(1px);
+}
+
+/* Directive advance: next card enters from 8px below over 200ms. */
+@keyframes wl-card-enter {
+  from { transform: translateY(8px); opacity: 0.0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.wl-card-enter {
+  animation: wl-card-enter var(--duration-settle) var(--ease-tactile);
+}
+/* Coral pulse on the progress track when a directive advances. */
+@keyframes wl-progress-pulse {
+  0% { background-color: var(--wl-accent-coral); }
+  100% { background-color: var(--wl-cta-bg); }
+}
+.wl-card-enter .wl-progress-bar {
+  animation: wl-progress-pulse var(--duration-settle) var(--ease-tactile);
+}
+/* Escape modal entry: overlay fades 160ms, sheet rises 16px. */
+@keyframes wl-modal-fade {
+  from { opacity: 0.0; }
+  to { opacity: 1; }
+}
+@keyframes wl-sheet-rise {
+  from { transform: translateY(16px); opacity: 0.0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 
 html, body, #main {
@@ -393,21 +444,33 @@ body {
 .wl-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(14, 14, 13, 0.82);
+  background: rgba(19, 19, 18, 0.85);
   display: flex;
   align-items: flex-end;
   z-index: 40;
   border-radius: 0;
+  animation: wl-modal-fade 160ms var(--ease-tactile);
+}
+.wl-modal-centered {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
 }
 .wl-modal-sheet {
   width: 100%;
   background-color: var(--wl-surface-card);
-  border-top: 1px solid var(--wl-border-strong);
-  border-radius: var(--wl-radius-card) var(--wl-radius-card) 0 0;
+  border: 1px solid var(--wl-border-strong);
+  border-radius: var(--wl-radius-card);
   padding: 24px 22px 28px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
+  animation: wl-sheet-rise var(--duration-modal) var(--ease-tactile);
+}
+.wl-modal-centered-sheet {
+  max-width: 372px;
 }
 .wl-modal-header {
   font-family: var(--font-directive);
@@ -535,6 +598,96 @@ body {
   padding: 8px 16px;
   z-index: 60;
   text-transform: uppercase;
+}
+
+/* Spec additions: BYOK pills, phase checklist, coral CTA, drawer. */
+.wl-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.wl-provider-pills {
+  display: flex;
+  gap: 8px;
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-pill);
+  padding: 4px;
+}
+.wl-provider-pill {
+  flex: 1;
+  height: 36px;
+  border-radius: var(--wl-radius-pill);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--wl-text-muted);
+  font-family: var(--font-directive);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-provider-pill-active {
+  background-color: var(--wl-surface-elevated);
+  border-color: var(--wl-border-strong);
+  color: var(--wl-text-primary);
+}
+.wl-phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 16px 0;
+}
+.wl-phase-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--wl-text-muted);
+}
+.wl-phase-now { color: var(--wl-text-primary); }
+.wl-phase-glyph { font-family: var(--font-mono); font-size: 12px; }
+.wl-phase-now .wl-phase-glyph { color: var(--wl-accent-coral); }
+.wl-phase-text { font-family: var(--font-body); }
+.wl-char-count {
+  font-size: 10px;
+  color: var(--wl-text-muted);
+  text-align: right;
+}
+.wl-btn-coral {
+  width: 100%;
+  height: 48px;
+  background-color: var(--wl-accent-coral);
+  color: var(--wl-text-primary);
+  font-family: var(--font-directive);
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: var(--wl-radius-btn);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transition: transform var(--duration-instant) var(--ease-tactile),
+              filter var(--duration-instant) var(--ease-tactile);
+}
+.wl-btn-coral:hover { filter: brightness(1.06); transform: translateY(-1px); }
+.wl-btn-coral:active { transform: scale(0.985) translateY(1px); }
+.wl-drawer-backdrop {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.wl-drawer-sheet { max-width: 372px; }
+.wl-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.wl-drawer-close {
+  width: auto;
+  height: 36px;
+  padding: 0 14px;
 }
 
 /* Font faces: bundled OFL assets, no CDN (local-first, skill §6) */

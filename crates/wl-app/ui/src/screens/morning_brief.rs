@@ -81,18 +81,26 @@ pub fn MorningBriefScreen() -> Element {
                     "No API key — plan manually"
                 }
             } else {
+                p { class: "wl-body-muted wl-mono", style: "margin-bottom: 12px;",
+                    "Shell dispatch returns titles only — estimates render on the canvas."
+                }
                 div { class: "wl-directive-card", style: "margin-bottom: 16px;",
                     for (i, d) in briefing.read().clone().unwrap_or_default().iter().take(3).enumerate() {
-                        div { key: "{i}",
-                            div { class: "wl-directive-step-badge", "Directive {i + 1}" }
-                            p { class: "wl-directive-title", style: "font-size: 19px; margin-bottom: 12px;", "{d}" }
+                        div { key: "{i}", style: "margin-bottom: 12px;",
+                            div { class: "wl-directive-step-badge", "[0{i + 1}] Dispatched directive" }
+                            p { class: "wl-directive-title", style: "font-size: 19px; margin-bottom: 4px;", "{d}" }
+                            p { class: "wl-body-muted", "Est: on canvas · Stackelberg order {i + 1}/3" }
                         }
                     }
+                }
+                p { class: "wl-body-muted", style: "margin-bottom: 12px;",
+                    "Eliminate decision overhead. Follow the vector."
                 }
                 button {
                     class: "wl-btn-primary",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
-                    "Accept and enter the line"
+                    span { "Commence Directive 01" }
+                    kbd { class: "wl-kbd", "⌘↵" }
                 }
             }
         }

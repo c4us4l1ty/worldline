@@ -46,12 +46,20 @@ pub fn CheckInScreen() -> Element {
     let pct = (v.estimate_adjustment * 100.0).round();
 
     rsx! {
-        div { class: "wl-scroll-region",
+        div {
+            class: "wl-scroll-region",
+            tabindex: "0",
+            onkeydown: move |e: Event<KeyboardData>| {
+                if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
+                    let open = *ctx.telemetry_open.read();
+                    { let mut s = ctx.telemetry_open; *s.write() = !open; }
+                }
+            },
             h1 { class: "wl-serif-title",
-                "Evening " span { class: "wl-italic-accent", "audit" }
+                "Evening " span { class: "wl-italic-accent", "recalibration" }
             }
             p { class: "wl-body-muted", style: "margin-bottom: 18px;",
-                "Thirty seconds. One honest answer. Skips are velocity adjustments, not failures — the system recalibrates like a GPS, never like an alarm."
+                "Today's vector audit. Skips are velocity adjustments, not failures — the system recalibrates like a GPS, never like an alarm."
             }
 
             if !*submitted.read() {
@@ -78,26 +86,28 @@ pub fn CheckInScreen() -> Element {
                     }
                 }
             } else {
-                div { class: "wl-velocity-strip",
-                    div {
-                        span { class: "wl-velocity-metric", "Milestones left" }
-                        span { class: "wl-velocity-value", "{v.milestones_remaining}" }
-                    }
-                    div {
-                        span { class: "wl-velocity-metric", "Days left" }
-                        span { class: "wl-velocity-value", "{v.days_remaining}" }
-                    }
-                    div {
-                        span { class: "wl-velocity-metric", "Recalibrated" }
-                        span { class: "wl-velocity-value", "{pct}%" }
+                div { class: "wl-directive-card", style: "margin-bottom: 12px; padding: 18px;",
+                    div { class: "wl-directive-step-badge", "Trajectory computation" }
+                    p { class: "wl-body-muted wl-mono", "Remaining scope: {v.milestones_remaining} directives" }
+                    p { class: "wl-body-muted wl-mono", "Days to horizon: {v.days_remaining} days" }
+                    p { class: "wl-body-muted wl-mono", "Required velocity: {v.target_per_day:.2} / day" }
+                    p { class: "wl-body-muted wl-mono", "Rolling average: {v.completion_ratio:.2} · adjustment {pct}%" }
+                    p { class: "wl-body-muted", style: "margin-top: 8px;",
+                        "V_target = remaining milestones / remaining days. No debt carried forward. Plan recalculated cleanly."
                     }
                 }
-                p { class: "wl-body-muted", style: "margin-top: 16px;",
+                p { class: "wl-body-muted", style: "margin-top: 4px;",
                     "Trajectory adjusted for reality. Tomorrow's estimates reflect actual velocity — no backlog guilt."
                 }
                 button {
-                    class: "wl-btn-ghost",
+                    class: "wl-btn-primary",
                     style: "margin-top: 14px;",
+                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Dormant; } },
+                    "Commit vector & rest"
+                }
+                button {
+                    class: "wl-btn-ghost",
+                    style: "margin-top: 8px;",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
                     "Return to the line"
                 }

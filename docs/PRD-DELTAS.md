@@ -144,3 +144,27 @@ Locked decisions from the planning session are marked [approved].
     `estimate_adjustment` is computed and displayed but not applied to
     future estimates (E7); `blocked` directives have no unblock path and
     `skipped` never completes a milestone (E8).
+
+## Frontend pass (2026-09-16, UI-crate only — no new shell commands)
+
+34. **BYOK onboarding allows skip** — spec shows `BIP39 → BYOK → runtime`
+    as a hard gate; the UI routes verify/restore → `ByokSetup` → runtime
+    but `Continue without key — manual mode` stays (PRD delta 6, Tier-3
+    manual fallback). Returning unlocks (`identity_unlock`) go straight
+    to the canvas since provider choice persists in settings.
+35. **Morning briefing titles-only** — `morning_briefing` returns
+    `Vec<String>`; milestone headers + per-directive estimates on the
+    brief screen are labels from `current_directive`/static copy, not
+    shell estimates. Estimates render authoritatively on the canvas.
+36. **Telemetry drawer is reuse-only** — HLC head and SQLite WAL size have
+    no shell command and render as unavailable instead of fabricated
+    data; drawer shows `settings_get` state + `sync_now` pending/pushed/
+    pulled + static `420×747` geometry. Full key purge stays per-provider
+    `delete_api_key` in Settings (no vault-wide purge command added).
+37. **Escape modal centered, not bottom-sheet** — spec backdrop is
+    `rgba(19,19,18,0.85)` centered; the old bottom-sheet CSS was replaced.
+    Backdrop click still asks `Keep the directive active?` (friction
+    preserved); `1/2/3` + `Esc` keys and a 140-char note cap added.
+38. **`Ctrl+,` is the web equivalent of spec `⌘,`** — WASM sees Ctrl;
+    the drawer also opens from the timer pill and closes on `Esc`.
+    `Alt+Space` summon stays native in `hotkey.rs`.

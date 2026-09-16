@@ -233,7 +233,7 @@ pub fn SettingsScreen() -> Element {
                                     }
                                     flash(
                                         &ctx,
-                                        &format!("SYNCED ↑{} ↓{}", s.pushed, s.pulled).as_str(),
+                                        format!("SYNCED ↑{} ↓{}", s.pushed, s.pulled).as_str(),
                                     );
                                 }
                                 Err(_) => {

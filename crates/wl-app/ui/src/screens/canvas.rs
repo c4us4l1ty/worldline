@@ -42,10 +42,25 @@ pub fn CanvasScreen() -> Element {
             tabindex: "0",
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
+                // Telemetry drawer takes precedence on Escape.
+                if *ctx.telemetry_open.read() {
+                    if e.key() == Key::Escape {
+                        { let mut s = ctx.telemetry_open; *s.write() = false; }
+                    }
+                    return;
+                }
+                // Ctrl+, toggles the telemetry drawer (web equiv of ⌘,).
+                if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
+                    let open = *ctx.telemetry_open.read();
+                    { let mut s = ctx.telemetry_open; *s.write() = !open; }
+                    return;
+                }
                 // ⌘+Enter / Ctrl+Enter completes; Escape toggles bailout (skill §7.5).
                 if e.key() == Key::Enter && (e.modifiers().meta() || e.modifiers().ctrl()) {
-                    let ctx = ctx;
-                    spawn(async move { complete_current(&ctx).await; });
+                    if !*ctx.escape_open.read() {
+                        let ctx = ctx;
+                        spawn(async move { complete_current(&ctx).await; });
+                    }
                 } else if e.key() == Key::Escape {
                     let open = *ctx.escape_open.read();
                     { let mut s = ctx.escape_open; *s.write() = !open; }
@@ -72,8 +87,9 @@ pub fn CanvasScreen() -> Element {
                 }
                 button {
                     class: "wl-hud-timer",
+                    title: "System telemetry (Ctrl+,)",
                     style: "border: 1px solid var(--wl-border-subtle); cursor: pointer; font-family: var(--font-mono);",
-                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = crate::app::Screen::Settings; } },
+                    onclick: move |_| { { let mut s = ctx.telemetry_open; *s.write() = true; } },
                     "{timer}"
                 }
             }
@@ -127,19 +143,36 @@ pub fn CanvasScreen() -> Element {
 #[component]
 pub fn DirectiveCard(d: DirectiveView) -> Element {
     let phase_badge = match d.phase {
-        Some((step, total)) => format!("Phase {step} of {total}"),
+        Some((step, total)) => format!(
+            "Phase {step} of {total} · {} min",
+            d.estimated_minutes.max(0)
+        ),
         None => format!("{} Minutes", d.estimated_minutes.max(0)),
     };
     let progress = match d.phase {
         Some((step, total)) if total > 0 => (step as f64 / total as f64) * 100.0,
         _ => 100.0,
     };
+    let checklist = match d.phase {
+        Some((step, total)) if total > 1 => Some((step, total)),
+        _ => None,
+    };
     rsx! {
-        div { class: "wl-directive-card",
+        div { class: "wl-directive-card wl-card-enter",
             div { class: "wl-directive-step-badge", "{phase_badge}" }
             h1 { class: "wl-directive-title", "{d.title}" }
             if let Some(instr) = &d.instruction {
                 p { class: "wl-directive-instruction", "{instr}" }
+            }
+            if let Some((step, total)) = checklist {
+                div { class: "wl-phase-list",
+                    for i in 1..=total {
+                        div { class: if i < step { "wl-phase-row wl-phase-done" } else if i == step { "wl-phase-row wl-phase-now" } else { "wl-phase-row" },
+                            span { class: "wl-phase-glyph", if i < step { "●" } else if i == step { "◐" } else { "○" } }
+                            span { class: "wl-phase-text", "Phase {i} of {total}" }
+                        }
+                    }
+                }
             }
             div { class: "wl-progress-track",
                 div { class: "wl-progress-bar", style: "width: {progress}%;" }
@@ -163,19 +196,21 @@ fn EscapeModal(note: Signal<String>) -> Element {
                 reason: String,
                 note: Option<String>,
             }
+            // Spec cap: 140 chars of optional context.
+            let trimmed: String = note.chars().take(140).collect();
             let req = BailReq {
                 reason,
-                note: if note.trim().is_empty() {
+                note: if trimmed.trim().is_empty() {
                     None
                 } else {
-                    Some(note)
+                    Some(trimmed)
                 },
             };
             match invoke::<serde_json::Value>("bail_out", req).await {
                 Ok(_) => {
                     let mut escape = ctx.escape_open;
                     *escape.write() = false;
-                    flash(&ctx, "VELOCITY ADJUSTED");
+                    flash(&ctx, "VELOCITY ADJUSTED — NO GUILT");
                     let mut d = ctx.directive;
                     match invoke::<DirectiveView>("current_directive", ()).await {
                         Ok(dv) => *d.write() = Some(dv),
@@ -188,33 +223,65 @@ fn EscapeModal(note: Signal<String>) -> Element {
         });
     };
 
+    // Keyboard: 1/2/3 categorize, Esc resumes (spec §1 bindings).
+    let bail_dep = bail;
+    let bail_scope = bail;
+    let bail_energy = bail;
+    let note_len = note.read().chars().count();
+
     rsx! {
-        div { class: "wl-modal-backdrop",
+        div {
+            class: "wl-modal-backdrop wl-modal-centered",
+            tabindex: "0",
+            autofocus: "true",
+            onkeydown: move |e: Event<KeyboardData>| {
+                match e.key() {
+                    Key::Character(ref c) if c == "1" => bail_dep("external_dependency"),
+                    Key::Character(ref c) if c == "2" => bail_scope("miscalculated_scope"),
+                    Key::Character(ref c) if c == "3" => bail_energy("energy_depletion"),
+                    Key::Escape => { let mut s = ctx.escape_open; *s.write() = false; },
+                    _ => {},
+                }
+            },
             onclick: move |_| { confirming.set(true); /* backdrop click = confirm-dismiss prompt */ },
-            div { class: "wl-modal-sheet", onclick: move |e| e.stop_propagation(),
+            div { class: "wl-modal-sheet wl-modal-centered-sheet", onclick: move |e| e.stop_propagation(),
                 if !*confirming.read() {
-                    h2 { class: "wl-modal-header", "Categorize the block" }
+                    h2 { class: "wl-modal-header", "Diagnostic: escape hatch" }
                     p { class: "wl-modal-sub",
-                        "The directive can't simply be swiped away. Tell the system what happened — it recalibrates, it never scolds."
+                        "Select stall cause. Worldline will recalibrate your velocity with zero punitive alarms."
                     }
                     input {
                         class: "wl-input",
                         r#type: "text",
-                        placeholder: "Optional note (local only, encrypted at sync)",
+                        maxlength: "140",
+                        placeholder: "Optional context (max 140 chars)",
                         value: "{note.read().clone()}",
-                        oninput: move |e| note.set(e.value()),
+                        oninput: move |e| {
+                            let v: String = e.value().chars().take(140).collect();
+                            note.set(v);
+                        },
                     }
+                    p { class: "wl-char-count wl-mono", "{note_len}/140" }
                     button { class: "wl-bailout-reason", onclick: move |_| bail("external_dependency"),
-                        div { class: "wl-bailout-reason-title", "External Dependency Blocked" }
-                        div { class: "wl-bailout-reason-sub", "Waiting on a person, service, or asset outside your control." }
+                        div { class: "wl-bailout-reason-title", "[1] Dependency blocked" }
+                        div { class: "wl-bailout-reason-sub", "Waiting for 3rd party API, merge, or response." }
                     }
                     button { class: "wl-bailout-reason", onclick: move |_| bail("miscalculated_scope"),
-                        div { class: "wl-bailout-reason-title", "Miscalculated Scope" }
-                        div { class: "wl-bailout-reason-sub", "The task was significantly larger than planned. Estimate will be downsized and requeued." }
+                        div { class: "wl-bailout-reason-title", "[2] Scope miscalculation" }
+                        div { class: "wl-bailout-reason-sub", "Directive exceeds allotted time boundary (>2x). Dispatcher splits it; quota untouched." }
                     }
                     button { class: "wl-bailout-reason", onclick: move |_| bail("energy_depletion"),
-                        div { class: "wl-bailout-reason-title", "Energy Depletion" }
-                        div { class: "wl-bailout-reason-sub", "Cognitive or physical exhaustion. A low-cognitive recovery task is offered." }
+                        div { class: "wl-bailout-reason-title", "[3] Cognitive / energy depletion" }
+                        div { class: "wl-bailout-reason-sub", "Focus ceiling reached; request a downscaled task + 10-minute rest." }
+                    }
+                    button { class: "wl-btn-coral", onclick: move |_| bail("miscalculated_scope"),
+                        "Confirm bailout & downsize"
+                    }
+                    button {
+                        class: "wl-btn-escape",
+                        onclick: move |_| { { let mut s = ctx.escape_open; *s.write() = false; } },
+                        span { "Resume execution directive" }
+                        kbd { class: "wl-kbd-subtle", "Esc" }
                     }
                 } else {
                     h2 { class: "wl-modal-header", "Keep the directive active?" }

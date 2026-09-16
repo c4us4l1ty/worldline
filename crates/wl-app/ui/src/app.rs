@@ -167,9 +167,11 @@ pub enum Screen {
         verify_indices: Vec<usize>,
         restore: bool,
     },
+    ByokSetup,
     Canvas,
     GoalCreate,
     EveningCheckIn,
+    Dormant,
     MorningBrief,
     Settings,
 }
@@ -183,6 +185,7 @@ pub struct AppCtx {
     pub toast: Signal<Option<String>>,
     pub timer_secs: Signal<u64>,
     pub escape_open: Signal<bool>,
+    pub telemetry_open: Signal<bool>,
     pub sync_status: Signal<&'static str>,
 }
 
@@ -195,6 +198,7 @@ fn App() -> Element {
         toast: Signal::new(None),
         timer_secs: Signal::new(0),
         escape_open: Signal::new(false),
+        telemetry_open: Signal::new(false),
         sync_status: Signal::new("LOCAL"),
     });
 
@@ -262,7 +266,20 @@ fn App() -> Element {
     let _screen = ctx.screen.read().clone();
 
     rsx! {
-        div { class: "wl-root",
+        div {
+            class: "wl-root",
+            tabindex: "0",
+            onkeydown: move |e: Event<KeyboardData>| {
+                // Global drawer toggle: Ctrl+, (web equivalent of spec ⌘,).
+                // Escape dismisses the drawer when open.
+                if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
+                    let open = *ctx.telemetry_open.read();
+                    { let mut s = ctx.telemetry_open; *s.write() = !open; }
+                } else if e.key() == Key::Escape && *ctx.telemetry_open.read() {
+                    { let mut s = ctx.telemetry_open; *s.write() = false; }
+                }
+            },
+            style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
             match ctx.screen.read().clone() {
                 Screen::Boot => rsx! { BootSplash {} },
                 Screen::SeedVault { phrase, verify_indices, restore } => rsx! {
@@ -272,11 +289,16 @@ fn App() -> Element {
                         restore,
                     }
                 },
+                Screen::ByokSetup => rsx! { crate::screens::ByokSetupScreen {} },
                 Screen::Canvas => rsx! { crate::screens::CanvasScreen {} },
                 Screen::GoalCreate => rsx! { crate::screens::GoalCreateScreen {} },
                 Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
+                Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
                 Screen::MorningBrief => rsx! { crate::screens::MorningBriefScreen {} },
                 Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
+            }
+            if *ctx.telemetry_open.read() {
+                crate::screens::TelemetryDrawer {}
             }
             if let Some(msg) = ctx.toast.read().clone() {
                 div { class: "wl-toast", "{msg}" }

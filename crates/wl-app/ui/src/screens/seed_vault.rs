@@ -116,7 +116,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                 .unwrap_or(false);
             if verified {
                 let mut s = ctx.screen;
-                *s.write() = Screen::Canvas;
+                *s.write() = Screen::ByokSetup;
             } else {
                 error.set(
                     "Those words don't match the sequence. Check your backup again.".to_string(),
@@ -172,7 +172,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                                 {
                                     Ok(_) => {
                                         let mut s = ctx.screen;
-                                        *s.write() = Screen::Canvas;
+                                        *s.write() = Screen::ByokSetup;
                                     }
                                     Err(_) => {
                                         let mut e = error;
