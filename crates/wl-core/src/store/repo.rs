@@ -453,8 +453,10 @@ impl Repos {
                 let mut stmt = conn.prepare(
                     "SELECT id FROM directives WHERE state = 'active' AND id != ?1",
                 )?;
-                stmt.query_map([id], |r| r.get(0))?
-                    .collect::<Result<_, _>>()?
+                let rows = stmt
+                    .query_map([id], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                rows
             };
             for other in others {
                 let pts = self.tick();
@@ -507,8 +509,10 @@ impl Repos {
                 "SELECT id FROM directives WHERE state = 'active'
                  ORDER BY hlc_timestamp DESC, id ASC",
             )?;
-            stmt.query_map([], |r| r.get(0))?
-                .collect::<Result<_, _>>()?
+            let rows = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            rows
         };
         let mut parked = 0;
         for id in actives.iter().skip(1) {
