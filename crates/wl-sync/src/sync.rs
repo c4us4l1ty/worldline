@@ -3,7 +3,7 @@
 
 use wl_core::crypto::aead::{self, Sealed};
 use wl_core::crypto::identity::Identity;
-use wl_core::hlc::{Hlc, HlcTimestamp};
+use wl_core::hlc::HlcTimestamp;
 use wl_core::store::repo::Repos;
 
 #[derive(Debug, thiserror::Error)]
@@ -67,9 +67,11 @@ pub fn sync_cycle<T: Transport>(
     transport: &T,
     batch_limit: usize,
 ) -> Result<SyncStats, SyncError> {
+    let batch_limit = batch_limit.clamp(1, MAX_BATCH_LIMIT);
     let mut pushed = 0;
     let mut pulled = 0;
     let mut applied = 0;
+    let mut quarantined = 0;
 
     // ---- Push ----
     // P3: drain in a loop, not one batch per cycle. A large offline
@@ -77,7 +79,7 @@ pub fn sync_cycle<T: Transport>(
     // ops than `batch_limit`; pushing once per user-triggered cycle
     // forces repeated "Sync now" clicks with the pending pill accusing
     // the user of residue the engine refused to drain.
-    loop {
+    for _ in 0..MAX_BATCHES_PER_CYCLE {
         let pending = repos.pending_outbox(batch_limit as i64)?;
         if pending.is_empty() {
             break;
@@ -125,7 +127,7 @@ pub fn sync_cycle<T: Transport>(
 
     // ---- Pull ----
     let (mut cursor_hlc, mut cursor_op) = current_cursor(repos)?;
-    loop {
+    for _ in 0..MAX_BATCHES_PER_CYCLE {
         let body = serde_json::to_value(wl_protocol::PullRequest {
             since_hlc: cursor_hlc.clone(),
             since_op_id: cursor_op.clone(),
@@ -141,30 +143,19 @@ pub fn sync_cycle<T: Transport>(
             if repos.is_op_applied(&op.operation_id)? {
                 continue; // idempotent apply
             }
-            let bytes =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &op.sealed_b64)
-                    .map_err(|_| SyncError::Protocol("bad base64 in pulled op".into()))?;
-            let sealed = Sealed::from_bytes(&bytes)?;
-            let aad = format!("{}:{}", op.table, op.record_id);
-            let plaintext = aead::unseal(identity, &sealed, aad.as_bytes())?;
-            let fields: serde_json::Value = serde_json::from_slice(&plaintext)
-                .map_err(|e| SyncError::Protocol(format!("decrypted payload not JSON: {e}")))?;
-            let crdt_op = wl_core::crdt::CrdtOp {
-                operation_id: op.operation_id.clone(),
-                table: op.table.clone(),
-                record_id: op.record_id.clone(),
-                hlc: op.hlc.clone(),
-                device: HlcTimestamp::parse(&op.hlc)
-                    .map_err(|e| SyncError::Protocol(e.to_string()))?
-                    .device,
-                fields: Some(fields),
-                tombstone: false,
-            };
-            apply_op_to_db(repos, &crdt_op)?;
-            let ts =
-                HlcTimestamp::parse(&op.hlc).map_err(|e| SyncError::Protocol(e.to_string()))?;
-            repos.mark_op_applied(&op.operation_id, ts)?;
-            applied += 1;
+            match apply_pulled_op(repos, identity, op) {
+                Ok(()) => applied += 1,
+                Err(_) => {
+                    // Poison op (bad base64, truncated sealed, wrong
+                    // key/AAD, non-JSON payload, malformed HLC): it can
+                    // never apply, but aborting here would wedge the
+                    // cursor and brick every future pull on one crafted
+                    // row. Watermark it as seen (quarantine) and advance
+                    // past it — availability over a single op.
+                    repos.mark_op_applied_str(&op.operation_id, &op.hlc)?;
+                    quarantined += 1;
+                }
+            }
         }
         pulled += resp.ops.len();
         cursor_hlc = resp.next_cursor.clone();
@@ -177,12 +168,55 @@ pub fn sync_cycle<T: Transport>(
         }
     }
 
+    // LWW arbitration above can merge `active` states from two devices
+    // (each side activated while offline). Reconcile deterministically
+    // so the single-directive invariant holds across devices too.
+    if applied > 0 {
+        let _ = repos.enforce_single_active(Some(identity));
+    }
+
     Ok(SyncStats {
         pushed,
         pulled,
         applied,
+        quarantined,
         cursor: cursor_hlc,
     })
+}
+
+/// Decrypts, parses, applies and watermarks one pulled op. Any failure
+/// is terminal for the op (caller quarantines); successes also merge
+/// the remote clock (HLC receive event — without it a fast peer's ops
+/// would be followed by older local ticks and LWW would invert).
+fn apply_pulled_op(
+    repos: &Repos,
+    identity: &Identity,
+    op: &wl_protocol::PushOp,
+) -> Result<(), SyncError> {
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &op.sealed_b64,
+    )
+    .map_err(|_| SyncError::Protocol("bad base64 in pulled op".into()))?;
+    let sealed = Sealed::from_bytes(&bytes)?;
+    let aad = format!("{}:{}", op.table, op.record_id);
+    let plaintext = aead::unseal(identity, &sealed, aad.as_bytes())?;
+    let fields: serde_json::Value = serde_json::from_slice(&plaintext)
+        .map_err(|e| SyncError::Protocol(format!("decrypted payload not JSON: {e}")))?;
+    let ts = HlcTimestamp::parse(&op.hlc).map_err(|e| SyncError::Protocol(e.to_string()))?;
+    let crdt_op = wl_core::crdt::CrdtOp {
+        operation_id: op.operation_id.clone(),
+        table: op.table.clone(),
+        record_id: op.record_id.clone(),
+        hlc: op.hlc.clone(),
+        device: ts.device,
+        fields: Some(fields),
+        tombstone: false,
+    };
+    apply_op_to_db(repos, &crdt_op)?;
+    repos.mark_op_applied(&op.operation_id, ts)?;
+    repos.observe_remote_hlc(&ts);
+    Ok(())
 }
 
 /// Applies a remote CRDT op to the local SQLite tables under LWW
@@ -338,10 +372,12 @@ pub fn save_cursor(repos: &Repos, cursor: &str, op_id: &str) -> Result<(), SyncE
     Ok(())
 }
 
-/// HLC convenience for the sync layer (shell owns the real clock).
-pub fn observe_remote(_repos: &Repos, remote: &HlcTimestamp) -> HlcTimestamp {
-    let hlc = Hlc::new();
-    hlc.observe(remote, 0)
+/// HLC receive event against the shell's real clock (persists the
+/// head). Previously this built a throwaway clock per call and never
+/// advanced anything — a causality no-op. Fixed to merge into
+/// `repos.hlc` like the pull path does.
+pub fn observe_remote(repos: &Repos, remote: &HlcTimestamp) -> HlcTimestamp {
+    repos.observe_remote_hlc(remote)
 }
 
 /// `Option` extension used by [`current_cursor`].
