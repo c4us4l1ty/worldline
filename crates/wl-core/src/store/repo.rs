@@ -789,7 +789,11 @@ impl Repos {
                 Ok(CheckIn {
                     id: r.get(0)?,
                     date: r.get(1)?,
-                    outcome: CheckInOutcome::from_str(&r.get::<_, String>(2)?).expect("db outcome"),
+                    outcome: parse_enum(
+                        "check-in outcome",
+                        &r.get::<_, String>(2)?,
+                        CheckInOutcome::from_str,
+                    )?,
                     note: r.get(3)?,
                     hlc_timestamp: parse_hlc(&r.get::<_, String>(4)?)?,
                 })
@@ -1144,7 +1148,7 @@ fn goal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Goal> {
         title: r.get(1)?,
         description: r.get(2)?,
         target_date: r.get(3)?,
-        status: GoalStatus::from_str(&r.get::<_, String>(4)?).expect("db goal status"),
+        status: parse_enum("goal status", &r.get::<_, String>(4)?, GoalStatus::from_str)?,
         hlc_timestamp: parse_hlc(&r.get::<_, String>(5)?)?,
     })
 }
@@ -1156,7 +1160,11 @@ fn milestone_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Milestone> {
         title: r.get(2)?,
         description: r.get(3)?,
         order_index: r.get(4)?,
-        status: MilestoneStatus::from_str(&r.get::<_, String>(5)?).expect("db milestone status"),
+        status: parse_enum(
+            "milestone status",
+            &r.get::<_, String>(5)?,
+            MilestoneStatus::from_str,
+        )?,
         hlc_timestamp: parse_hlc(&r.get::<_, String>(6)?)?,
     })
 }
@@ -1170,7 +1178,11 @@ fn directive_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Directive> {
         estimated_minutes: r.get(4)?,
         progressive_step: r.get(5)?,
         progressive_total: r.get(6)?,
-        state: DirectiveState::from_str(&r.get::<_, String>(7)?).expect("db directive state"),
+        state: parse_enum(
+            "directive state",
+            &r.get::<_, String>(7)?,
+            DirectiveState::from_str,
+        )?,
         scheduled_for_date: r.get(8)?,
         hlc_timestamp: parse_hlc(&r.get::<_, String>(9)?)?,
     })
