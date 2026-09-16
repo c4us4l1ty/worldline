@@ -35,8 +35,21 @@ pub struct SyncStats {
     pub pushed: usize,
     pub pulled: usize,
     pub applied: usize,
+    /// Poison ops skipped-and-watermarked (undecryptable/unparseable:
+    /// cannot apply, must not wedge the cursor). Surfaces in logs, not
+    /// the UI pill (which tracks actionable `pending`).
+    pub quarantined: usize,
     pub cursor: String,
 }
+
+/// Upper bound on push/pull batches per cycle: a malicious relay
+/// answering `exhausted=false` with full batches forever must not spin
+/// the client unboundedly (near-0-CPU + DoS). 200 batches × 500 ops is
+/// far beyond any legitimate single-cycle backlog.
+const MAX_BATCHES_PER_CYCLE: usize = 200;
+/// Wire batch size clamp: ≥1 (a 0 limit would hot-loop empty pulls),
+/// ≤ relay `PULL_HARD_CAP` (oversized requests are refused anyway).
+const MAX_BATCH_LIMIT: usize = 500;
 
 /// Runs one push+pull cycle against the relay.
 ///

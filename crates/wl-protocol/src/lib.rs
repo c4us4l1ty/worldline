@@ -1,6 +1,7 @@
 //! Wire protocol shared by client and relay (PRD §3.2).
 //!
-//! Auth: challenge → Ed25519 signature → PASETO v4 session token.
+//! Auth: challenge → Ed25519 signature → opaque bearer session token
+//! (PASETO wrapping is future work — see PRD-DELTAS §4, not v0.1).
 //! Data: opaque encrypted CRDT blobs. The relay validates signatures
 //! and routes ciphertext; it can never read payloads.
 
@@ -30,8 +31,9 @@ pub struct Challenge {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VerifyRequest {
     pub public_key: String,
-    /// Signature over `nonce || expires_at` (little-endian i64 BE
-    /// concat — exact bytes documented here once, used by both sides).
+    /// Signature over `nonce_bytes ‖ expires_at` where expiry is an
+    /// i64 in big-endian bytes (see `challenge_signing_payload` — the
+    /// single canonical constructor both sides must use).
     pub signature: String,
 }
 
@@ -114,7 +116,17 @@ pub struct PullResponse {
 /// Canonical challenge-signing payload: nonce bytes ‖ expiry bytes.
 /// Both client and relay derive signing/verification material from
 /// this single function — no format drift possible.
+///
+/// The nonce MUST be 64 hex chars (32 bytes) as issued by the relay;
+/// anything else is a programming error. `debug_assert` catches it in
+/// tests/dev; release decodes leniently but the relay only ever looks
+/// up issued challenges first, so a malformed nonce can never verify.
 pub fn challenge_signing_payload(nonce_hex: &str, expires_at: i64) -> Vec<u8> {
+    debug_assert_eq!(
+        nonce_hex.len(),
+        64,
+        "challenge nonce must be 32 bytes hex"
+    );
     let mut buf = Vec::with_capacity(32 + 8);
     buf.extend_from_slice(&hex::decode(nonce_hex).unwrap_or_default());
     buf.extend_from_slice(&expires_at.to_be_bytes());
