@@ -2,7 +2,7 @@
 //! Secrets (mnemonic, API keys) flow native-side only; per skill §6.3
 //! they never enter DOM dataset attributes.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 use zeroize::Zeroizing;
 
@@ -456,23 +456,18 @@ pub(crate) async fn complete_directive(
     Ok(outcome_view(&out, &state.repos))
 }
 
-#[derive(Deserialize)]
-pub struct BailoutRequest {
-    pub reason: String,
-    pub note: Option<String>,
-}
-
 #[tauri::command]
 pub(crate) async fn bail_out(
     state: State<'_, std::sync::Arc<AppState>>,
-    req: BailoutRequest,
+    reason: String,
+    note: Option<String>,
 ) -> ShellResult<BailoutOutcome> {
-    let reason = BailoutReason::from_str(&req.reason)
+    let reason = BailoutReason::from_str(&reason)
         .ok_or_else(|| ShellError::Invalid("unknown bailout reason".into()))?;
     let today = today_local();
     let out = state.with_identity(|identity| {
         let e = Engine::new(&state.repos, Some(identity));
-        e.bail_out(&today, reason, req.note.as_deref())
+        e.bail_out(&today, reason, note.as_deref())
             .map_err(ShellError::from)
     })?;
     match out {

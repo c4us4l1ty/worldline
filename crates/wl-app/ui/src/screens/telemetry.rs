@@ -87,18 +87,15 @@ pub fn TelemetryDrawer() -> Element {
                                     Ok(o) => {
                                         let mut st = ctx.sync_status;
                                         if o.pending > 0 {
-                                            let label: &'static str = Box::leak(
-                                                format!("{} PENDING", o.pending).into_boxed_str(),
-                                            );
-                                            *st.write() = label;
+                                            *st.write() = format!("{} PENDING", o.pending);
                                         } else {
-                                            *st.write() = "SYNCED";
+                                            *st.write() = "SYNCED".to_string();
                                         }
                                         flash(&ctx, format!("SYNCED ↑{} ↓{}", o.pushed, o.pulled).as_str());
                                     }
                                     Err(_) => {
                                         let mut st = ctx.sync_status;
-                                        *st.write() = "OFFLINE";
+                                        *st.write() = "OFFLINE".to_string();
                                         flash(&ctx, "SYNC FAILED — OFFLINE?");
                                     }
                                 }

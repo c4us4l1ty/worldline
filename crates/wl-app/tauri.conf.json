@@ -16,8 +16,10 @@
     "frontendDist": "ui/target/dx/wl-ui/release/web/public"
   },
   "app": {
+    "capabilities": ["main-capability"],
     "windows": [
       {
+        "label": "main",
         "title": "Worldline",
         "width": 420,
         "height": 747,

@@ -222,14 +222,9 @@ pub fn SettingsScreen() -> Element {
                                 Ok(s) => {
                                     let mut st = ctx.sync_status;
                                     if s.pending > 0 {
-                                        // `&'static str` can't hold a dynamic
-                                        // count; leak the short label once.
-                                        let label: &'static str = Box::leak(
-                                            format!("{} PENDING", s.pending).into_boxed_str(),
-                                        );
-                                        *st.write() = label;
+                                        *st.write() = format!("{} PENDING", s.pending);
                                     } else {
-                                        *st.write() = "SYNCED";
+                                        *st.write() = "SYNCED".to_string();
                                     }
                                     flash(
                                         &ctx,

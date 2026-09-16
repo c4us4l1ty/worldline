@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Allow the Worldline webview to invoke shell commands",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -2,10 +2,16 @@
 // In the browser (dx serve hot reload), falls back to a mock harness so
 // the UI is fully developable without the native shell.
 (function () {
-  var nativeInvoke = null;
-  try {
-    nativeInvoke = window.__TAURI_INTERNALS__.invoke;
-  } catch (e) { /* web dev mode */ }
+  // Resolve lazily: Tauri injects __TAURI_INTERNALS__ after <head> parse,
+  // so an eager capture would pin nativeInvoke=null forever (native runs
+  // would silently fall back to mocks).
+  function native() {
+    try {
+      var t = window.__TAURI_INTERNALS__;
+      if (t && typeof t.invoke === 'function') { return t.invoke; }
+    } catch (e) { /* web dev mode */ }
+    return null;
+  }
 
   var mockDb = {
     identity: null,
@@ -112,6 +118,7 @@
     create_manual_milestone: function (args) { return Promise.resolve('ms-' + Date.now()); },
     create_manual_directive: function (args) { return Promise.resolve('dir-' + Date.now()); },
     sync_now: function () { return Promise.resolve({ pushed: 0, pulled: 0, applied: 0, pending: 0 }); },
+    relay_authenticate: function () { return Promise.resolve({ account_id: 'mock-account', relay_url: null }); },
     master_plan: function (args) { return Promise.resolve('goal-ai-1'); },
     morning_briefing: function (args) {
       return Promise.resolve(['Write 300 words on Section 2.1', 'Review yesterday\'s test failures']);
@@ -122,8 +129,9 @@
   };
 
   window.wlInvoke = function (cmd, args) {
-    if (nativeInvoke) {
-      return nativeInvoke(cmd, args);
+    var n = native();
+    if (n) {
+      return n(cmd, args);
     }
     if (MOCKS[cmd]) {
       return MOCKS[cmd](args || {});
@@ -142,5 +150,5 @@
     setInterval(cb, 1000);
   };
 
-  window.wlIsNative = !!nativeInvoke;
+  window.wlIsNative = !!native();
 })();

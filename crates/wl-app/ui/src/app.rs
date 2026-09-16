@@ -186,7 +186,7 @@ pub struct AppCtx {
     pub timer_secs: Signal<u64>,
     pub escape_open: Signal<bool>,
     pub telemetry_open: Signal<bool>,
-    pub sync_status: Signal<&'static str>,
+    pub sync_status: Signal<String>,
 }
 
 fn App() -> Element {
@@ -199,7 +199,7 @@ fn App() -> Element {
         timer_secs: Signal::new(0),
         escape_open: Signal::new(false),
         telemetry_open: Signal::new(false),
-        sync_status: Signal::new("LOCAL"),
+        sync_status: Signal::new("LOCAL".to_string()),
     });
 
     let ctx = use_context::<AppCtx>();
@@ -251,14 +251,18 @@ fn App() -> Element {
         });
     });
 
-    // HUD tick (timer) driver.
+    // HUD tick (timer) driver — gated on the Canvas screen so idle
+    // onboarding/settings/dormant screens cost zero wake-ups (near-0-CPU).
     use_effect(move || {
         let mut timer = ctx.timer_secs;
+        let screen = ctx.screen;
         spawn(async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(1000).await;
-                let next = timer.read().saturating_add(1);
-                timer.set(next);
+                if matches!(*screen.read(), Screen::Canvas) {
+                    let next = timer.read().saturating_add(1);
+                    timer.set(next);
+                }
             }
         });
     });
