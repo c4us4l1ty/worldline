@@ -16,6 +16,10 @@ pub enum StoreError {
     /// Relay is at its account cap (unauthenticated registration DoS guard).
     #[error("account quota exceeded")]
     AccountQuota,
+    /// A single account holds too many ops (authenticated storage-
+    /// exhaustion guard — one valid session must not fill the disk).
+    #[error("per-account op quota exceeded")]
+    OpsQuota,
 }
 
 /// One stored relay op row.
@@ -83,6 +87,10 @@ pub mod sqlite_backend {
     /// the cap bounds storage exhaustion. Self-hosted operators can
     /// raise it via env var.
     const ACCOUNT_CAP: i64 = 10_000;
+    /// Hard cap on stored ops per account (authenticated sessions can
+    /// otherwise fill the disk one push at a time — the push handler
+    /// also caps ops-per-request and bytes-per-op).
+    const OPS_PER_ACCOUNT_CAP: i64 = 100_000;
 
     pub struct SqliteStore {
         conn: Mutex<Connection>,
@@ -156,6 +164,21 @@ pub mod sqlite_backend {
         fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError> {
             let mut conn = self.conn.lock().expect("store mutex");
             let tx = conn.transaction()?;
+            // Per-account quota inside the same transaction (the store
+            // mutex serializes writers, so the check-and-insert is
+            // atomic on this backend).
+            if let Some(first) = ops.first() {
+                let held: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM ops WHERE account = ?1",
+                    [&first.account],
+                    |r| r.get(0),
+                )?;
+                // Multi-account batches are rejected at the HTTP layer;
+                // the store tolerates them by quota-checking the first.
+                if held + ops.len() as i64 > OPS_PER_ACCOUNT_CAP {
+                    return Err(StoreError::OpsQuota);
+                }
+            }
             let mut out = PushOutcome::default();
             for op in ops {
                 let changed = tx.execute(
@@ -229,10 +252,12 @@ pub mod sqlite_backend {
     }
 
     fn now_ms() -> i64 {
+        // `created_at` is ordering metadata, not a security boundary:
+        // fall back to 0 instead of panicking on a broken clock.
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock before 1970")
-            .as_millis() as i64
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
     }
 }
 
@@ -248,6 +273,8 @@ pub mod postgres_backend {
 
     /// Same registration cap as the SQLite backend (see there).
     const ACCOUNT_CAP: i64 = 10_000;
+    /// Same per-account op cap as the SQLite backend (see there).
+    const OPS_PER_ACCOUNT_CAP: i64 = 100_000;
 
     pub struct PostgresStore {
         pool: PgPool,
@@ -287,20 +314,32 @@ pub mod postgres_backend {
     impl BlobStore for PostgresStore {
         fn register_account(&self, public_key: &str) -> Result<(), StoreError> {
             self.rt.block_on(async {
-                sqlx::query("INSERT INTO accounts (public_key) VALUES ($1) ON CONFLICT (public_key) DO NOTHING")
+                // Atomic cap: the table lock serializes concurrent
+                // registrations (the SQLite backend gets this from its
+                // store mutex; Postgres needs it spelled out).
+                let mut tx = self.pool.begin().await?;
+                sqlx::query("LOCK TABLE accounts IN EXCLUSIVE MODE")
+                    .execute(&mut *tx)
+                    .await?;
+                let res = sqlx::query("INSERT INTO accounts (public_key) VALUES ($1) ON CONFLICT (public_key) DO NOTHING")
                     .bind(public_key)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await?;
-                let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts")
-                    .fetch_one(&self.pool)
-                    .await?;
-                if row.0 > ACCOUNT_CAP {
-                    sqlx::query("DELETE FROM accounts WHERE public_key = $1")
-                        .bind(public_key)
-                        .execute(&self.pool)
+                if res.rows_affected() > 0 {
+                    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts")
+                        .fetch_one(&mut *tx)
                         .await?;
-                    return Err(StoreError::AccountQuota);
+                    if row.0 > ACCOUNT_CAP {
+                        // Roll back this registration — the cap is a DoS
+                        // guard, not a correctness limit.
+                        sqlx::query("DELETE FROM accounts WHERE public_key = $1")
+                            .bind(public_key)
+                            .execute(&mut *tx)
+                            .await?;
+                        return Err(StoreError::AccountQuota);
+                    }
                 }
+                tx.commit().await?;
                 Ok::<_, StoreError>(())
             })
         }
@@ -318,6 +357,17 @@ pub mod postgres_backend {
 
         fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError> {
             self.rt.block_on(async {
+                let mut tx = self.pool.begin().await?;
+                if let Some(first) = ops.first() {
+                    let row: (i64,) =
+                        sqlx::query_as("SELECT COUNT(*) FROM ops WHERE account = $1")
+                            .bind(&first.account)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    if row.0 + ops.len() as i64 > OPS_PER_ACCOUNT_CAP {
+                        return Err(StoreError::OpsQuota);
+                    }
+                }
                 let mut out = PushOutcome::default();
                 for op in ops {
                     let res = sqlx::query(
@@ -331,7 +381,7 @@ pub mod postgres_backend {
                     .bind(&op.table)
                     .bind(&op.record_id)
                     .bind(&op.sealed)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await?;
                     if res.rows_affected() > 0 {
                         out.accepted.push(op.operation_id.clone());
@@ -339,6 +389,7 @@ pub mod postgres_backend {
                         out.duplicates.push(op.operation_id.clone());
                     }
                 }
+                tx.commit().await?;
                 Ok::<_, StoreError>(out)
             })
         }

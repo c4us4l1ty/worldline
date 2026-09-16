@@ -31,6 +31,12 @@ use store::sqlite_backend::SqliteStore;
 
 /// Hard cap per pull batch.
 const PULL_HARD_CAP: u32 = 500;
+/// Hard cap on ops per push request (storage-exhaustion + CPU bound).
+const MAX_OPS_PER_PUSH: usize = 500;
+/// Hard cap on one sealed blob (100× a normal op; sync payloads are KB).
+const MAX_SEALED_BYTES: usize = 256 * 1024;
+/// Routing-header length bound (ids are UUID-shaped; generous ceiling).
+const MAX_HEADER_LEN: usize = 128;
 
 pub struct AppState {
     pub auth: AuthState,
@@ -52,6 +58,36 @@ fn err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(json!({"error": msg}))).into_response()
 }
 
+/// Runs a blocking store call off the async executor (the SQLite
+/// backend holds a mutex + the Postgres backend drives its own
+/// runtime — neither may run on an axum worker: the former would
+/// stall the executor, the latter panics with "Cannot block the
+/// current thread"). Store errors map to quota-429s or a generic 500:
+/// raw storage strings never reach the wire (info-leak surface).
+/// Callers move an `Arc` clone into `f` (it is `'static`).
+async fn blocking<F, T>(f: F) -> Result<T, axum::response::Response>
+where
+    F: FnOnce() -> Result<T, store::StoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "storage failure"))?
+        .map_err(store_err)
+}
+
+fn store_err(e: store::StoreError) -> axum::response::Response {
+    match e {
+        store::StoreError::AccountQuota | store::StoreError::OpsQuota => {
+            err(StatusCode::TOO_MANY_REQUESTS, "quota exceeded")
+        }
+        other => {
+            tracing::warn!("relay store failure: {other}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "storage failure")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Auth routes
 // ---------------------------------------------------------------------------
@@ -65,13 +101,12 @@ async fn challenge(
             // Register the account on first challenge (public key =
             // account id; zero personal data). The store enforces a
             // registration cap (unauthenticated DoS guard).
-            if let Err(e) = state.blobs.register_account(&req.public_key) {
-                return match e {
-                    store::StoreError::AccountQuota => {
-                        err(StatusCode::TOO_MANY_REQUESTS, "account quota exceeded")
-                    }
-                    other => err(StatusCode::INTERNAL_SERVER_ERROR, &other.to_string()),
-                };
+            let key = req.public_key.clone();
+            let owned = state.clone();
+            if let Err(resp) =
+                blocking(move || owned.blobs.register_account(&key)).await
+            {
+                return resp;
             }
             (
                 StatusCode::OK,
@@ -83,7 +118,10 @@ async fn challenge(
         Err(AuthError::RateLimited) => {
             err(StatusCode::TOO_MANY_REQUESTS, "too many challenge requests")
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => {
+            tracing::warn!("relay challenge failure: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "auth failure")
+        }
     }
 }
 
@@ -146,6 +184,31 @@ fn bearer_account(
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid or expired token"))
 }
 
+/// Validates one pushed op's routing envelope. The relay can never
+/// read the ciphertext, but malformed headers have broken clients
+/// before (unpadded HLC text inverts TEXT ordering; unknown tables
+/// wedge merges), so the boundary rejects them with 400 instead of
+/// storing poison every peer would choke on.
+fn validate_push_op(op: &wl_protocol::PushOp) -> Result<(), &'static str> {
+    if op.operation_id.is_empty() || op.operation_id.len() > MAX_HEADER_LEN {
+        return Err("bad operation id");
+    }
+    if op.record_id.is_empty() || op.record_id.len() > MAX_HEADER_LEN {
+        return Err("bad record id");
+    }
+    if wl_core::crdt::CrdtTable::from_str(&op.table).is_none() {
+        return Err("unknown table");
+    }
+    // Canonical fixed-width HLC (`pt(20).ctr(5).dev(5)`): parse and
+    // require the re-render to round-trip, so unpadded or malformed
+    // timestamps can never enter TEXT-ordered storage.
+    match wl_core::hlc::HlcTimestamp::parse(&op.hlc) {
+        Ok(ts) if ts.to_string() == op.hlc => {}
+        _ => return Err("non-canonical hlc"),
+    }
+    Ok(())
+}
+
 async fn push(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -155,11 +218,20 @@ async fn push(
         Ok(a) => a,
         Err(resp) => return resp,
     };
+    if req.ops.len() > MAX_OPS_PER_PUSH {
+        return err(StatusCode::PAYLOAD_TOO_LARGE, "too many ops in one push");
+    }
     let mut ops = Vec::with_capacity(req.ops.len());
     for op in &req.ops {
         let Ok(sealed) = base64::engine::general_purpose::STANDARD.decode(&op.sealed_b64) else {
             return err(StatusCode::BAD_REQUEST, "invalid base64 payload");
         };
+        if sealed.len() > MAX_SEALED_BYTES {
+            return err(StatusCode::PAYLOAD_TOO_LARGE, "op payload too large");
+        }
+        if let Err(msg) = validate_push_op(op) {
+            return err(StatusCode::BAD_REQUEST, msg);
+        }
         ops.push(StoredOp {
             operation_id: op.operation_id.clone(),
             account: account.clone(),
@@ -169,7 +241,8 @@ async fn push(
             sealed,
         });
     }
-    match state.blobs.insert_ops(&ops) {
+    let owned = state.clone();
+    match blocking(move || owned.blobs.insert_ops(&ops)).await {
         Ok(outcome) => (
             StatusCode::OK,
             Json(wl_protocol::PushResponse {
@@ -178,7 +251,7 @@ async fn push(
             }),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(resp) => resp,
     }
 }
 
@@ -192,9 +265,15 @@ async fn pull(
         Err(resp) => return resp,
     };
     let limit = req.limit.clamp(1, PULL_HARD_CAP);
-    match state
-        .blobs
-        .pull_ops(&account, &req.since_hlc, &req.since_op_id, limit)
+    let since_hlc = req.since_hlc.clone();
+    let since_op_id = req.since_op_id.clone();
+    let owned = state.clone();
+    match blocking(move || {
+        owned
+            .blobs
+            .pull_ops(&account, &since_hlc, &since_op_id, limit)
+    })
+    .await
     {
         Ok(stored) => {
             let exhausted = (stored.len() as u32) < limit;
@@ -226,7 +305,7 @@ async fn pull(
             )
                 .into_response()
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(resp) => resp,
     }
 }
 

@@ -13,8 +13,6 @@ use wl_core::store::open_in_memory;
 use wl_core::store::repo::Repos;
 use wl_sync::sync::{save_cursor, sync_cycle, Transport};
 
-use base64::Engine as _;
-
 struct AxumTransport {
     app: Router,
     token: String,

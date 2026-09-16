@@ -2208,7 +2208,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 
@@ -2768,10 +2767,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wl-core",
  "wl-protocol",
 ]
 

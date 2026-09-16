@@ -15,11 +15,10 @@ sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:rusqlite"]
 postgres = ["dep:sqlx", "sqlx/postgres"]
 
 [dependencies]
+wl-core = { workspace = true }
 wl-protocol = { path = "../wl-protocol" }
 axum.workspace = true
 tokio.workspace = true
-tower.workspace = true
-tower-http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -38,3 +37,4 @@ sha2.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+tower.workspace = true

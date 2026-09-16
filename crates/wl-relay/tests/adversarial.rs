@@ -8,6 +8,8 @@ use axum::http::Request;
 use axum::Router;
 use tower::util::ServiceExt;
 
+use base64::Engine as _;
+
 async fn post(
     app: &Router,
     path: &str,
@@ -295,4 +297,159 @@ async fn defect_push_holds_global_mutex_across_whole_batch() {
     let elapsed = t0.elapsed();
     assert_eq!(outcome.accepted.len(), 20_000);
     assert!(elapsed.as_millis() > 0);
+}
+
+/// Test helper: fresh app + authenticated session for a fixed key.
+async fn authed_app() -> (Router, String) {
+    use ed25519_dalek::Signer;
+    let state = Arc::new(wl_relay::AppStateForTest {
+        auth: wl_relay::AuthForTest::new(),
+        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
+    });
+    let app = wl_relay::router_for_test(state);
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let pk = hex::encode(sk.verifying_key().as_bytes());
+    let ch_resp = post(
+        &app,
+        "/auth/challenge",
+        serde_json::json!({"public_key": pk}).to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(ch_resp.status(), 200);
+    let ch: wl_protocol::Challenge = serde_json::from_str(&body_text(ch_resp).await).unwrap();
+    let payload = wl_protocol::challenge_signing_payload(&ch.nonce, ch.expires_at);
+    let sig = hex::encode(sk.sign(&payload).to_bytes());
+    // verify carries the challenge parts as headers (protocol surface).
+    let v_resp = app
+        .clone()
+        .oneshot(
+            Request::post("/auth/verify")
+                .header("content-type", "application/json")
+                .header("x-nonce", &ch.nonce)
+                .header("x-expires", ch.expires_at.to_string())
+                .body(Body::from(
+                    serde_json::json!({"public_key": pk, "signature": sig}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v_resp.status(), 200);
+    let session: wl_protocol::SessionToken =
+        serde_json::from_str(&body_text(v_resp).await).unwrap();
+    (app, session.token)
+}
+
+fn push_body(op_id: &str, hlc: &str, table: &str, sealed_len: usize) -> String {
+    use base64::Engine;
+    serde_json::json!({"ops": [{
+        "operation_id": op_id,
+        "hlc": hlc,
+        "table": table,
+        "record_id": "rec-1",
+        "sealed_b64": base64::engine::general_purpose::STANDARD.encode(vec![0u8; sealed_len]),
+    }]})
+    .to_string()
+}
+
+/// Push boundary validation: non-canonical HLC (unpadded), unknown
+/// tables, oversized blobs and oversized batches are refused BEFORE
+/// storage — poison must never enter TEXT-ordered ops.
+#[tokio::test]
+async fn push_boundary_rejects_malformed_envelopes() {
+    let (app, token) = authed_app().await;
+    let canon = format!("{:020}.{:05}.{:05}", 1_000_000u64, 0u16, 1u16);
+
+    // Unpadded HLC: parses numerically but breaks TEXT ordering.
+    let r = post(&app, "/sync/push", push_body("op-1", "1000000.0.1", "goals", 48), Some(&token)).await;
+    assert_eq!(r.status(), 400);
+    // Garbage HLC.
+    let r = post(&app, "/sync/push", push_body("op-2", "not-an-hlc", "goals", 48), Some(&token)).await;
+    assert_eq!(r.status(), 400);
+    // Unknown table.
+    let r = post(&app, "/sync/push", push_body("op-3", &canon, "evil_table", 48), Some(&token)).await;
+    assert_eq!(r.status(), 400);
+    // Empty ids.
+    let r = post(&app, "/sync/push", push_body("", &canon, "goals", 48), Some(&token)).await;
+    assert_eq!(r.status(), 400);
+    // Oversized blob (> 256 KiB).
+    let r = post(&app, "/sync/push", push_body("op-4", &canon, "goals", 300_000), Some(&token)).await;
+    assert_eq!(r.status(), 413);
+    // Oversized batch (> 500 ops).
+    let big: Vec<_> = (0..501)
+        .map(|i| {
+            serde_json::json!({
+                "operation_id": format!("op-big-{i}"),
+                "hlc": format!("{:020}.{:05}.{:05}", 2_000_000u64 + i as u64, 0u16, 1u16),
+                "table": "goals",
+                "record_id": "r",
+                "sealed_b64": base64::engine::general_purpose::STANDARD.encode([0u8; 48]),
+            })
+        })
+        .collect();
+    let r = post(
+        &app,
+        "/sync/push",
+        serde_json::json!({"ops": big}).to_string(),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(r.status(), 413);
+
+    // Canonical envelope: accepted.
+    let r = post(&app, "/sync/push", push_body("op-ok", &canon, "goals", 48), Some(&token)).await;
+    assert_eq!(r.status(), 200);
+    // Nothing rejected leaked into storage: exactly one op pulls back.
+    let r = post(
+        &app,
+        "/sync/pull",
+        serde_json::json!({"since_hlc": "", "since_op_id": "", "limit": 100}).to_string(),
+        Some(&token),
+    )
+    .await;
+    let pulled: wl_protocol::PullResponse = serde_json::from_str(&body_text(r).await).unwrap();
+    assert_eq!(pulled.ops.len(), 1);
+    assert_eq!(pulled.ops[0].operation_id, "op-ok");
+}
+
+/// Per-account op quota: an authenticated session cannot fill the
+/// disk one push at a time — past 100k stored ops the relay answers
+/// 429 and stores nothing further.
+#[tokio::test]
+async fn push_quota_caps_authenticated_storage_flood() {
+    let state = Arc::new(wl_relay::AppStateForTest {
+        auth: wl_relay::AuthForTest::new(),
+        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
+    });
+    let pk = format!("{:064x}", 7u64);
+    state.blobs.register_account(&pk).unwrap();
+    // Fill to the cap in large batches (store-level fast path).
+    for i in 0..10u64 {
+        let batch: Vec<_> = (0..10_000)
+            .map(|j| wl_relay::store::StoredOp {
+                operation_id: format!("fill-{i}-{j}"),
+                account: pk.clone(),
+                hlc: format!("{:020}.{:05}.{:05}", 1_000_000u64 + i * 10_000 + j as u64, 0u16, 1u16),
+                table: "goals".into(),
+                record_id: "r".into(),
+                sealed: vec![0u8; 48],
+            })
+            .collect();
+        let out = state.blobs.insert_ops(&batch).unwrap();
+        assert_eq!(out.accepted.len(), 10_000);
+    }
+    // One more op over the cap: refused at the store layer...
+    let over = vec![wl_relay::store::StoredOp {
+        operation_id: "over-cap".into(),
+        account: pk.clone(),
+        hlc: format!("{:020}.{:05}.{:05}", 9_999_999u64, 0u16, 1u16),
+        table: "goals".into(),
+        record_id: "r".into(),
+        sealed: vec![0u8; 48],
+    }];
+    assert!(matches!(
+        state.blobs.insert_ops(&over),
+        Err(wl_relay::store::StoreError::OpsQuota)
+    ));
 }
