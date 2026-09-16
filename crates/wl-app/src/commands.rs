@@ -167,9 +167,7 @@ pub(crate) async fn identity_unlock(
         }
         _ => (true, Vec::new()),
     };
-    state
-        .repos
-        .insert_identity(&identity, verified, &indices)?;
+    state.repos.insert_identity(&identity, verified, &indices)?;
     *state.identity.lock().unwrap() = Some(identity);
     Ok(account_id)
 }
@@ -625,6 +623,14 @@ struct ReqwestTransport {
     token: String,
 }
 
+/// One process-wide HTTP client: connection pooling across sync/handshake
+/// calls, and no per-RPC TLS-stack rebuild (near-0-CPU on use; no idle
+/// cost — construction is lazy on first sync).
+fn shared_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 impl wl_sync::sync::Transport for ReqwestTransport {
     fn post(&self, path: &str, body: &serde_json::Value) -> Result<String, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -632,7 +638,7 @@ impl wl_sync::sync::Transport for ReqwestTransport {
             .build()
             .map_err(|e| e.to_string())?;
         rt.block_on(async {
-            let resp = reqwest::Client::new()
+            let resp = shared_client()
                 .post(format!("{}{path}", self.base))
                 .header("authorization", format!("Bearer {}", self.token))
                 .json(body)
@@ -798,14 +804,14 @@ pub(crate) async fn master_plan(
     context: String,
 ) -> ShellResult<String> {
     let api_key = vault_api_key(&state, &provider)?;
+    // Move the Zeroizing wrapper straight into the adapter: no
+    // intermediate plain-String clone (the old `.to_string()` left a
+    // non-zeroized copy on the heap next to the wiped original).
     let adapter = match provider.as_str() {
-        "anthropic" => ProviderAdapter::Anthropic {
-            api_key: api_key.to_string(),
-            model,
-        },
+        "anthropic" => ProviderAdapter::Anthropic { api_key, model },
         _ => ProviderAdapter::OpenAiCompat {
             base_url: base_for(&provider),
-            api_key: api_key.to_string(),
+            api_key,
             model,
         },
     };
@@ -843,7 +849,7 @@ fn http_execute(
         .build()
         .map_err(|e| e.to_string())?;
     rt.block_on(async {
-        let mut req = reqwest::Client::new().post(url).json(body);
+        let mut req = shared_client().post(url).json(body);
         for (k, v) in headers {
             req = req.header(k, v);
         }
@@ -860,14 +866,12 @@ pub(crate) async fn morning_briefing(
     constraints: String,
 ) -> ShellResult<Vec<String>> {
     let api_key = vault_api_key(&state, &provider)?;
+    // Same move-not-clone discipline as master_plan (see there).
     let adapter = match provider.as_str() {
-        "anthropic" => ProviderAdapter::Anthropic {
-            api_key: api_key.to_string(),
-            model,
-        },
+        "anthropic" => ProviderAdapter::Anthropic { api_key, model },
         _ => ProviderAdapter::OpenAiCompat {
             base_url: base_for(&provider),
-            api_key: api_key.to_string(),
+            api_key,
             model,
         },
     };

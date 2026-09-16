@@ -3,6 +3,7 @@
 //! and persists plans/directives through the repos.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::crypto::identity::Identity;
 use crate::domain::*;
@@ -28,17 +29,48 @@ pub enum DispatchError {
 // ---------------------------------------------------------------------------
 
 /// BYOK provider endpoints. Model ids are user settings, never baked in.
-#[derive(Debug, Clone)]
+///
+/// The key rides in `Zeroizing<String>` end-to-end (vault → adapter →
+/// request): dropping the adapter wipes it. Two residual copies are
+/// unavoidable and short-lived — the `Authorization`/`x-api-key`
+/// header strings handed to the HTTP layer, and whatever the HTTP
+/// client retains for the connection. Keys are never logged: `Debug`
+/// is redacted by hand (a derived `Debug` would print key material
+/// into any `{:?}` error path).
+#[derive(Clone)]
 pub enum ProviderAdapter {
     /// OpenAI-compatible chat completions (OpenAI, OpenRouter,
     /// Gemini compat, LM Studio, Ollama…).
     OpenAiCompat {
         base_url: String,
-        api_key: String,
+        api_key: Zeroizing<String>,
         model: String,
     },
     /// Anthropic messages API.
-    Anthropic { api_key: String, model: String },
+    Anthropic {
+        api_key: Zeroizing<String>,
+        model: String,
+    },
+}
+
+impl std::fmt::Debug for ProviderAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderAdapter::OpenAiCompat {
+                base_url, model, ..
+            } => f
+                .debug_struct("OpenAiCompat")
+                .field("base_url", base_url)
+                .field("api_key", &"[redacted]")
+                .field("model", model)
+                .finish(),
+            ProviderAdapter::Anthropic { model, .. } => f
+                .debug_struct("Anthropic")
+                .field("api_key", &"[redacted]")
+                .field("model", model)
+                .finish(),
+        }
+    }
 }
 
 impl ProviderAdapter {
@@ -66,7 +98,10 @@ impl ProviderAdapter {
                     "response_format": {"type": "json_object"}
                 });
                 let headers = vec![
-                    ("Authorization".into(), format!("Bearer {api_key}")),
+                    (
+                        "Authorization".into(),
+                        format!("Bearer {}", api_key.as_str()),
+                    ),
                     ("Content-Type".into(), "application/json".into()),
                 ];
                 (url, headers, body)
@@ -79,7 +114,7 @@ impl ProviderAdapter {
                     "messages": [{"role": "user", "content": user}]
                 });
                 let headers = vec![
-                    ("x-api-key".into(), api_key.clone()),
+                    ("x-api-key".into(), api_key.as_str().to_owned()),
                     ("anthropic-version".into(), "2023-06-01".into()),
                     ("Content-Type".into(), "application/json".into()),
                 ];

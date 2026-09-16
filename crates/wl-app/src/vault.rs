@@ -43,6 +43,10 @@ impl Vault {
         let _ = iota_stronghold::engine::snapshot::try_set_encrypt_work_factor(0);
         let key = vault_key(dir)?;
         let snapshot = dir.join("vault.hold");
+        // Pre-create the snapshot owner-only: Stronghold creates it with
+        // the process umask, which leaves a world-readable window before
+        // `restrict_permissions` below tightens it.
+        precreate_private(&snapshot);
         let stronghold =
             tauri_plugin_stronghold::stronghold::Stronghold::new(&snapshot, key.to_vec())
                 .map_err(|e| VaultError::Stronghold(e.to_string()))?;
@@ -179,11 +183,14 @@ fn api_key_record(provider: &str) -> Result<Vec<u8>, VaultError> {
 }
 
 /// Resolves the snapshot encryption key: existing `0600` file, or a
-/// fresh 32-byte secret persisted `0600` on first run.
+/// fresh 32-byte secret persisted `0600` on first run. A pre-existing
+/// key file with lax permissions is tightened to `0600` (same threat
+/// envelope as the SQLite DB itself).
 fn vault_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let path = dir.join(".vault-key");
     if let Ok(bytes) = std::fs::read(&path) {
         if bytes.len() == 32 {
+            tighten_existing(&path);
             return Ok(Zeroizing::new(bytes));
         }
         return Err(VaultError::Stronghold(
@@ -205,6 +212,38 @@ fn restrict_permissions(path: &Path) {
         let _ = std::fs::set_permissions(path, perm);
     }
 }
+
+/// Repairs the mode of a pre-existing secret file (vault key created
+/// before this hardening, or under a lax umask). Best-effort: failure
+/// only widens the window that `restrict_permissions` + `write_private`
+/// already narrow for new files.
+#[cfg(unix)]
+fn tighten_existing(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().mode() & 0o077 != 0 {
+            restrict_permissions(path);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn tighten_existing(_path: &Path) {}
+
+/// Pre-creates a secret-adjacent file owner-only so it is never
+/// world-readable, even briefly (see `Vault::open`).
+#[cfg(unix)]
+fn precreate_private(path: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path);
+}
+
+#[cfg(not(unix))]
+fn precreate_private(_path: &Path) {}
 
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {

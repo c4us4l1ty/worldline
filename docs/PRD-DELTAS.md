@@ -168,3 +168,82 @@ Locked decisions from the planning session are marked [approved].
 38. **`Ctrl+,` is the web equivalent of spec `⌘,`** — WASM sees Ctrl;
     the drawer also opens from the timer pill and closes on `Esc`.
     `Alt+Space` summon stays native in `hotkey.rs`.
+
+## Battle-test pass (2026-09-16, singularity audit — 120 tests)
+
+39. **Blank UI root causes fixed** — `frontendDist` pointed at a
+    never-built `release/` dir (now built + verified); asset URLs are
+    relative (`./wl.css`, `./invoke-shim.js`); new
+    `capabilities/main-capability.json` grants `core:default` to the
+    `main` window (explicit `label: main` in `tauri.conf.json`,
+    referenced via `app.capabilities`); the shim resolves
+    `__TAURI_INTERNALS__.invoke` lazily (eager capture pinned
+    native to mocks forever); `bail_out` takes flat
+    `reason`/`note` params (was a `req` wrapper the UI never sent —
+    Escape hatch always failed); dropped the unused `router` feature;
+    `dx build --release` output (incl. `<title>`) verified.
+40. **Poison-op quarantine** — a pulled op that fails base64 / sealed
+    / unseal / JSON / HLC checks is watermarked in `crdt_applied`
+    and skipped (`SyncStats.quarantined`) instead of aborting before
+    the cursor advance (one crafted row used to brick all future
+    pulls). Newer-schema enum strings from future clients are
+    quarantined the same way (CHECK constraints reject them
+    server-side of the merge).
+41. **HLC receive events on pull** — every applied remote op merges
+    into `Repos.hlc` via `observe_remote_hlc` (+ persisted head);
+    `observe_remote` previously built a throwaway clock (causality
+    no-op). `wall_nanos` degrades to 0 instead of panicking on a
+    pre-1970 clock (head + counter path still monotonic).
+42. **Single-active self-healing** — `set_directive_state(Active)`
+    parks any other active to queued (own tick + outbox
+    write-through); `enforce_single_active` reconciles merged
+    dual-actives after pull (newest HLC wins, deterministic tie-break
+    `min id`), called from `sync_cycle` when `applied > 0`.
+43. **Sync loop bounds** — push/pull paginate at most 200 batches per
+    cycle; `batch_limit` clamped to 1–500 (a 0 limit hot-looped empty
+    pulls; a hostile `exhausted=false` relay looped forever).
+44. **Outbox drain is transactional** — `mark_outbox_pushed` commits
+    one transaction (was N statements; a crash left half-drained).
+45. **Row-mapper panics removed** — corrupt enum strings return
+    `BadEnum` mapping errors (layer 2; layer 1 is the schema CHECK
+    constraints, which refuse such writes outright — covered by test).
+46. **`set_mnemonic_verified` param indices fixed** — was `?2/?3`
+    with two params (every verification write errored).
+47. **AI phase-sum band** — `validate_directive` rejects phase tables
+    outside 2× of the headline estimate (the sum replaces the
+    estimate at persist time; 60m→10m silent rewrites impossible).
+48. **Relay push boundary** — per-op validation (canonical fixed-width
+    HLC round-trip, 7-table allow-list, id lengths, 256 KiB sealed
+    cap), 500-ops-per-request cap (413), 100k-ops-per-account quota
+    (429, enforced in-txn on SQLite / under table lock on Postgres).
+    500s are generic ("storage failure", detail in server log).
+49. **Relay no longer blocks/panics the executor** — all store calls
+    run via `spawn_blocking` (SQLite mutex off async workers;
+    Postgres `block_on` off the runtime — it panicked under axum).
+    Postgres `register_account` cap is now atomic (`LOCK TABLE`).
+    Postgres-only build fixed (ungated sqlite re-export/import).
+50. **SSRF blocklist extended** — 100.100.100.200, 0.0.0.0,
+    IPv4-mapped IPv6 metadata forms, GCE metadata hostname;
+    loopback/RFC1918/ULA stay allowed (default local relay + LAN
+    self-host). DNS-rebinding TOCTOU documented (impact capped by
+    E2EE blindness).
+51. **API-key Zeroizing end-to-end** — `ProviderAdapter` holds
+    `Zeroizing<String>` (moved, not `.to_string()`-cloned, from the
+    vault guard); hand-rolled redacted `Debug` (derived Debug leaked
+    keys into any `{:?}` path). Residual: header strings + HTTP
+    client internals (short-lived, documented).
+52. **Vault file hygiene** — snapshot pre-created `0600` before
+    Stronghold opens it (no world-readable window); pre-existing key
+    files with lax modes tightened to `0600`.
+53. **Idle CPU** — HUD 1 Hz tick gated on the Canvas screen (zero
+    wake-ups on onboarding/settings/dormant); `sync_status` is
+    `Signal<String>` (was `Box::leak` per sync); one process-wide
+    reqwest client (was per-RPC `Client::new` + TLS rebuild);
+    unused `tower-http` dep removed. `operation_id` global-uniqueness
+    squat and `mark_outbox` mutex convoy stay as documented
+    characterization guards (squat needs UUID prediction —
+    infeasible; convoy is throughput-only).
+54. **Mnemonic DOM hygiene** — `generated` + verify inputs cleared on
+    verify success; restore textarea cleared on restore success (the
+    single mandated display remains an accepted exception to
+    "secrets never touch the DOM").

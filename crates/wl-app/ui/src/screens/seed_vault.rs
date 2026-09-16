@@ -78,8 +78,9 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
     let verify = move || {
         let ctx = ctx;
         let words: Vec<String> = words_input.read().clone();
+        let mut words_sig = words_input;
         let ch = verify_challenge.clone();
-        let g = generated;
+        let mut g = generated;
         let seeded = verify_phrase.clone();
         let mut error = error;
         spawn(async move {
@@ -115,6 +116,12 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                 .await
                 .unwrap_or(false);
             if verified {
+                // Secret hygiene: the 12 words lived in signals/DOM for
+                // the one mandated display — drop them the moment the
+                // shell confirms the backup (AGENTS.md: secrets never
+                // linger in the DOM).
+                g.set(None);
+                words_sig.set(vec![String::new(); 3]);
                 let mut s = ctx.screen;
                 *s.write() = Screen::ByokSetup;
             } else {
@@ -171,6 +178,10 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                                 .await
                                 {
                                     Ok(_) => {
+                                        // Secret hygiene: drop the typed
+                                        // phrase from the signal/DOM now
+                                        // that the shell holds it.
+                                        restore_input.set(String::new());
                                         let mut s = ctx.screen;
                                         *s.write() = Screen::ByokSetup;
                                     }

@@ -53,7 +53,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs"] }
 axum = { version = "0.8", features = ["json", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace"] }
 hyper = "1.4"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 

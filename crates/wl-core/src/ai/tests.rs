@@ -5,6 +5,7 @@
 use super::dispatch::*;
 use crate::store::open_in_memory;
 use crate::store::repo::Repos;
+use zeroize::Zeroizing;
 
 fn repos() -> Repos {
     Repos::new(open_in_memory().unwrap(), 1)
@@ -80,7 +81,7 @@ fn parse_briefing_valid_and_bounded() {
 fn provider_request_shapes() {
     let oa = ProviderAdapter::OpenAiCompat {
         base_url: "https://openrouter.ai/api/v1".into(),
-        api_key: "sk-test".into(),
+        api_key: Zeroizing::new("sk-test".into()),
         model: "user-model-x".into(),
     };
     let (url, headers, body) = oa.request("sys", "usr");
@@ -94,7 +95,7 @@ fn provider_request_shapes() {
     assert_eq!(text.as_deref(), Some("hi"));
 
     let an = ProviderAdapter::Anthropic {
-        api_key: "ak".into(),
+        api_key: Zeroizing::new("ak".into()),
         model: "claude-user".into(),
     };
     let (url, headers, body) = an.request("sys", "usr");
@@ -109,7 +110,7 @@ fn provider_request_shapes() {
 fn master_plan_end_to_end_with_injected_http() {
     let r = repos();
     let provider = ProviderAdapter::Anthropic {
-        api_key: "k".into(),
+        api_key: Zeroizing::new("k".into()),
         model: "m".into(),
     };
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
@@ -162,7 +163,7 @@ fn morning_briefing_persists_into_next_milestone() {
     r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let provider = ProviderAdapter::OpenAiCompat {
         base_url: "http://localhost".into(),
-        api_key: "k".into(),
+        api_key: Zeroizing::new("k".into()),
         model: "m".into(),
     };
     let brief_json = r#"{"directives":[{"title":"Write 300 words on Section 2.1","estimated_minutes":45,"phases":[
@@ -194,7 +195,7 @@ fn http_failure_maps_to_error() {
     let r = repos();
     let provider = ProviderAdapter::OpenAiCompat {
         base_url: "http://x".into(),
-        api_key: "k".into(),
+        api_key: Zeroizing::new("k".into()),
         model: "m".into(),
     };
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
@@ -219,4 +220,17 @@ fn parse_plan_rejects_phases_contradicting_estimate() {
         {"title":"Step one","minutes":25},
         {"title":"Step two","minutes":25}]}]}]}"#;
     assert!(parse_plan(ok).is_ok());
+}
+
+#[test]
+fn provider_debug_redacts_api_key() {
+    // A derived Debug would print key material into any {:?} path.
+    let oa = ProviderAdapter::OpenAiCompat {
+        base_url: "https://x".into(),
+        api_key: Zeroizing::new("sk-live-secret".into()),
+        model: "m".into(),
+    };
+    let dbg = format!("{oa:?}");
+    assert!(!dbg.contains("sk-live-secret"), "key leaked: {dbg}");
+    assert!(dbg.contains("[redacted]"));
 }

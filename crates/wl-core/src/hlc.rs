@@ -63,10 +63,14 @@ impl Hlc {
 
     fn wall_nanos(&self) -> u64 {
         let drift = self.drift_nanos.load(AtomicOrdering::Relaxed);
+        // A broken (pre-1970) system clock must degrade to the persisted
+        // head + counter path, never panic the shell: 0 loses to any
+        // restored head in now()/observe().
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before 1970");
-        now.as_nanos() as u64 + drift
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        now.saturating_add(drift)
     }
 
     /// Issues a new local timestamp (tick).
