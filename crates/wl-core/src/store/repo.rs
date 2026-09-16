@@ -141,7 +141,7 @@ impl Repos {
     pub fn set_mnemonic_verified(&self, verified: bool) -> Result<(), StoreError> {
         let ts = self.tick();
         self.conn.lock().unwrap().execute(
-            "UPDATE identity_config SET bip39_mnemonic_verified = ?2, hlc_timestamp = ?3",
+            "UPDATE identity_config SET bip39_mnemonic_verified = ?1, hlc_timestamp = ?2",
             params![verified, ts.to_string()],
         )?;
         Ok(())
@@ -441,6 +441,39 @@ impl Repos {
         state: DirectiveState,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
+        // Stackelberg invariant: at most one directive is ever active.
+        // Park any *other* active back to queued first (self-healing for
+        // stray callers and merged remote states — never hide a second
+        // active behind `LIMIT 1`). Each parked row gets its own tick +
+        // outbox write-through so peers converge on the same single
+        // active.
+        if state == DirectiveState::Active {
+            let others: Vec<String> = {
+                let conn = self.conn.lock().unwrap();
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM directives WHERE state = 'active' AND id != ?1",
+                )?;
+                stmt.query_map([id], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?
+            };
+            for other in others {
+                let pts = self.tick();
+                self.conn.lock().unwrap().execute(
+                    "UPDATE directives SET state = 'queued', hlc_timestamp = ?2 WHERE id = ?1",
+                    params![other, pts.to_string()],
+                )?;
+                if identity.is_some() {
+                    if let Some(d) = self.directive(&other)? {
+                        self.emit(
+                            identity,
+                            crate::crdt::CrdtTable::Directives,
+                            &d.id,
+                            &Self::directive_json(&d),
+                        )?;
+                    }
+                }
+            }
+        }
         let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE directives SET state = ?2, hlc_timestamp = ?3 WHERE id = ?1",
@@ -457,6 +490,32 @@ impl Repos {
             }
         }
         Ok(())
+    }
+
+    /// Reconciles the single-active invariant after a pull-apply batch:
+    /// LWW arbitration can merge `active` states from two devices. The
+    /// winner is deterministic across replicas (max `hlc_timestamp`,
+    /// tie-break min `id`); losers are parked to queued with
+    /// write-through. Returns the number parked.
+    pub fn enforce_single_active(
+        &self,
+        identity: Option<&Identity>,
+    ) -> Result<usize, StoreError> {
+        let actives: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM directives WHERE state = 'active'
+                 ORDER BY hlc_timestamp DESC, id ASC",
+            )?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        let mut parked = 0;
+        for id in actives.iter().skip(1) {
+            self.set_directive_state(id, DirectiveState::Queued, identity)?;
+            parked += 1;
+        }
+        Ok(parked)
     }
 
     /// Requeue a directive with a new estimate and date (scope
@@ -602,7 +661,7 @@ impl Repos {
                     title: r.get(2)?,
                     instruction: r.get(3)?,
                     minutes: r.get(4)?,
-                    state: PhaseState::from_str(&r.get::<_, String>(5)?).expect("db phase state"),
+                    state: parse_enum("phase state", &r.get::<_, String>(5)?, PhaseState::from_str)?,
                     hlc_timestamp: parse_hlc(&r.get::<_, String>(6)?)?,
                 })
             })?
@@ -703,8 +762,11 @@ impl Repos {
                     Ok(CheckIn {
                         id: r.get(0)?,
                         date: r.get(1)?,
-                        outcome: CheckInOutcome::from_str(&r.get::<_, String>(2)?)
-                            .expect("db outcome"),
+                        outcome: parse_enum(
+                            "check-in outcome",
+                            &r.get::<_, String>(2)?,
+                            CheckInOutcome::from_str,
+                        )?,
                         note: r.get(3)?,
                         hlc_timestamp: parse_hlc(&r.get::<_, String>(4)?)?,
                     })
@@ -964,12 +1026,17 @@ impl Repos {
     }
 
     pub fn mark_outbox_pushed(&self, operation_ids: &[String]) -> Result<(), StoreError> {
+        // Single transaction: one lock acquisition, atomic drain state —
+        // a crash mid-batch can never leave half the batch pushed.
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         for id in operation_ids {
-            self.conn.lock().unwrap().execute(
+            tx.execute(
                 "UPDATE crdt_outbox SET pushed = 1 WHERE operation_id = ?1",
                 [id],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -991,11 +1058,33 @@ impl Repos {
     }
 
     pub fn mark_op_applied(&self, operation_id: &str, ts: HlcTimestamp) -> Result<(), StoreError> {
+        self.mark_op_applied_str(operation_id, &ts.to_string())
+    }
+
+    /// Watermark insert with a pre-rendered HLC string — the quarantine
+    /// path for undecryptable/unparseable remote ops, which have no
+    /// usable timestamp but must still advance past the poison op.
+    pub fn mark_op_applied_str(&self, operation_id: &str, hlc: &str) -> Result<(), StoreError> {
         self.conn.lock().unwrap().execute(
             "INSERT OR IGNORE INTO crdt_applied (operation_id, hlc_timestamp) VALUES (?1, ?2)",
-            params![operation_id, ts.to_string()],
+            params![operation_id, hlc],
         )?;
         Ok(())
+    }
+
+    /// This replica's device id (for HLC receive-event merges).
+    pub fn device_id(&self) -> u16 {
+        self.device
+    }
+
+    /// Merges a pulled remote timestamp into the local HLC clock and
+    /// persists the head (receive event). Without this, a pull from a
+    /// fast peer followed by a local tick can issue `ts < remote-ts`
+    /// and LWW arbitration inverts (causality gap).
+    pub fn observe_remote_hlc(&self, remote: &HlcTimestamp) -> HlcTimestamp {
+        let ts = self.hlc.observe(remote, self.device);
+        let _ = self.write_hlc_head();
+        ts
     }
 }
 
@@ -1016,6 +1105,37 @@ pub struct OutboxOp {
 
 fn parse_hlc(s: &str) -> Result<HlcTimestamp, rusqlite::Error> {
     HlcTimestamp::parse(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+/// A corrupt enum string in a row. Returned as a SQLite-mapping error
+/// (surfaces as `StoreError::Sqlite`) — never a panic: a single bad
+/// row must not abort the shell, and remote LWW upserts can only write
+/// strings the local writer produced.
+#[derive(Debug)]
+struct BadEnum {
+    column: &'static str,
+    value: String,
+}
+
+impl std::fmt::Display for BadEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid {} value {:?}", self.column, self.value)
+    }
+}
+
+impl std::error::Error for BadEnum {}
+
+fn parse_enum<T>(
+    column: &'static str,
+    value: &str,
+    f: impl FnOnce(&str) -> Option<T>,
+) -> rusqlite::Result<T> {
+    f(value).ok_or_else(|| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(BadEnum {
+            column,
+            value: value.to_string(),
+        }))
+    })
 }
 
 fn goal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Goal> {
