@@ -120,10 +120,14 @@ impl TableState {
             };
             if resurrect_ok {
                 self.tombstones.remove(&op.record_id);
-                self.rows.insert(
-                    op.record_id.clone(),
-                    op.fields.clone().expect("upsert fields"),
-                );
+                // A field-less non-tombstone op is malformed (crafted or
+                // truncated): ignore deterministically instead of
+                // panicking — `apply` must stay a total function so sync
+                // can quarantine poison ops without wedging the cycle.
+                let Some(fields) = op.fields.clone() else {
+                    return false;
+                };
+                self.rows.insert(op.record_id.clone(), fields);
             }
         }
         true

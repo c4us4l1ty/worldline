@@ -270,6 +270,19 @@ fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
                 why: "total minutes must be positive".into(),
             });
         }
+        // The phase table replaces the headline estimate at persist
+        // time (`persist_plan`), so a sum that contradicts the estimate
+        // silently rewrites it (e.g. 60m → 10m). Reject sums outside a
+        // 2× band around the estimate.
+        if sum * 2 < d.estimated_minutes || sum > d.estimated_minutes * 2 {
+            return Err(DispatchError::Invalid {
+                field: "phases",
+                why: format!(
+                    "phase minutes sum to {sum}, contradicting the {est}m estimate",
+                    est = d.estimated_minutes
+                ),
+            });
+        }
         for p in &d.phases {
             if p.minutes <= 0 || p.minutes > 25 {
                 return Err(DispatchError::Invalid {
