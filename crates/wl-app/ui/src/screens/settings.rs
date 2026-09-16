@@ -233,7 +233,7 @@ pub fn SettingsScreen() -> Element {
                                 }
                                 Err(_) => {
                                     let mut st = ctx.sync_status;
-                                    *st.write() = "OFFLINE";
+                                    *st.write() = "OFFLINE".to_string();
                                     flash(&ctx, "SYNC FAILED — OFFLINE?");
                                 }
                             }
