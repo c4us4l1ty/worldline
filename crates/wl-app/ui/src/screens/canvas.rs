@@ -46,6 +46,9 @@ pub fn CanvasScreen() -> Element {
             tabindex: "0",
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
+                if e.is_auto_repeating() {
+                    return;
+                }
                 // Telemetry drawer takes precedence on Escape.
                 if *ctx.telemetry_open.read() {
                     if e.key() == Key::Escape {
@@ -306,7 +309,7 @@ fn EscapeModal(note: Signal<String>) -> Element {
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
                 e.stop_propagation();
-                if *ctx.directive_busy.peek() {
+                if e.is_auto_repeating() || *ctx.directive_busy.peek() {
                     return;
                 }
                 match e.key() {
@@ -317,7 +320,11 @@ fn EscapeModal(note: Signal<String>) -> Element {
                     _ => {},
                 }
             },
-            onclick: move |_| { confirming.set(true); /* backdrop click = confirm-dismiss prompt */ },
+            onclick: move |_| {
+                if !*ctx.directive_busy.peek() {
+                    confirming.set(true);
+                }
+            },
             div { class: "wl-modal-sheet wl-modal-centered-sheet", onclick: move |e| e.stop_propagation(),
                 if !*confirming.read() {
                     h2 { class: "wl-modal-header", "Diagnostic: escape hatch" }
@@ -348,12 +355,18 @@ fn EscapeModal(note: Signal<String>) -> Element {
                         div { class: "wl-bailout-reason-title", "[3] Cognitive / energy depletion" }
                         div { class: "wl-bailout-reason-sub", "Focus ceiling reached; request a downscaled task + 10-minute rest." }
                     }
-                    button { class: "wl-btn-coral", onclick: move |_| bail("miscalculated_scope"),
+                    button { class: "wl-btn-coral", disabled: busy, onclick: move |_| bail("miscalculated_scope"),
                         "Confirm bailout & downsize"
                     }
                     button {
                         class: "wl-btn-escape",
-                        onclick: move |_| { { let mut s = ctx.escape_open; *s.write() = false; } },
+                        disabled: busy,
+                        onclick: move |_| {
+                            if !*ctx.directive_busy.peek() {
+                                let mut s = ctx.escape_open;
+                                s.set(false);
+                            }
+                        },
                         span { "Resume execution directive" }
                         kbd { class: "wl-kbd-subtle", "Esc" }
                     }
@@ -362,7 +375,14 @@ fn EscapeModal(note: Signal<String>) -> Element {
                     p { class: "wl-modal-sub", "Closing the hatch without a category keeps your current directive." }
                     button {
                         class: "wl-btn-ghost",
-                        onclick: move |_| { { let mut s = ctx.escape_open; *s.write() = false; } confirming.set(false); },
+                        disabled: busy,
+                        onclick: move |_| {
+                            if !*ctx.directive_busy.peek() {
+                                let mut s = ctx.escape_open;
+                                s.set(false);
+                                confirming.set(false);
+                            }
+                        },
                         "Stay on directive"
                     }
                 }
