@@ -42,21 +42,22 @@ impl Vault {
         // nothing and would stall every save. Zero it process-wide
         // (upstream documents 0 as correct for strong keys).
         let _ = iota_stronghold::engine::snapshot::try_set_encrypt_work_factor(0);
-        let key = vault_key(dir)?;
+        private_directory(dir)?;
         let snapshot = dir.join("vault.hold");
-        // Pre-create the snapshot owner-only: Stronghold creates it with
-        // the process umask, which leaves a world-readable window before
-        // `restrict_permissions` below tightens it.
-        precreate_private(&snapshot);
+        match std::fs::symlink_metadata(&snapshot) {
+            Ok(meta) if meta.is_file() => restrict_permissions(&snapshot)?,
+            Ok(_) => return Err(VaultError::Io("snapshot is not a regular file".into())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(VaultError::Io(e.to_string())),
+        }
+        let key = vault_key(dir)?;
         let stronghold =
             tauri_plugin_stronghold::stronghold::Stronghold::new(&snapshot, key.to_vec())
                 .map_err(|e| VaultError::Stronghold(e.to_string()))?;
-        // Stronghold creates the snapshot with default umask; tighten
-        // it to owner-only — the encrypted blob sits next to its key
-        // file, and one of the two being world-readable undoes the
-        // other's protection on shared systems.
-        restrict_permissions(&snapshot);
-        Ok(Self { stronghold })
+        Ok(Self {
+            stronghold,
+            snapshot,
+        })
     }
 
     // -- mnemonic (Item 3) --------------------------------------------
