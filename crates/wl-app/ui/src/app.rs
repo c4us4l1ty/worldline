@@ -343,13 +343,76 @@ pub fn fmt_mmss(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
+pub fn set_directive(ctx: &AppCtx, directive: Option<DirectiveView>) {
+    let directive = active_directive(directive);
+    let mut session = ctx.timer_session;
+    let next = TimerSession::update(session.peek().clone(), directive.as_ref(), js_sys::Date::now());
+    session.set(next);
+    let mut current = ctx.directive;
+    current.set(directive);
+}
+
 pub fn flash(ctx: &AppCtx, msg: &str) {
     let mut toast = ctx.toast;
-    let msg = msg.to_string();
-    *toast.write() = Some(msg);
-    let mut toast2 = toast;
-    spawn(async move {
+    let mut task = ctx.toast_task;
+    if let Some(previous) = task.write().take() {
+        previous.cancel();
+    }
+    toast.set(Some(msg.to_string()));
+    task.set(Some(dioxus::core::spawn_forever(async move {
         gloo_timers::future::TimeoutFuture::new(2200).await;
-        *toast2.write() = None;
-    });
+        toast.set(None);
+    })));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn directive() -> DirectiveView {
+        DirectiveView {
+            directive_id: "first".into(),
+            state: "active".into(),
+            phase: Some((1, 2)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn elapsed_uses_timestamps_not_ticks() {
+        assert_eq!(elapsed_secs(1000.0, 1999.0), 0);
+        assert_eq!(elapsed_secs(1000.0, 62000.0), 61);
+        assert_eq!(elapsed_secs(1000.0, 500.0), 0);
+        assert_eq!(fmt_mmss(61), "01:01");
+        assert_eq!(fmt_mmss(6000), "100:00");
+    }
+
+    #[test]
+    fn inactive_or_missing_directives_are_cleared() {
+        assert!(active_directive(None).is_none());
+        assert!(active_directive(Some(DirectiveView::default())).is_none());
+        let mut d = directive();
+        assert!(active_directive(Some(d.clone())).is_some());
+        d.state = "idle".into();
+        assert!(active_directive(Some(d.clone())).is_none());
+        d.state = "active".into();
+        d.directive_id.clear();
+        assert!(active_directive(Some(d)).is_none());
+    }
+
+    #[test]
+    fn timer_session_survives_refresh_but_resets_for_new_work() {
+        let mut d = directive();
+        let session = TimerSession::update(None, Some(&d), 1000.0);
+        d.title = "Updated title".into();
+        let unchanged = TimerSession::update(session.clone(), Some(&d), 5000.0);
+        assert_eq!(session, unchanged);
+        d.phase = Some((2, 2));
+        let next_phase = TimerSession::update(unchanged, Some(&d), 5000.0);
+        assert_eq!(next_phase.as_ref().unwrap().started_ms, 5000.0);
+        d.directive_id = "second".into();
+        let next_directive = TimerSession::update(next_phase, Some(&d), 9000.0);
+        assert_eq!(next_directive.as_ref().unwrap().started_ms, 9000.0);
+        assert!(TimerSession::update(next_directive, None, 10000.0).is_none());
+    }
 }
