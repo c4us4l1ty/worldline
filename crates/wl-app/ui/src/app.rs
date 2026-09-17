@@ -162,7 +162,6 @@ impl Default for AppSettingsView {
 #[derive(Clone, PartialEq)]
 pub enum Screen {
     Boot,
-    BootError(String),
     SeedVault {
         phrase: Vec<String>,
         verify_indices: Vec<usize>,
@@ -242,12 +241,9 @@ fn App() -> Element {
     let _theme = use_context_provider(Theme::new);
 
     // Boot: check identity → route (runs once).
-    let mut booted = use_signal(|| false);
+    let mut boot_attempt = use_signal(|| 0u64);
     use_effect(move || {
-        if *booted.read() {
-            return;
-        }
-        booted.set(true);
+        let _attempt = *boot_attempt.read();
         let ctx2 = ctx;
         spawn(async move {
             let mut screen = ctx2.screen;
