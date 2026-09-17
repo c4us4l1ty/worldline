@@ -20,7 +20,10 @@ pub fn valid_hlc(hlc: &str) -> bool {
     if bytes.len() != 32
         || bytes[20] != b'.'
         || bytes[26] != b'.'
-        || !bytes.iter().enumerate().all(|(i, b)| i == 20 || i == 26 || b.is_ascii_digit())
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 20 || i == 26 || b.is_ascii_digit())
     {
         return false;
     }
@@ -218,7 +221,10 @@ mod tests {
         assert!(valid_cursor("", ""));
         assert!(!valid_cursor("", "op"));
         assert!(valid_cursor("00000000000000000001.00000.00000", ""));
-        assert!(!valid_cursor("00000000000000000001.00000.00000", &"x".repeat(129)));
+        assert!(!valid_cursor(
+            "00000000000000000001.00000.00000",
+            &"x".repeat(129)
+        ));
         assert!(valid_cursor("00000000000000000001.00000.00000", "op-1"));
     }
 

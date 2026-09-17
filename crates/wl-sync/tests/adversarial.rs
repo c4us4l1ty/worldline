@@ -614,3 +614,21 @@ async fn defect_pull_never_merges_remote_clock() {
         "local tick {local} must exceed pulled remote {remote}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tampered_pull_cursor_is_rejected_by_relay() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let conn = open_in_memory().unwrap();
+    let r = Repos::new(conn, 2);
+    save_cursor(&r, "1000000.0.1", "").unwrap();
+    let err = sync_cycle(&r, &identity, &transport, 100).unwrap_err();
+    let msg = match &err {
+        wl_sync::sync::SyncError::Transport(m) => m.clone(),
+        other => panic!("expected transport error, got {other:?}"),
+    };
+    assert!(msg.contains("400"), "relay must 400 the bad cursor: {msg}");
+}

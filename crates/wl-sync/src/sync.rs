@@ -408,7 +408,9 @@ fn validate_pull_response(
     batch_limit: usize,
 ) -> Result<(), SyncError> {
     if resp.ops.len() > batch_limit {
-        return Err(SyncError::Protocol("pull batch exceeds requested limit".into()));
+        return Err(SyncError::Protocol(
+            "pull batch exceeds requested limit".into(),
+        ));
     }
     if !wl_protocol::valid_cursor(&resp.next_cursor, &resp.next_op_id) {
         return Err(SyncError::Protocol("invalid next cursor".into()));
@@ -424,7 +426,9 @@ fn validate_pull_response(
             || op.record_id.is_empty()
             || op.record_id.len() > wl_protocol::MAX_HEADER_LEN
         {
-            return Err(SyncError::Protocol("pulled op envelope out of bounds".into()));
+            return Err(SyncError::Protocol(
+                "pulled op envelope out of bounds".into(),
+            ));
         }
         if op.hlc < prev.0 || (op.hlc == prev.0 && op.operation_id <= prev.1) {
             return Err(SyncError::Protocol("non-monotonic pull batch".into()));

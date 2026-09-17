@@ -3,8 +3,6 @@
 //! The relay stores only: public key, opaque ciphertext, routing
 //! headers, HLC text. It can never read payload contents.
 
-use serde_json::Value;
-
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[cfg(feature = "sqlite")]
@@ -442,26 +440,4 @@ pub mod postgres_backend {
             })
         }
     }
-}
-
-/// Helper: parse a `PushOp` JSON body into `StoredOp`s.
-#[allow(dead_code)]
-pub fn ops_from_json(account: &str, body: &Value) -> Option<Vec<StoredOp>> {
-    use base64::Engine;
-    let ops = body["ops"].as_array()?;
-    let mut out = Vec::with_capacity(ops.len());
-    for op in ops {
-        let sealed = base64::engine::general_purpose::STANDARD
-            .decode(op["sealed_b64"].as_str()?)
-            .ok()?;
-        out.push(StoredOp {
-            operation_id: op["operation_id"].as_str()?.to_string(),
-            account: account.to_string(),
-            hlc: op["hlc"].as_str()?.to_string(),
-            table: op["table"].as_str()?.to_string(),
-            record_id: op["record_id"].as_str()?.to_string(),
-            sealed,
-        });
-    }
-    Some(out)
 }

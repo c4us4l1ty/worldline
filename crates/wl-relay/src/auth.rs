@@ -40,6 +40,11 @@ pub const MAX_CHALLENGES_PER_ACCOUNT: usize = 4;
 /// TTLs expire.
 pub const MAX_CHALLENGES_GLOBAL: usize = 100_000;
 
+pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
+pub const MAX_SESSIONS_GLOBAL: usize = 100_000;
+
+pub const MAX_TOKEN_LEN: usize = 512;
+
 /// GC every N `validate` calls: keeps the token hot path cheap while
 /// preventing unbounded session accumulation under pull-only traffic
 /// (expired rows would otherwise linger until the next challenge
@@ -146,10 +151,14 @@ impl AuthState {
             self.counter.fetch_add(1, Ordering::Relaxed),
             uuid::Uuid::new_v4()
         );
-        self.sessions
-            .lock()
-            .expect("auth mutex")
-            .insert(token_id.clone(), (public_key.to_string(), sess_expires));
+        let mut sessions = self.sessions.lock().expect("auth mutex");
+        let now = now_secs();
+        sessions.retain(|_, (_, e)| *e > now);
+        let per_account = sessions.values().filter(|(pk, _)| pk == public_key).count();
+        if per_account >= MAX_SESSIONS_PER_ACCOUNT || sessions.len() >= MAX_SESSIONS_GLOBAL {
+            return Err(AuthError::RateLimited);
+        }
+        sessions.insert(token_id.clone(), (public_key.to_string(), sess_expires));
         Ok((token_id, sess_expires))
     }
 
@@ -158,6 +167,9 @@ impl AuthState {
     /// a full GC sweep periodically — pull-only clients no longer
     /// accumulate stale sessions until some other client challenges.
     pub fn validate(&self, token: &str) -> Result<String, AuthError> {
+        if token.is_empty() || token.len() > MAX_TOKEN_LEN {
+            return Err(AuthError::BadToken);
+        }
         let now = now_secs();
         let pk = {
             let mut sessions = self.sessions.lock().expect("auth mutex");
@@ -320,6 +332,39 @@ mod tests {
         let sk = SigningKey::from_bytes(&[11u8; 32]);
         let other = hex::encode(sk.verifying_key().as_bytes());
         assert!(auth.issue_challenge(&other).is_ok());
+    }
+
+    #[test]
+    fn session_flood_is_rate_limited_per_account() {
+        let auth = AuthState::new();
+        let (pk, sk) = fresh_keypair();
+        for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
+            let (nonce, expires) = auth.issue_challenge(&pk).unwrap();
+            let payload = wl_protocol::challenge_signing_payload(&nonce, expires);
+            let sig = sk.sign(&payload).to_bytes();
+            auth.verify(&pk, &nonce, expires, &sig).unwrap();
+        }
+        let (nonce, expires) = auth.issue_challenge(&pk).unwrap();
+        let payload = wl_protocol::challenge_signing_payload(&nonce, expires);
+        let sig = sk.sign(&payload).to_bytes();
+        assert!(matches!(
+            auth.verify(&pk, &nonce, expires, &sig),
+            Err(AuthError::RateLimited)
+        ));
+        let sk2 = SigningKey::from_bytes(&[13u8; 32]);
+        let other = hex::encode(sk2.verifying_key().as_bytes());
+        let (nonce2, expires2) = auth.issue_challenge(&other).unwrap();
+        let sig2 = sk2
+            .sign(&wl_protocol::challenge_signing_payload(&nonce2, expires2))
+            .to_bytes();
+        assert!(auth.verify(&other, &nonce2, expires2, &sig2).is_ok());
+    }
+
+    #[test]
+    fn oversized_token_is_rejected_without_map_lookup() {
+        let auth = AuthState::new();
+        let long = "a".repeat(513);
+        assert!(matches!(auth.validate(&long), Err(AuthError::BadToken)));
     }
 
     #[test]

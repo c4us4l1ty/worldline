@@ -15,7 +15,7 @@ pub mod store;
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -29,14 +29,13 @@ use store::{BlobStore, StoredOp};
 #[cfg(feature = "sqlite")]
 use store::sqlite_backend::SqliteStore;
 
-/// Hard cap per pull batch.
-const PULL_HARD_CAP: u32 = 500;
+const PULL_HARD_CAP: u32 = wl_protocol::MAX_BATCH_OPS as u32;
 /// Hard cap on ops per push request (storage-exhaustion + CPU bound).
-const MAX_OPS_PER_PUSH: usize = 500;
-/// Hard cap on one sealed blob (100× a normal op; sync payloads are KB).
-const MAX_SEALED_BYTES: usize = 256 * 1024;
+const MAX_OPS_PER_PUSH: usize = wl_protocol::MAX_BATCH_OPS;
+const MAX_SEALED_BYTES: usize = wl_protocol::MAX_SEALED_BYTES;
+const MAX_SEALED_B64: usize = wl_protocol::MAX_SEALED_B64;
 /// Routing-header length bound (ids are UUID-shaped; generous ceiling).
-const MAX_HEADER_LEN: usize = 128;
+const MAX_HEADER_LEN: usize = wl_protocol::MAX_HEADER_LEN;
 
 pub struct AppState {
     pub auth: AuthState,
@@ -51,6 +50,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/auth/verify", post(verify))
         .route("/sync/push", post(push))
         .route("/sync/pull", post(pull))
+        .layer(DefaultBodyLimit::max(wl_protocol::MAX_REQUEST_BYTES))
         .with_state(state)
 }
 
@@ -143,6 +143,9 @@ async fn verify(
             "missing x-nonce / x-expires headers",
         );
     };
+    if req.public_key.len() != 64 || nonce.len() != 64 || req.signature.len() > 256 {
+        return err(StatusCode::BAD_REQUEST, "bad auth field length");
+    }
     let Ok(sig) = hex::decode(&req.signature) else {
         return err(StatusCode::BAD_REQUEST, "bad signature encoding");
     };
@@ -222,6 +225,9 @@ async fn push(
     }
     let mut ops = Vec::with_capacity(req.ops.len());
     for op in &req.ops {
+        if op.sealed_b64.len() > MAX_SEALED_B64 {
+            return err(StatusCode::PAYLOAD_TOO_LARGE, "op payload too large");
+        }
         let Ok(sealed) = base64::engine::general_purpose::STANDARD.decode(&op.sealed_b64) else {
             return err(StatusCode::BAD_REQUEST, "invalid base64 payload");
         };
@@ -264,6 +270,9 @@ async fn pull(
         Err(resp) => return resp,
     };
     let limit = req.limit.clamp(1, PULL_HARD_CAP);
+    if !wl_protocol::valid_cursor(&req.since_hlc, &req.since_op_id) {
+        return err(StatusCode::BAD_REQUEST, "bad pull cursor");
+    }
     let since_hlc = req.since_hlc.clone();
     let since_op_id = req.since_op_id.clone();
     let owned = state.clone();
