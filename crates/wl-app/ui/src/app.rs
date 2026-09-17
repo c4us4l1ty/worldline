@@ -6,7 +6,7 @@
 //! * ⌘+Enter completes; Escape opens the frictionful bailout modal.
 //! * Zero future lists, zero streaks, zero alarm red.
 
-use dioxus::prelude::*;
+use dioxus::{core::Task, prelude::*};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::theme::Theme;

@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{flash, fmt_mmss, invoke, AppCtx, DirectiveView};
+use crate::app::{elapsed_secs, flash, fmt_mmss, invoke, set_directive, AppCtx, DirectiveView};
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
