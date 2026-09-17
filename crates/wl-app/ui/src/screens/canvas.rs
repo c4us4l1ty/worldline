@@ -62,10 +62,10 @@ pub fn CanvasScreen() -> Element {
                 // ⌘+Enter / Ctrl+Enter completes; Escape toggles bailout (skill §7.5).
                 if e.key() == Key::Enter && (e.modifiers().meta() || e.modifiers().ctrl()) {
                     if !*ctx.escape_open.read() {
-                        let ctx = ctx;
-                        spawn(async move { complete_current(&ctx).await; });
+                        complete_current(&ctx);
                     }
-                } else if e.key() == Key::Escape {
+                } else if e.key() == Key::Escape
+                    && !*ctx.directive_busy.peek() && ctx.directive.peek().is_some() {
                     let open = *ctx.escape_open.read();
                     { let mut s = ctx.escape_open; *s.write() = !open; }
                 }
@@ -94,7 +94,11 @@ pub fn CanvasScreen() -> Element {
                     title: "System telemetry (Ctrl+,)",
                     style: "border: 1px solid var(--wl-border-subtle); cursor: pointer; font-family: var(--font-mono);",
                     onclick: move |_| { { let mut s = ctx.telemetry_open; *s.write() = true; } },
-                    "{timer}"
+                    if let Some(session) = ctx.timer_session.read().clone() {
+                        TimerDisplay { key: "{session.started_ms}", started_ms: session.started_ms }
+                    } else {
+                        "00:00"
+                    }
                 }
             }
         }
