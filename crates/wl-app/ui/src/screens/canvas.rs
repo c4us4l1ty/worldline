@@ -126,15 +126,19 @@ pub fn CanvasScreen() -> Element {
         // Action controls (skill §4.C)
         footer { class: "wl-actions",
             button { class: "wl-btn-primary",
-                onclick: move |_| {
-                    let ctx = ctx;
-                    spawn(async move { complete_current(&ctx).await; });
-                },
+                disabled: unavailable || escaping,
+                onclick: move |_| complete_current(&ctx),
                 span { "Complete Directive" }
                 kbd { class: "wl-kbd", "⌘↵" }
             }
             button { class: "wl-btn-escape",
-                onclick: move |_| { { let mut s = ctx.escape_open; *s.write() = true; } },
+                disabled: unavailable,
+                onclick: move |_| {
+                    if !*ctx.directive_busy.peek() && ctx.directive.peek().is_some() {
+                        let mut s = ctx.escape_open;
+                        s.set(true);
+                    }
+                },
                 span { "Bailout / Blocked" }
                 kbd { class: "wl-kbd-subtle", "Esc" }
             }

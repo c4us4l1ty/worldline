@@ -875,7 +875,10 @@ fn http_execute(
             return Err(format!("HTTP {}", resp.status()));
         }
         const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-        if resp.content_length().is_some_and(|len| len > MAX_RESPONSE_BYTES as u64) {
+        if resp
+            .content_length()
+            .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
+        {
             return Err("AI response body too large".into());
         }
         let mut bytes = Vec::new();
