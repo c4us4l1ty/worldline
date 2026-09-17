@@ -5,7 +5,32 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{flash, invoke, AppCtx, Screen};
+use crate::app::{invoke, AppCtx, Screen};
+
+fn generation_mode(mode: &'static str, succeeded: bool) -> &'static str {
+    match (mode, succeeded) {
+        ("intro", true) => "display",
+        ("intro", false) => "generation_failed",
+        _ => mode,
+    }
+}
+
+fn valid_challenge(phrase: &[String], indices: &[usize]) -> bool {
+    phrase.len() == 12
+        && phrase.iter().all(|word| !word.trim().is_empty())
+        && indices.len() == 3
+        && indices.iter().enumerate().all(|(i, &idx)| {
+            idx < phrase.len() && !indices[..i].contains(&idx)
+        })
+}
+
+fn backup_matches(phrase: &[String], indices: &[usize], words: &[String]) -> bool {
+    valid_challenge(phrase, indices)
+        && words.len() == indices.len()
+        && indices.iter().zip(words).all(|(&idx, word)| {
+            word.trim().eq_ignore_ascii_case(&phrase[idx])
+        })
+}
 
 #[derive(Clone, Default, serde::Deserialize)]
 pub struct GeneratedIdentity {
@@ -42,24 +67,37 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
 
     // Kick off generation on first render (intro → display).
     use_effect(move || {
-        let cur = mode.read().clone();
-        let phrase_empty = phrase.is_empty();
+        let cur = *mode.read();
+        if cur != "intro" || !phrase.is_empty() || *busy.peek() {
+            return;
+        }
         let mut g = generated;
-        let mut m = mode;
+        if g.peek().is_some() {
+            mode.set("display");
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
         spawn(async move {
-            if cur == "intro" && phrase_empty && g.read().is_none() {
-                match invoke::<GeneratedIdentity>("identity_generate", ()).await {
-                    Ok(id) => {
-                        let words: Vec<String> =
-                            id.phrase.split_whitespace().map(String::from).collect();
-                        *g.write() = Some(words);
-                        let mut gi = gen_indices;
-                        *gi.write() = id.verify_indices;
-                        m.set("display");
+            match invoke::<GeneratedIdentity>("identity_generate", ()).await {
+                Ok(id) => {
+                    let words: Vec<String> =
+                        id.phrase.split_whitespace().map(String::from).collect();
+                    g.set(Some(words));
+                    let mut gi = gen_indices;
+                    gi.set(id.verify_indices);
+                    let next = generation_mode(*mode.peek(), true);
+                    mode.set(next);
+                }
+                Err(_) => {
+                    let next = generation_mode(*mode.peek(), false);
+                    mode.set(next);
+                    if next == "generation_failed" {
+                        error.set("Identity generation failed. Please try again.".to_string());
                     }
-                    Err(e) => flash(&ctx, &format!("ERR {e}")),
                 }
             }
+            busy.set(false);
         });
     });
 
@@ -76,34 +114,26 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
 
     let verify_phrase = seeded_phrase.clone();
     let verify_challenge = challenge.clone();
-    let verify = move || {
+    let challenge_valid = valid_challenge(&seeded_phrase, &challenge);
+    let mut verify = move || {
+        if *busy.peek() || *mode.peek() != "verify" {
+            return;
+        }
         let ctx = ctx;
         let words: Vec<String> = words_input.read().clone();
         let mut words_sig = words_input;
         let ch = verify_challenge.clone();
         let mut g = generated;
         let seeded = verify_phrase.clone();
-        let mut error = error;
+        if !backup_matches(&seeded, &ch, &words) {
+            error.set(
+                "Those words don't match the sequence. Check your backup again.".to_string(),
+            );
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
         spawn(async move {
-            let full: Vec<String> = if seeded.is_empty() {
-                g.read().clone().unwrap_or_default()
-            } else {
-                seeded
-            };
-            // Local pre-check (shell re-verifies authoritatively).
-            let ok = ch
-                .iter()
-                .zip(words.iter())
-                .all(|(&idx, w)| match full.get(idx) {
-                    Some(word) => w.trim().eq_ignore_ascii_case(word),
-                    None => false,
-                });
-            if !ok {
-                error.set(
-                    "Those words don't match the sequence. Check your backup again.".to_string(),
-                );
-                return;
-            }
             #[derive(serde::Serialize)]
             struct V {
                 indices: Vec<usize>,
@@ -116,6 +146,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
             let verified: bool = invoke::<bool>("identity_verify_backup", payload)
                 .await
                 .unwrap_or(false);
+            busy.set(false);
             if verified {
                 // Secret hygiene: the 12 words lived in signals/DOM for
                 // the one mandated display — drop them the moment the
@@ -159,6 +190,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                         autocomplete: "off",
                         autocapitalize: "off",
                         spellcheck: "false",
+                        disabled: *busy.read(),
                         value: "{restore_input.read().clone()}",
                         oninput: move |e| restore_input.set(e.value()),
                     }
@@ -168,9 +200,19 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                     button {
                         class: "wl-btn-primary",
                         style: "margin-top: 8px;",
+                        disabled: *busy.read(),
                         onclick: move |_| {
+                            if *busy.peek() || *mode.peek() != "restore" {
+                                return;
+                            }
                             let ctx = ctx;
                             let phrase = restore_input.read().clone();
+                            if phrase.split_whitespace().count() != 12 {
+                                error.set("Enter exactly 12 words.".to_string());
+                                return;
+                            }
+                            busy.set(true);
+                            error.set(String::new());
                             spawn(async move {
                                 match invoke::<String>(
                                     "identity_restore",
@@ -191,6 +233,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                                         e.set("That phrase was not accepted. Check each word and try again.".to_string());
                                     }
                                 }
+                                busy.set(false);
                             });
                         },
                         "Restore identity"
@@ -198,12 +241,29 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                     button {
                         class: "wl-btn-escape",
                         style: "margin-top: 6px;",
-                        onclick: move |_| { mode.set("intro"); },
+                        disabled: *busy.read(),
+                        onclick: move |_| {
+                            if !*busy.peek() {
+                                restore_input.set(String::new());
+                                error.set(String::new());
+                                mode.set(if generated.peek().is_some() || !seeded_phrase.is_empty() { "display" } else { "intro" });
+                            }
+                        },
                         "Create a new identity instead"
                     }
-                } else if *mode.read() == "intro" {
+                } else if *mode.read() == "intro" || *mode.read() == "generation_failed" {
                     div { class: "wl-directive-card",
-                        p { class: "wl-body-muted", "Generating cryptographic identity from OS entropy…" }
+                        if *mode.read() == "generation_failed" {
+                            p { class: "wl-body-muted", "{error.read()}" }
+                            button {
+                                class: "wl-btn-primary",
+                                disabled: *busy.read(),
+                                onclick: move |_| { if !*busy.peek() { mode.set("intro"); } },
+                                "Retry generation"
+                            }
+                        } else {
+                            p { class: "wl-body-muted", "Generating cryptographic identity from OS entropy…" }
+                        }
                     }
                     button {
                         class: "wl-btn-escape",
@@ -226,6 +286,8 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                         onclick: move |_| { mode.set("verify"); },
                         "I saved the words"
                     }
+                } else if !challenge_valid {
+                    p { class: "wl-seed-sub", "The backup challenge is invalid. Restart onboarding before continuing." }
                 } else {
                     p { class: "wl-seed-sub",
                         "Verification challenge — type the highlighted words exactly as written."
@@ -237,6 +299,9 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                             r#type: "text",
                             placeholder: "Word {idx + 1:02}",
                             autocomplete: "off",
+                            autocapitalize: "off",
+                            spellcheck: "false",
+                            disabled: *busy.read(),
                             value: "{words_input.read()[row].clone()}",
                             oninput: move |e| {
                                 let mut v = words_input.read().clone();
@@ -248,7 +313,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                     if !error.read().is_empty() {
                         p { class: "wl-seed-sub", style: "color: var(--wl-accent-coral);", "{error.read().clone()}" }
                     }
-                    button { class: "wl-btn-primary", onclick: move |_| verify(), "Verify backup" }
+                    button { class: "wl-btn-primary", disabled: *busy.read(), onclick: move |_| verify(), "Verify backup" }
                 }
             }
         }
