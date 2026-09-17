@@ -148,6 +148,58 @@ pub fn CanvasScreen() -> Element {
     }
 }
 
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
+export function start_timer(tick) {
+    let timeout;
+    let stopped = false;
+    function update() {
+        clearTimeout(timeout);
+        if (stopped || document.hidden) return;
+        tick();
+        timeout = setTimeout(update, 1000);
+    }
+    document.addEventListener('visibilitychange', update);
+    update();
+    return () => {
+        stopped = true;
+        clearTimeout(timeout);
+        document.removeEventListener('visibilitychange', update);
+    };
+}
+"#)]
+extern "C" {
+    fn start_timer(tick: &js_sys::Function) -> js_sys::Function;
+}
+
+struct TimerSubscription {
+    stop: js_sys::Function,
+    _tick: wasm_bindgen::closure::Closure<dyn FnMut()>,
+}
+
+impl Drop for TimerSubscription {
+    fn drop(&mut self) {
+        let _ = self.stop.call0(&wasm_bindgen::JsValue::NULL);
+    }
+}
+
+#[component]
+fn TimerDisplay(started_ms: f64) -> Element {
+    use wasm_bindgen::JsCast;
+
+    let mut seconds = use_signal(|| elapsed_secs(started_ms, js_sys::Date::now()));
+    use_hook(move || {
+        let tick = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            seconds.set(elapsed_secs(started_ms, js_sys::Date::now()));
+        }) as Box<dyn FnMut()>);
+        std::rc::Rc::new(TimerSubscription {
+            stop: start_timer(tick.as_ref().unchecked_ref()),
+            _tick: tick,
+        })
+    });
+    let timer = fmt_mmss(*seconds.read());
+    rsx! { "{timer}" }
+}
+
 #[component]
 pub fn DirectiveCard(d: DirectiveView) -> Element {
     let phase_badge = match d.phase {
