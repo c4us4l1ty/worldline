@@ -31,7 +31,8 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
     });
     let mut restore_input = use_signal(String::new);
     let mut words_input = use_signal::<Vec<String>>(|| vec![String::new(); 3]);
-    let error = use_signal(String::new);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
 
     let seeded_phrase: Vec<String> = if phrase.is_empty() {
         generated.read().clone().unwrap_or_default()

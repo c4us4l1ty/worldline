@@ -9,7 +9,6 @@ use crate::app::{elapsed_secs, flash, fmt_mmss, invoke, set_directive, AppCtx, D
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
-    let escape_reason_note = use_signal(String::new);
 
     // Load the current directive on mount.
     use_effect(move || {
@@ -51,15 +50,6 @@ pub fn CanvasScreen() -> Element {
                 }
                 // Telemetry drawer takes precedence on Escape.
                 if *ctx.telemetry_open.read() {
-                    if e.key() == Key::Escape {
-                        { let mut s = ctx.telemetry_open; *s.write() = false; }
-                    }
-                    return;
-                }
-                // Ctrl+, toggles the telemetry drawer (web equiv of ⌘,).
-                if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
-                    let open = *ctx.telemetry_open.read();
-                    { let mut s = ctx.telemetry_open; *s.write() = !open; }
                     return;
                 }
                 // ⌘+Enter / Ctrl+Enter completes; Escape toggles bailout (skill §7.5).
@@ -149,7 +139,7 @@ pub fn CanvasScreen() -> Element {
 
         // Frictionful escape hatch modal (skill §4.C, §5 "Do")
         if escaping {
-            EscapeModal { note: escape_reason_note }
+            EscapeModal {}
         }
         }
     }
@@ -209,20 +199,17 @@ fn TimerDisplay(started_ms: f64) -> Element {
 
 #[component]
 pub fn DirectiveCard(d: DirectiveView) -> Element {
-    let phase_badge = match d.phase {
+    let phase = valid_phase(d.phase);
+    let phase_badge = match phase {
         Some((step, total)) => format!(
             "Phase {step} of {total} · {} min",
             d.estimated_minutes.max(0)
         ),
         None => format!("{} Minutes", d.estimated_minutes.max(0)),
     };
-    let progress = match d.phase {
-        Some((step, total)) if total > 0 => (step as f64 / total as f64) * 100.0,
+    let progress = match phase {
+        Some((step, total)) => (step as f64 / total as f64) * 100.0,
         _ => 100.0,
-    };
-    let checklist = match d.phase {
-        Some((step, total)) if total > 1 => Some((step, total)),
-        _ => None,
     };
     rsx! {
         div { class: "wl-directive-card wl-card-enter",
@@ -231,16 +218,6 @@ pub fn DirectiveCard(d: DirectiveView) -> Element {
             if let Some(instr) = &d.instruction {
                 p { class: "wl-directive-instruction", "{instr}" }
             }
-            if let Some((step, total)) = checklist {
-                div { class: "wl-phase-list",
-                    for i in 1..=total {
-                        div { class: if i < step { "wl-phase-row wl-phase-done" } else if i == step { "wl-phase-row wl-phase-now" } else { "wl-phase-row" },
-                            span { class: "wl-phase-glyph", if i < step { "●" } else if i == step { "◐" } else { "○" } }
-                            span { class: "wl-phase-text", "Phase {i} of {total}" }
-                        }
-                    }
-                }
-            }
             div { class: "wl-progress-track",
                 div { class: "wl-progress-bar", style: "width: {progress}%;" }
             }
@@ -248,17 +225,52 @@ pub fn DirectiveCard(d: DirectiveView) -> Element {
     }
 }
 
+fn valid_phase(phase: Option<(i64, i64)>) -> Option<(i64, i64)> {
+    phase.filter(|&(step, total)| step >= 1 && step <= total)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BailReason {
+    Dependency,
+    Scope,
+    Energy,
+}
+
+impl BailReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dependency => "external_dependency",
+            Self::Scope => "miscalculated_scope",
+            Self::Energy => "energy_depletion",
+        }
+    }
+
+    fn from_key(key: &Key) -> Option<Self> {
+        match key {
+            Key::Character(c) if c == "1" => Some(Self::Dependency),
+            Key::Character(c) if c == "2" => Some(Self::Scope),
+            Key::Character(c) if c == "3" => Some(Self::Energy),
+            _ => None,
+        }
+    }
+}
+
 #[component]
-fn EscapeModal(note: Signal<String>) -> Element {
+fn EscapeModal() -> Element {
     let ctx = use_context::<AppCtx>();
+    let mut note = use_signal(String::new);
+    let mut selected = use_signal(|| None::<BailReason>);
     let mut confirming = use_signal(|| false);
 
-    let bail = move |reason: &str| {
-        if !*ctx.escape_open.peek() || !begin_directive_action(&ctx) {
+    let bail = move || {
+        let Some(reason) = *selected.peek() else {
+            return;
+        };
+        if !*ctx.escape_open.peek() || *ctx.telemetry_open.peek() || !begin_directive_action(&ctx) {
             return;
         }
         let note = note.read().clone();
-        let reason = reason.to_string();
+        let reason = reason.as_str().to_string();
         dioxus::core::spawn_forever(async move {
             #[derive(serde::Serialize)]
             struct BailReq {
@@ -296,9 +308,6 @@ fn EscapeModal(note: Signal<String>) -> Element {
     };
 
     // Keyboard: 1/2/3 categorize, Esc resumes (spec §1 bindings).
-    let bail_dep = bail;
-    let bail_scope = bail;
-    let bail_energy = bail;
     let note_len = note.read().chars().count();
     let busy = *ctx.directive_busy.read();
 
@@ -308,16 +317,21 @@ fn EscapeModal(note: Signal<String>) -> Element {
             tabindex: "0",
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
+                if *ctx.telemetry_open.peek()
+                    || (e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl()) {
+                    return;
+                }
                 e.stop_propagation();
                 if e.is_auto_repeating() || *ctx.directive_busy.peek() {
                     return;
                 }
-                match e.key() {
-                    Key::Character(ref c) if c == "1" => bail_dep("external_dependency"),
-                    Key::Character(ref c) if c == "2" => bail_scope("miscalculated_scope"),
-                    Key::Character(ref c) if c == "3" => bail_energy("energy_depletion"),
-                    Key::Escape => { let mut s = ctx.escape_open; *s.write() = false; },
-                    _ => {},
+                if e.key() == Key::Escape {
+                    let mut s = ctx.escape_open;
+                    s.set(false);
+                } else if !*confirming.peek() && e.modifiers().is_empty() {
+                    if let Some(reason) = BailReason::from_key(&e.key()) {
+                        selected.set(Some(reason));
+                    }
                 }
             },
             onclick: move |_| {
@@ -337,26 +351,46 @@ fn EscapeModal(note: Signal<String>) -> Element {
                         maxlength: "140",
                         placeholder: "Optional context (max 140 chars)",
                         value: "{note.read().clone()}",
+                        disabled: busy,
+                        onkeydown: move |e: Event<KeyboardData>| {
+                            if BailReason::from_key(&e.key()).is_some() {
+                                e.stop_propagation();
+                            }
+                        },
                         oninput: move |e| {
                             let v: String = e.value().chars().take(140).collect();
                             note.set(v);
                         },
                     }
                     p { class: "wl-char-count wl-mono", "{note_len}/140" }
-                    button { class: "wl-bailout-reason", disabled: busy, onclick: move |_| bail("external_dependency"),
+                    button { class: "wl-bailout-reason", disabled: busy,
+                        aria_pressed: selected.read().as_ref() == Some(&BailReason::Dependency),
+                        onclick: move |_| { if !*ctx.directive_busy.peek() { selected.set(Some(BailReason::Dependency)); } },
                         div { class: "wl-bailout-reason-title", "[1] Dependency blocked" }
                         div { class: "wl-bailout-reason-sub", "Waiting for 3rd party API, merge, or response." }
                     }
-                    button { class: "wl-bailout-reason", disabled: busy, onclick: move |_| bail("miscalculated_scope"),
+                    button { class: "wl-bailout-reason", disabled: busy,
+                        aria_pressed: selected.read().as_ref() == Some(&BailReason::Scope),
+                        onclick: move |_| { if !*ctx.directive_busy.peek() { selected.set(Some(BailReason::Scope)); } },
                         div { class: "wl-bailout-reason-title", "[2] Scope miscalculation" }
                         div { class: "wl-bailout-reason-sub", "Directive exceeds allotted time boundary (>2x). Dispatcher splits it; quota untouched." }
                     }
-                    button { class: "wl-bailout-reason", disabled: busy, onclick: move |_| bail("energy_depletion"),
+                    button { class: "wl-bailout-reason", disabled: busy,
+                        aria_pressed: selected.read().as_ref() == Some(&BailReason::Energy),
+                        onclick: move |_| { if !*ctx.directive_busy.peek() { selected.set(Some(BailReason::Energy)); } },
                         div { class: "wl-bailout-reason-title", "[3] Cognitive / energy depletion" }
                         div { class: "wl-bailout-reason-sub", "Focus ceiling reached; request a downscaled task + 10-minute rest." }
                     }
-                    button { class: "wl-btn-coral", disabled: busy, onclick: move |_| bail("miscalculated_scope"),
-                        "Confirm bailout & downsize"
+                    p { class: "wl-modal-sub",
+                        match *selected.read() {
+                            Some(BailReason::Dependency) => "Selected: dependency blocked",
+                            Some(BailReason::Scope) => "Selected: scope miscalculation",
+                            Some(BailReason::Energy) => "Selected: cognitive / energy depletion",
+                            None => "Select a category before confirming.",
+                        }
+                    }
+                    button { class: "wl-btn-primary", disabled: busy || selected.read().is_none(), onclick: move |_| bail(),
+                        "Confirm bailout"
                     }
                     button {
                         class: "wl-btn-escape",
