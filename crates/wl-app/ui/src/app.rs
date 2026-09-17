@@ -162,6 +162,7 @@ impl Default for AppSettingsView {
 #[derive(Clone, PartialEq)]
 pub enum Screen {
     Boot,
+    BootError(String),
     SeedVault {
         phrase: Vec<String>,
         verify_indices: Vec<usize>,
