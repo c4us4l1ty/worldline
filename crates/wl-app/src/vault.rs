@@ -328,12 +328,73 @@ mod tests {
         }
         // Drop + reopen: snapshot + key file persist.
         {
-            if let Ok(md) = std::fs::metadata(dir.join("vault.hold")) {}
             let v = Vault::open(&dir).unwrap();
             assert!(v.has_mnemonic());
             assert_eq!(v.get_mnemonic().unwrap().as_str(), phrase);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalid_snapshot_is_retained() {
+        for contents in [b"".as_slice(), b"not a stronghold snapshot".as_slice()] {
+            let dir = tmpdir();
+            let key = vault_key(&dir).unwrap();
+            let snapshot = dir.join("vault.hold");
+            std::fs::write(&snapshot, contents).unwrap();
+            for _ in 0..2 {
+                assert!(matches!(Vault::open(&dir), Err(VaultError::Stronghold(_))));
+                assert_eq!(std::fs::read(&snapshot).unwrap(), contents);
+                assert_eq!(std::fs::read(dir.join(".vault-key")).unwrap(), *key);
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_permissions_remain_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        for existing_parent in [false, true] {
+            let root = tmpdir();
+            let dir = root.join("vault");
+            if existing_parent {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            {
+                let v = Vault::open(&dir).unwrap();
+                assert_eq!(mode(&dir), 0o700);
+                assert_eq!(mode(&dir.join(".vault-key")), 0o600);
+                assert!(!dir.join("vault.hold").exists());
+                for value in ["first", "replacement"] {
+                    v.save_api_key("openai-compat", value).unwrap();
+                    assert_eq!(mode(&dir), 0o700);
+                    assert_eq!(mode(&dir.join("vault.hold")), 0o600);
+                }
+            }
+            std::fs::set_permissions(
+                dir.join("vault.hold"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            {
+                let v = Vault::open(&dir).unwrap();
+                assert_eq!(mode(&dir.join("vault.hold")), 0o600);
+                assert_eq!(
+                    v.get_api_key("openai-compat").unwrap().unwrap().as_str(),
+                    "replacement"
+                );
+                assert!(v.delete_api_key("openai-compat").unwrap());
+                assert_eq!(mode(&dir.join("vault.hold")), 0o600);
+            }
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     #[test]
