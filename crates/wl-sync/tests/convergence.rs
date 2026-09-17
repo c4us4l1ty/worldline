@@ -162,7 +162,12 @@ async fn offline_same_date_check_ins_converge_on_device_tiebreak() {
         .upsert_check_in("2026-09-18", CheckInOutcome::Partial, None, Some(&identity))
         .unwrap();
     let winner = b
-        .upsert_check_in("2026-09-18", CheckInOutcome::Done, Some("finished"), Some(&identity))
+        .upsert_check_in(
+            "2026-09-18",
+            CheckInOutcome::Done,
+            Some("finished"),
+            Some(&identity),
+        )
         .unwrap();
     assert_eq!(first.hlc_timestamp.physical, winner.hlc_timestamp.physical);
     assert_eq!(first.hlc_timestamp.counter, winner.hlc_timestamp.counter);
