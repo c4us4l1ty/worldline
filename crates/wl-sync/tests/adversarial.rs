@@ -6,6 +6,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::Request;
 use axum::Router;
+use rusqlite::OptionalExtension;
 use tower::util::ServiceExt;
 
 use wl_core::crypto::identity::Identity;
@@ -632,3 +633,94 @@ async fn tampered_pull_cursor_is_rejected_by_relay() {
     };
     assert!(msg.contains("400"), "relay must 400 the bad cursor: {msg}");
 }
+/// FIXED (was: an empty pull response merely had its next_cursor
+/// syntax-checked — any value was accepted). A hostile relay answering
+/// `ops: []` with an advanced cursor had it persisted by the cycle,
+/// making every op between the old and forged position permanently
+/// unreachable. The validator now requires an empty batch to restate
+/// the cursor exactly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_empty_pull_jumps_cursor_permanently_skipping_ops() {
+    struct JumpingTransport;
+    impl Transport for JumpingTransport {
+        fn post(&self, _path: &str, _body: &serde_json::Value) -> Result<String, String> {
+            Ok(serde_json::json!({
+                "ops": [],
+                "next_cursor": format!("{:020}.00000.00001", 9_999_999u64),
+                "next_op_id": "",
+                "exhausted": true,
+            })
+            .to_string())
+        }
+    }
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let conn = open_in_memory().unwrap();
+    let repos = Repos::new(conn, 1);
+    let err = sync_cycle(&repos, &identity, &JumpingTransport, 100).unwrap_err();
+    match &err {
+        wl_sync::sync::SyncError::Protocol(m) => {
+            assert!(m.contains("empty batch"), "got: {m}");
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+    // The empty-batch error must abort BEFORE the cursor is persisted,
+    // so the next real cycle re-pulls from the untouched position.
+    let conn = repos.conn.lock().unwrap();
+    let row: Option<(String, String)> = conn
+        .query_row("SELECT cursor, op_id FROM sync_cursor WHERE id = 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
+        .unwrap();
+    assert!(row.is_none(), "cursor must not be persisted: {row:?}");
+}
+
+/// FIXED (was: pulled ops were checked for header bounds only —
+/// oversized sealed payloads and unknown tables passed the pull path
+/// while the push path rejects them server-side). A hostile relay must
+/// not drive unbounded blob decoding or enqueue unknown-table poison
+/// past the client boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
+    let oversized = wl_protocol::PushOp {
+        operation_id: "op-big".into(),
+        hlc: "00000000000000000001.00000.00001".into(),
+        table: "goals".into(),
+        record_id: "r".into(),
+        sealed_b64: "a".repeat(wl_protocol::MAX_SEALED_B64 + 1),
+    };
+    let unknown = wl_protocol::PushOp {
+        operation_id: "op-unknown-table".into(),
+        hlc: "00000000000000000001.00000.00001".into(),
+        table: "not_a_table".into(),
+        record_id: "r".into(),
+        sealed_b64: String::new(),
+    };
+    for (op, last_id) in [(oversized, "op-big"), (unknown, "op-unknown-table")] {
+        let resp = wl_protocol::PullResponse {
+            ops: vec![op],
+            next_cursor: "00000000000000000001.00000.00001".into(),
+            next_op_id: last_id.into(),
+            exhausted: true,
+        };
+        let resp_json = serde_json::to_value(&resp).unwrap();
+        struct HostileTransport {
+            resp: serde_json::Value,
+        }
+        impl crate::Transport for HostileTransport {
+            fn post(&self, path: &str, _body: &serde_json::Value) -> Result<String, String> {
+                assert_eq!(path, "/sync/pull");
+                Ok(self.resp.to_string())
+            }
+        }
+        let tx = HostileTransport { resp: resp_json };
+        let err = sync_cycle(&repos, &identity, &tx, 100).unwrap_err();
+        match &err {
+            wl_sync::sync::SyncError::Protocol(m) => {
+                assert!(m.contains("bounds"), "got: {m}");
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+    }
+}
+

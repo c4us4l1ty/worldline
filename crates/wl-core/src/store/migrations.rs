@@ -40,8 +40,23 @@ pub fn run(conn: &Connection) -> Result<(), StoreError> {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before 1970")
-        .as_millis() as i64
+    epoch_ms(std::time::SystemTime::now())
+}
+
+fn epoch_ms(now: std::time::SystemTime) -> i64 {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::epoch_ms;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn migration_clock_before_epoch_is_zero() {
+        assert_eq!(epoch_ms(UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(epoch_ms(UNIX_EPOCH + Duration::from_millis(1234)), 1234);
+    }
 }

@@ -397,10 +397,13 @@ fn decode_response<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Sync
 }
 
 /// Validates a pull batch against the relay's own hard caps before any
-/// op is applied: batch size, per-op envelope bounds, monotonic
-/// (hlc, op_id) pagination, and cursor continuity. A hostile relay
-/// serving regressingly-ordered cursors would otherwise wedge the
-/// cycle (or spin it via `exhausted=false` + empty ops).
+/// op is applied: batch size, per-op envelope bounds (including the
+/// sealed-payload size and table allow-list — the same bounds push
+/// enforces server-side), monotonic (hlc, op_id) pagination, cursor
+/// continuity, and empty-batch cursor invariance. A hostile relay must
+/// neither wedge the cycle nor advance the cursor past data the client
+/// never received (an empty batch that jumps the cursor would make
+/// every op between the old and new position permanently unreachable).
 fn validate_pull_response(
     resp: &wl_protocol::PullResponse,
     since_hlc: &str,
@@ -416,6 +419,11 @@ fn validate_pull_response(
         return Err(SyncError::Protocol("invalid next cursor".into()));
     }
     if resp.ops.is_empty() {
+        if resp.next_cursor != since_hlc || resp.next_op_id != since_op_id {
+            return Err(SyncError::Protocol(
+                "empty batch must not advance the pull cursor".into(),
+            ));
+        }
         return Ok(());
     }
     let mut prev = (since_hlc.to_string(), since_op_id.to_string());
@@ -425,6 +433,8 @@ fn validate_pull_response(
             || !wl_protocol::valid_hlc(&op.hlc)
             || op.record_id.is_empty()
             || op.record_id.len() > wl_protocol::MAX_HEADER_LEN
+            || op.sealed_b64.len() > wl_protocol::MAX_SEALED_B64
+            || wl_core::crdt::CrdtTable::from_str(&op.table).is_none()
         {
             return Err(SyncError::Protocol(
                 "pulled op envelope out of bounds".into(),

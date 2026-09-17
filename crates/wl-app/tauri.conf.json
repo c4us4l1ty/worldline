@@ -9,7 +9,7 @@
       "cwd": "ui"
     },
     "beforeBuildCommand": {
-      "script": "../../scripts/dx.sh build --release",
+      "script": "../../scripts/dx.sh build --release --debug-symbols false",
       "cwd": "ui"
     },
     "devUrl": "http://localhost:1420",

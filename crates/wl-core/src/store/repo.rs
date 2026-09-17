@@ -409,7 +409,11 @@ impl Repos {
     }
 
     pub fn directive(&self, id: &str) -> Result<Option<Directive>, StoreError> {
-        self.conn.lock().unwrap()
+        Self::directive_on(&self.conn.lock().unwrap(), id)
+    }
+
+    fn directive_on(conn: &Connection, id: &str) -> Result<Option<Directive>, StoreError> {
+        conn
             .query_row(
                 "SELECT id, milestone_id, title, execution_context, estimated_minutes,
                         progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
@@ -584,8 +588,7 @@ impl Repos {
     /// downsizing path). Resets progressive progress to phase 1 and
     /// rescales phase minutes to the new total (E3): leaving step=2 with
     /// 5+25 min rows under a 15-min total contradicted itself forever.
-    /// Single statement for the directive row + phase reset, then
-    /// write-through of everything touched.
+    /// The directive, phase resets, outbox, and clock head commit together.
     pub fn reschedule_directive(
         &self,
         id: &str,
@@ -593,7 +596,11 @@ impl Repos {
         scheduled_for_date: &str,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let phases = self.phases_for_directive(id)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut d = Self::directive_on(&tx, id)?
+            .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
+        let mut phases = Self::phases_on(&tx, id)?;
         if estimated_minutes <= 0 || estimated_minutes < phases.len() as i64 {
             return Err(StoreError::Invalid(
                 "estimate must allow one minute per phase".into(),
@@ -602,20 +609,28 @@ impl Repos {
         if phases.iter().any(|p| p.minutes <= 0) {
             return Err(StoreError::Invalid("phase minutes must be positive".into()));
         }
-        let ts = self.tick();
-        self.conn.lock().unwrap().execute(
+        let ts = self.hlc.now(self.device);
+        tx.execute(
             "UPDATE directives SET state='queued', estimated_minutes=?2, scheduled_for_date=?3,
                 progressive_step=1, hlc_timestamp=?4 WHERE id=?1",
             params![id, estimated_minutes, scheduled_for_date, ts.to_string()],
         )?;
+        d.state = DirectiveState::Queued;
+        d.estimated_minutes = estimated_minutes;
+        d.scheduled_for_date = scheduled_for_date.into();
+        d.progressive_step = 1;
+        d.hlc_timestamp = ts;
+        Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Directives,
+            id, &Self::directive_json(&d), ts)?;
         // Rescale phase minutes proportionally so the rows sum to the
         // new total (floor 1 min per phase; the last phase absorbs
         // rounding drift). Monolithic directives have no rows: no-op.
         if !phases.is_empty() {
             let old_total: i128 = phases.iter().map(|p| i128::from(p.minutes)).sum();
             let mut remaining = estimated_minutes;
-            for (i, p) in phases.iter().enumerate() {
-                let reserved = (phases.len() - i - 1) as i64;
+            let phase_count = phases.len();
+            for (i, p) in phases.iter_mut().enumerate() {
+                let reserved = (phase_count - i - 1) as i64;
                 let scaled = if reserved == 0 {
                     remaining
                 } else {
@@ -625,33 +640,22 @@ impl Repos {
                     (rounded as i64).clamp(1, remaining - reserved)
                 };
                 remaining -= scaled;
-                let ts = self.tick();
+                let ts = self.hlc.now(self.device);
                 let state = if p.step == 1 { "active" } else { "pending" };
-                self.conn.lock().unwrap().execute(
+                tx.execute(
                     "UPDATE directive_phases SET minutes=?3, state=?4, hlc_timestamp=?5
                      WHERE directive_id=?1 AND step=?2",
                     params![id, p.step, scaled, state, ts.to_string()],
                 )?;
+                p.minutes = scaled;
+                p.state = if p.step == 1 { PhaseState::Active } else { PhaseState::Pending };
+                p.hlc_timestamp = ts;
+                Self::emit_on(&tx, identity, crate::crdt::CrdtTable::DirectivePhases,
+                    id, &Self::phase_json(p), ts)?;
             }
         }
-        if identity.is_some() {
-            if let Some(d) = self.directive(id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::Directives,
-                    &d.id,
-                    &Self::directive_json(&d),
-                )?;
-            }
-            for p in self.phases_for_directive(id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::DirectivePhases,
-                    id,
-                    &Self::phase_json(&p),
-                )?;
-            }
-        }
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -660,50 +664,40 @@ impl Repos {
         id: &str,
         identity: Option<&Identity>,
     ) -> Result<bool, StoreError> {
-        // Mark current phase done, activate next; returns true when a
-        // next phase exists (directive itself continues). The final
-        // phase is marked done too (E2) and always replicated when an
-        // identity is present — otherwise the done-state never reaches
-        // peers.
-        let d = self
-            .directive(id)?
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut d = Self::directive_on(&tx, id)?
             .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
+        let mut phases = Self::phases_on(&tx, id)?;
         let cur = d.progressive_step;
-        let ts = self.tick();
-        self.conn.lock().unwrap().execute(
-            "UPDATE directive_phases SET state = 'done', hlc_timestamp = ?3 WHERE directive_id = ?1 AND step = ?2",
-            params![id, cur, ts.to_string()],
-        )?;
         let advanced = cur < d.progressive_total;
+        if !phases.iter().any(|p| p.step == cur)
+            || (advanced && !phases.iter().any(|p| p.step == cur + 1)) {
+            return Err(StoreError::Invalid("current or next phase missing".into()));
+        }
+        for p in phases.iter_mut().filter(|p| p.step == cur || (advanced && p.step == cur + 1)) {
+            p.state = if p.step == cur { PhaseState::Done } else { PhaseState::Active };
+            p.hlc_timestamp = self.hlc.now(self.device);
+            tx.execute(
+                "UPDATE directive_phases SET state = ?3, hlc_timestamp = ?4
+                 WHERE directive_id = ?1 AND step = ?2",
+                params![id, p.step, p.state.as_str(), p.hlc_timestamp.to_string()],
+            )?;
+            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::DirectivePhases,
+                id, &Self::phase_json(p), p.hlc_timestamp)?;
+        }
         if advanced {
-            let ts = self.tick();
-            self.conn.lock().unwrap().execute(
-                "UPDATE directive_phases SET state = 'active', hlc_timestamp = ?3 WHERE directive_id = ?1 AND step = ?2",
-                params![id, cur + 1, ts.to_string()],
-            )?;
-            self.conn.lock().unwrap().execute(
+            d.progressive_step = cur + 1;
+            d.hlc_timestamp = self.hlc.now(self.device);
+            tx.execute(
                 "UPDATE directives SET progressive_step = ?2, hlc_timestamp = ?3 WHERE id = ?1",
-                params![id, cur + 1, ts.to_string()],
+                params![id, d.progressive_step, d.hlc_timestamp.to_string()],
             )?;
+            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Directives,
+                id, &Self::directive_json(&d), d.hlc_timestamp)?;
         }
-        if identity.is_some() {
-            if let Some(dd) = self.directive(id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::Directives,
-                    &dd.id,
-                    &Self::directive_json(&dd),
-                )?;
-            }
-            for p in self.phases_for_directive(id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::DirectivePhases,
-                    id,
-                    &Self::phase_json(&p),
-                )?;
-            }
-        }
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(advanced)
     }
 
@@ -711,7 +705,10 @@ impl Repos {
         &self,
         directive_id: &str,
     ) -> Result<Vec<DirectivePhase>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        Self::phases_on(&self.conn.lock().unwrap(), directive_id)
+    }
+
+    fn phases_on(conn: &Connection, directive_id: &str) -> Result<Vec<DirectivePhase>, StoreError> {
         let mut stmt = conn.prepare(
             "SELECT directive_id, step, title, instruction, minutes, state, hlc_timestamp
              FROM directive_phases WHERE directive_id = ?1 ORDER BY step",
@@ -777,45 +774,28 @@ impl Repos {
         note: Option<&str>,
         identity: Option<&Identity>,
     ) -> Result<CheckIn, StoreError> {
-        let existing: Option<String> = self
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT id FROM check_ins WHERE date = ?1", [date], |r| {
-                r.get(0)
-            })
-            .optional()
-            .map_err(StoreError::Sqlite)?;
-        let ts = self.tick();
-        match existing {
-            Some(id) => {
-                self.conn.lock().unwrap().execute(
-                    "UPDATE check_ins SET outcome = ?2, note = ?3, hlc_timestamp = ?4 WHERE id = ?1",
-                    params![id, outcome.as_str(), note, ts.to_string()],
-                )?;
-            }
-            None => {
-                let id = new_id("chk");
-                self.conn.lock().unwrap().execute(
-                    "INSERT INTO check_ins (id, date, outcome, note, hlc_timestamp)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![id, date, outcome.as_str(), note, ts.to_string()],
-                )?;
-            }
-        }
-        self.check_in_for_date(date)?
-            .ok_or_else(|| StoreError::Invalid("check-in vanished after upsert".into()))
-            .and_then(|c| {
-                if identity.is_some() {
-                    self.emit(
-                        identity,
-                        crate::crdt::CrdtTable::CheckIns,
-                        &c.id,
-                        &Self::checkin_json(&c),
-                    )?;
-                }
-                Ok(c)
-            })
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing: Option<String> = tx
+            .query_row("SELECT id FROM check_ins WHERE date = ?1", [date], |r| r.get(0))
+            .optional()?;
+        let ts = self.hlc.now(self.device);
+        let id = existing.unwrap_or_else(|| new_id("chk"));
+        tx.execute(
+            "INSERT INTO check_ins (id, date, outcome, note, hlc_timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(date) DO UPDATE SET outcome=excluded.outcome,
+                note=excluded.note, hlc_timestamp=excluded.hlc_timestamp",
+            params![id, date, outcome.as_str(), note, ts.to_string()],
+        )?;
+        let c = CheckIn {
+            id, date: date.into(), outcome, note: note.map(Into::into), hlc_timestamp: ts,
+        };
+        Self::emit_on(&tx, identity, crate::crdt::CrdtTable::CheckIns,
+            &c.id, &Self::checkin_json(&c), ts)?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(c)
     }
 
     pub fn check_in_for_date(&self, date: &str) -> Result<Option<CheckIn>, StoreError> {
@@ -886,7 +866,9 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Bailout, StoreError> {
         let id = new_id("bail");
-        let ts = self.tick();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
         let b = Bailout {
             id: id.clone(),
             directive_id: directive_id.to_string(),
@@ -894,17 +876,20 @@ impl Repos {
             note: note.map(Into::into),
             hlc_timestamp: ts,
         };
-        self.conn.lock().unwrap().execute(
+        tx.execute(
             "INSERT INTO bailouts (id, directive_id, reason, note, hlc_timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, directive_id, reason.as_str(), note, ts.to_string()],
         )?;
-        self.emit(
+        Self::emit_on(&tx,
             identity,
             crate::crdt::CrdtTable::Bailouts,
             &b.id,
             &Self::bailout_json(&b),
+            ts,
         )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(b)
     }
 
@@ -940,20 +925,25 @@ impl Repos {
         s: &AppSettings,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let ts = self.tick();
-        self.conn.lock().unwrap().execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
+        tx.execute(
             "INSERT INTO app_settings (id, theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET theme=?1, hotkey=?2, always_on_top=?3,
                 ai_provider=?4, tier1_model=?5, tier2_model=?6, relay_url=?7, hlc_timestamp=?8",
             params![s.theme, s.hotkey, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
         )?;
-        self.emit(
+        Self::emit_on(&tx,
             identity,
             crate::crdt::CrdtTable::AppSettings,
             "settings",
             &Self::settings_json(s),
+            ts,
         )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1033,20 +1023,6 @@ impl Repos {
             "tier2_model": s.tier2_model,
             "relay_url": s.relay_url,
         })
-    }
-
-    /// Write-through for mutation paths that issue their own outbox tick.
-    fn emit(
-        &self,
-        identity: Option<&Identity>,
-        table: crate::crdt::CrdtTable,
-        record_id: &str,
-        payload: &serde_json::Value,
-    ) -> Result<(), StoreError> {
-        if let Some(identity) = identity {
-            self.enqueue_outbox(identity, table.as_str(), record_id, payload)?;
-        }
-        Ok(())
     }
 
     /// Enqueues the exact row version within the caller's transaction.

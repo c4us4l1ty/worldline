@@ -79,9 +79,9 @@ impl Identity {
 
     fn from_mnemonic(mnemonic: Mnemonic) -> Result<Self, IdentityError> {
         // BIP-39 seed = PBKDF2-HMAC-SHA512(mnemonic, "mnemonic"+passphrase, 2048)
-        let seed = mnemonic.to_seed_normalized("");
-        let signing_key = derive_signing_key(&seed)?;
-        let payload_key = Zeroizing::new(derive_payload_key(&seed));
+        let seed = Zeroizing::new(mnemonic.to_seed_normalized(""));
+        let signing_key = derive_signing_key(seed.as_ref())?;
+        let payload_key = derive_payload_key(seed.as_ref());
         Ok(Self {
             phrase: Zeroizing::new(mnemonic.to_string()),
             signing_key,
@@ -138,26 +138,21 @@ impl Identity {
 
 /// HKDF-SHA256 → Ed25519 signing subkey for a given BIP-39 seed.
 fn derive_signing_key(seed: &[u8]) -> Result<SigningKey, IdentityError> {
-    let okm = hkdf_sha256(seed, HKDF_INFO_ED25519, 32);
-    let bytes: Zeroizing<[u8; 32]> = Zeroizing::new(okm.try_into().expect("32-byte OKM"));
+        let bytes = hkdf_sha256(seed, HKDF_INFO_ED25519);
     Ok(SigningKey::from_bytes(&bytes))
 }
 /// HKDF-SHA256 → ChaCha20-Poly1305 payload subkey for a given BIP-39 seed.
-fn derive_payload_key(seed: &[u8]) -> [u8; 32] {
-    hkdf_sha256(seed, HKDF_INFO_CHACHA20, 32)
-        .try_into()
-        .expect("32-byte OKM")
+fn derive_payload_key(seed: &[u8]) -> Zeroizing<[u8; 32]> {
+    hkdf_sha256(seed, HKDF_INFO_CHACHA20)
 }
-/// Extract-and-expand HKDF with SHA-256. `salt` is the BIP-39 seed
-/// itself (already high-entropy, so IKM=salt reuse is safe here: the
-/// mnemonic entropy is the secret, PBKDF2 output is the public-ish
-/// intermediate).
-fn hkdf_sha256(ikm: &[u8], info: &[u8], len: usize) -> Vec<u8> {
+/// Expands the secret BIP-39 seed with distinct subkey info labels.
+/// Derived bytes stay in zeroizing storage, without a temporary heap Vec.
+fn hkdf_sha256(ikm: &[u8], info: &[u8]) -> Zeroizing<[u8; 32]> {
     use hkdf::Hkdf;
     use sha2::Sha256;
     let hk = Hkdf::<Sha256>::new(None, ikm);
-    let mut okm = vec![0u8; len];
-    hk.expand(info, &mut okm).expect("valid HKDF length");
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hk.expand(info, okm.as_mut()).expect("valid HKDF length");
     okm
 }
 

@@ -105,24 +105,60 @@ pub mod sqlite_backend {
             Self::init(conn)
         }
 
-        fn init(conn: Connection) -> Result<Self, StoreError> {
+        fn init(mut conn: Connection) -> Result<Self, StoreError> {
             conn.pragma_update(None, "journal_mode", "WAL").ok();
-            conn.execute_batch(
+            // IMMEDIATE: schema bootstrap plus the legacy rebuild below
+            // must not race a concurrent opener on the same database file.
+            let tx =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS accounts (
                     public_key TEXT PRIMARY KEY,
                     created_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS ops (
-                    operation_id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL,
                     account TEXT NOT NULL,
                     hlc TEXT NOT NULL,
                     table_name TEXT NOT NULL,
                     record_id TEXT NOT NULL,
-                    sealed BLOB NOT NULL
+                    sealed BLOB NOT NULL,
+                    PRIMARY KEY (account, operation_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_ops_account_hlc
                     ON ops(account, hlc, operation_id);",
             )?;
+            // Legacy databases keyed ops by operation_id alone — a global
+            // constraint across ALL accounts. Operation ids are
+            // client-minted and may collide across accounts; the old key
+            // swallowed the second account's row and misreported it as a
+            // duplicate. Detect the old key layout and rebuild in place,
+            // preserving every stored ciphertext row.
+            let account_pk_pos: i64 = tx.query_row(
+                "SELECT pk FROM pragma_table_info('ops') WHERE name = 'account'",
+                [],
+                |row| row.get(0),
+            )?;
+            if account_pk_pos == 0 {
+                tx.execute_batch(
+                    "ALTER TABLE ops RENAME TO ops_legacy;
+                     CREATE TABLE ops (
+                        operation_id TEXT NOT NULL,
+                        account TEXT NOT NULL,
+                        hlc TEXT NOT NULL,
+                        table_name TEXT NOT NULL,
+                        record_id TEXT NOT NULL,
+                        sealed BLOB NOT NULL,
+                        PRIMARY KEY (account, operation_id)
+                     );
+                     INSERT INTO ops
+                        SELECT operation_id, account, hlc, table_name, record_id, sealed
+                        FROM ops_legacy;
+                     DROP TABLE ops_legacy;
+                     CREATE INDEX idx_ops_account_hlc ON ops(account, hlc, operation_id);",
+                )?;
+            }
+            tx.commit()?;
             Ok(Self {
                 conn: Mutex::new(conn),
             })
@@ -180,9 +216,10 @@ pub mod sqlite_backend {
             let mut out = PushOutcome::default();
             for op in ops {
                 let changed = tx.execute(
-                    "INSERT OR IGNORE INTO ops
+                    "INSERT INTO ops
                         (operation_id, account, hlc, table_name, record_id, sealed)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(account, operation_id) DO NOTHING",
                     rusqlite::params![
                         op.operation_id,
                         op.account,
@@ -301,9 +338,14 @@ pub mod postgres_backend {
 
         fn migrate(&self) -> Result<(), StoreError> {
             self.rt.block_on(async {
-                sqlx::query(include_str!("../migrations/0001_init.sql"))
-                    .execute(&self.pool)
+                // Multi-statement script (it ends with the idempotent
+                // legacy-PK upgrade): raw_sql batches it; a prepared
+                // query() would reject multiple statements.
+                let mut tx = self.pool.begin().await?;
+                sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
                 Ok::<_, StoreError>(())
             })
         }
@@ -370,7 +412,7 @@ pub mod postgres_backend {
                     let res = sqlx::query(
                         "INSERT INTO ops (operation_id, account, hlc, table_name, record_id, sealed)
                          VALUES ($1, $2, $3, $4, $5, $6)
-                         ON CONFLICT (operation_id) DO NOTHING",
+                         ON CONFLICT (account, operation_id) DO NOTHING",
                     )
                     .bind(&op.operation_id)
                     .bind(&op.account)

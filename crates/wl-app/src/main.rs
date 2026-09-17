@@ -41,11 +41,16 @@ fn main() {
                 .unwrap_or_else(|_| (hotkey::DEFAULT_HOTKEY.to_string(), false));
             app.manage(Arc::new(state));
             hotkey::register_summon_hotkey(app.handle(), &hotkey);
-            // Restore the pinned-window preference (Item 6 settings boot).
-            if pinned {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.set_always_on_top(true);
-                }
+            // Dark boot background: the webview paints #131312 before the
+            // first WASM frame instead of WebKit's white default, so the
+            // fixed 9:16 window never flashes a blank white page.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_background_color(Some(tauri::window::Color {
+                    red: 19,
+                    green: 19,
+                    blue: 18,
+                    alpha: 255,
+                }));
             }
             Ok(())
         })

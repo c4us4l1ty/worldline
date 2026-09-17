@@ -54,8 +54,7 @@ impl Sealed {
 /// ChaCha20-Poly1305 key (fresh random nonce). Associated data (e.g.
 /// `table:record` routing header) is authenticated but not encrypted.
 pub fn seal(identity: &Identity, plaintext: &[u8], aad: &[u8]) -> Result<Sealed, AeadError> {
-    let key = Key::from(*identity.payload_key());
-    let cipher = ChaCha20Poly1305::new(&key);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(identity.payload_key()));
     let nonce_bytes = NonceBytes::from(ChaCha20Poly1305::generate_nonce(&mut OsRng));
     let nonce = Nonce::from(nonce_bytes);
     let sealed = cipher
@@ -81,8 +80,7 @@ pub fn unseal(
     sealed: &Sealed,
     aad: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, AeadError> {
-    let key = Key::from(*identity.payload_key());
-    let cipher = ChaCha20Poly1305::new(&key);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(identity.payload_key()));
     let pt = cipher
         .decrypt(
             &Nonce::from(sealed.nonce),

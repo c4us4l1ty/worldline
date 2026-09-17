@@ -494,3 +494,40 @@ async fn push_quota_caps_authenticated_storage_flood() {
         Err(wl_relay::store::StoreError::OpsQuota)
     ));
 }
+
+/// FIXED (was: ops keyed by operation_id alone — a GLOBAL constraint).
+/// A client-minted operation id colliding across two accounts let the
+/// first account's row swallow the second's and misreport it as a
+/// duplicate, permanently losing that record's data. Deduplication is
+/// now scoped per account: the same operation id stored by a second
+/// account is an accepted, independent row.
+#[tokio::test]
+async fn operation_id_collisions_stay_scoped_per_account() {
+    let state = Arc::new(wl_relay::AppStateForTest {
+        auth: wl_relay::AuthForTest::new(),
+        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
+    });
+    let mk_op = |id: &str, account: u64, hlc: u64| wl_relay::store::StoredOp {
+        operation_id: id.into(),
+        account: format!("{account:064x}"),
+        hlc: format!("{hlc:020}.00000.00001"),
+        table: "goals".into(),
+        record_id: "r".into(),
+        sealed: vec![0u8; 48],
+    };
+    let a = mk_op("client-op-1", 1, 1_000_000);
+    let b = mk_op("client-op-1", 2, 1_000_001);
+    let out = state.blobs.insert_ops(&[a.clone(), b.clone()]).unwrap();
+    assert_eq!(out.accepted, vec![a.operation_id.clone(), b.operation_id.clone()]);
+    assert!(out.duplicates.is_empty());
+    // Exact re-push stays idempotent within one account...
+    let out = state.blobs.insert_ops(&[a.clone()]).unwrap();
+    assert_eq!(out.duplicates, vec![a.operation_id.clone()]);
+    // ...and pulls return each account only its own row.
+    let rows_a = state.blobs.pull_ops(&a.account, "", "", 100).unwrap();
+    let rows_b = state.blobs.pull_ops(&b.account, "", "", 100).unwrap();
+    assert_eq!(rows_a.len(), 1);
+    assert_eq!(rows_b.len(), 1);
+    assert_eq!(rows_a[0].hlc, a.hlc);
+    assert_eq!(rows_b[0].hlc, b.hlc);
+}

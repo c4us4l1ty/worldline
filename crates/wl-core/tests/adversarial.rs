@@ -1,6 +1,6 @@
-//! Adversarial characterization tests. Every `defect_*` test asserts the
-//! CURRENT (buggy) behavior to lock it in — each corresponds to a
-//! numbered finding in the battle-test report.
+//! Regression tests for historical adversarial findings. The `defect_*`
+//! names identify the original failures; assertions require corrected
+//! behavior rather than preserving those defects.
 
 use wl_core::domain::*;
 use wl_core::engine::{Engine, EngineOutcome};
