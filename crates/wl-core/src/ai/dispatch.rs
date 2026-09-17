@@ -366,7 +366,23 @@ fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
         });
     }
     if !d.phases.is_empty() {
-        let sum: i64 = d.phases.iter().map(|p| p.minutes).sum();
+        if !(2..=4).contains(&d.phases.len()) {
+            return Err(DispatchError::Invalid {
+                field: "phases",
+                why: "2–4 phases required".into(),
+            });
+        }
+        for p in &d.phases {
+            validate_text("phase.title", &p.title)?;
+            validate_text("phase.instruction", p.instruction.as_deref().unwrap_or(""))?;
+            if p.title.trim().is_empty() || !(1..=25).contains(&p.minutes) {
+                return Err(DispatchError::Invalid {
+                    field: "phases",
+                    why: "nonempty titles and minutes in 1–25 required".into(),
+                });
+            }
+        }
+        let sum: i128 = d.phases.iter().map(|p| i128::from(p.minutes)).sum();
         if sum <= 0 {
             return Err(DispatchError::Invalid {
                 field: "phases",
@@ -377,7 +393,7 @@ fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
         // time (`persist_plan`), so a sum that contradicts the estimate
         // silently rewrites it (e.g. 60m → 10m). Reject sums outside a
         // 2× band around the estimate.
-        if sum * 2 < d.estimated_minutes || sum > d.estimated_minutes * 2 {
+        if sum * 2 < i128::from(d.estimated_minutes) || sum > i128::from(d.estimated_minutes) * 2 {
             return Err(DispatchError::Invalid {
                 field: "phases",
                 why: format!(
@@ -385,14 +401,6 @@ fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
                     est = d.estimated_minutes
                 ),
             });
-        }
-        for p in &d.phases {
-            if p.minutes <= 0 || p.minutes > 25 {
-                return Err(DispatchError::Invalid {
-                    field: "phases.minutes",
-                    why: format!("{} outside 1–25 range", p.minutes),
-                });
-            }
         }
     } else if d.estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES {
         return Err(DispatchError::Invalid {

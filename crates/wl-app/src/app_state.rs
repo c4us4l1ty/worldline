@@ -83,6 +83,26 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_session_is_scoped_to_endpoint_and_account() {
+        let session = RelaySession {
+            base: "http://127.0.0.1:8080".into(),
+            account_id: "account-a".into(),
+            token: "test-session".into(),
+        };
+        assert_eq!(
+            session.token_for("http://127.0.0.1:8080", "account-a"),
+            Some("test-session")
+        );
+        assert_eq!(session.token_for("http://127.0.0.1:8081", "account-a"), None);
+        assert_eq!(session.token_for("http://127.0.0.1:8080", "account-b"), None);
+    }
+}
+
 /// Stable per-install device id (0 < id < u16::MAX, never 0).
 fn device_id_for(dir: &Path) -> Result<u16, ShellError> {
     let marker = dir.join("device_id");

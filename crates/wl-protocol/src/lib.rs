@@ -7,6 +7,37 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_BATCH_OPS: usize = 500;
+pub const MAX_SEALED_BYTES: usize = 256 * 1024;
+pub const MAX_SEALED_B64: usize = MAX_SEALED_BYTES.div_ceil(3) * 4;
+pub const MAX_HEADER_LEN: usize = 128;
+pub const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PULL_BYTES: usize = 1024 * 1024;
+
+pub fn valid_hlc(hlc: &str) -> bool {
+    let bytes = hlc.as_bytes();
+    if bytes.len() != 32
+        || bytes[20] != b'.'
+        || bytes[26] != b'.'
+        || !bytes.iter().enumerate().all(|(i, b)| i == 20 || i == 26 || b.is_ascii_digit())
+    {
+        return false;
+    }
+    hlc[..20].parse::<u64>().is_ok()
+        && hlc[21..26].parse::<u16>().is_ok()
+        && hlc[27..].parse::<u16>().is_ok()
+}
+
+pub fn valid_cursor(hlc: &str, op_id: &str) -> bool {
+    op_id.len() <= MAX_HEADER_LEN
+        && if hlc.is_empty() {
+            op_id.is_empty()
+        } else {
+            valid_hlc(hlc)
+        }
+}
+
 // ---------------------------------------------------------------------------
 // Auth handshake
 // ---------------------------------------------------------------------------
@@ -117,16 +148,17 @@ pub struct PullResponse {
 /// Both client and relay derive signing/verification material from
 /// this single function — no format drift possible.
 ///
-/// The nonce MUST be 64 hex chars (32 bytes) as issued by the relay;
-/// anything else is a programming error. `debug_assert` catches it in
-/// tests/dev; release decodes leniently but the relay only ever looks
-/// up issued challenges first, so a malformed nonce can never verify.
 pub fn challenge_signing_payload(nonce_hex: &str, expires_at: i64) -> Vec<u8> {
-    debug_assert_eq!(nonce_hex.len(), 64, "challenge nonce must be 32 bytes hex");
-    let mut buf = Vec::with_capacity(32 + 8);
-    buf.extend_from_slice(&hex::decode(nonce_hex).unwrap_or_default());
-    buf.extend_from_slice(&expires_at.to_be_bytes());
-    buf
+    checked_challenge_signing_payload(nonce_hex, expires_at)
+        .map(|payload| payload.to_vec())
+        .unwrap_or_default()
+}
+
+pub fn checked_challenge_signing_payload(nonce_hex: &str, expires_at: i64) -> Option<[u8; 40]> {
+    let mut payload = [0u8; 40];
+    hex::decode_to_slice(nonce_hex, &mut payload[..32]).ok()?;
+    payload[32..].copy_from_slice(&expires_at.to_be_bytes());
+    Some(payload)
 }
 
 /// Standard error envelope.

@@ -623,21 +623,13 @@ struct ReqwestTransport {
     token: String,
 }
 
-/// One process-wide HTTP client: connection pooling across sync/handshake
-/// calls, and no per-RPC TLS-stack rebuild (near-0-CPU on use; no idle
-/// cost — construction is lazy on first sync).
-fn shared_client() -> reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("HTTP client")
-        })
-        .clone()
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 impl wl_sync::sync::Transport for ReqwestTransport {
