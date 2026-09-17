@@ -170,7 +170,8 @@ impl Vault {
     fn commit(&self) -> Result<(), VaultError> {
         self.stronghold
             .save()
-            .map_err(|e| VaultError::Stronghold(e.to_string()))
+            .map_err(|e| VaultError::Stronghold(e.to_string()))?;
+        restrict_permissions(&self.snapshot)
     }
 }
 
@@ -206,13 +207,10 @@ fn vault_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>, VaultError> {
 }
 
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) {
+fn restrict_permissions(path: &Path) -> Result<(), VaultError> {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        let mut perm = meta.permissions();
-        perm.set_mode(0o600);
-        let _ = std::fs::set_permissions(path, perm);
-    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| VaultError::Io(e.to_string()))
 }
 
 /// Repairs the mode of a pre-existing secret file (vault key created
@@ -224,7 +222,7 @@ fn tighten_existing(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.permissions().mode() & 0o077 != 0 {
-            restrict_permissions(path);
+            let _ = restrict_permissions(path);
         }
     }
 }
@@ -232,25 +230,30 @@ fn tighten_existing(path: &Path) {
 #[cfg(not(unix))]
 fn tighten_existing(_path: &Path) {}
 
-/// Pre-creates a secret-adjacent file owner-only so it is never
-/// world-readable, even briefly (see `Vault::open`).
 #[cfg(unix)]
-fn precreate_private(path: &Path) {
-    use std::os::unix::fs::OpenOptionsExt;
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path);
+fn private_directory(path: &Path) -> Result<(), VaultError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(VaultError::Io(e.to_string())),
+    }
+    let meta = std::fs::symlink_metadata(path).map_err(|e| VaultError::Io(e.to_string()))?;
+    if !meta.is_dir() {
+        return Err(VaultError::Io("vault parent is not a directory".into()));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| VaultError::Io(e.to_string()))
 }
 
 #[cfg(not(unix))]
-fn precreate_private(_path: &Path) {}
+fn private_directory(path: &Path) -> Result<(), VaultError> {
+    std::fs::create_dir_all(path).map_err(|e| VaultError::Io(e.to_string()))
+}
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {
-    // No Unix permission bits; the app-data dir is user-private on
-    // these platforms.
+fn restrict_permissions(_path: &Path) -> Result<(), VaultError> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -315,9 +318,12 @@ mod tests {
         let phrase =
             "beacon orbit silence dynamic marble drift lattice kinetic harbor canyon velvet anchor";
         {
+            assert!(!dir.join("vault.hold").exists());
             let v = Vault::open(&dir).unwrap();
-            assert!(v.get_mnemonic().is_err());
+            assert!(!dir.join("vault.hold").exists());
+            assert!(matches!(v.get_mnemonic(), Err(VaultError::NoMnemonic)));
             v.save_mnemonic(phrase).unwrap();
+            assert!(std::fs::metadata(dir.join("vault.hold")).unwrap().len() > 0);
             assert!(v.has_mnemonic());
         }
         // Drop + reopen: snapshot + key file persist.
