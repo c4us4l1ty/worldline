@@ -9,8 +9,8 @@
 //!   cd crates/wl-app/ui && ../../scripts/dx.sh build --release
 
 fn main() {
-    let dist =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/target/dx/wl-ui/release/web/public");
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("ui/target/dx/wl-ui/release/web/public");
     assert!(
         dist.join("index.html").exists(),
         "frontend bundle missing at {} — build it first: cd crates/wl-app/ui && ../../scripts/dx.sh build --release",

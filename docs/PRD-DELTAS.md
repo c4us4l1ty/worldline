@@ -247,3 +247,55 @@ Locked decisions from the planning session are marked [approved].
     verify success; restore textarea cleared on restore success (the
     single mandated display remains an accepted exception to
     "secrets never touch the DOM").
+
+## Battle-test pass 2 (2026-09-17, singularity audit — 162 tests)
+
+55. **Identity vault ordering** — `identity_generate`/`identity_restore`
+    now persist the mnemonic to the vault BEFORE writing public SQLite
+    config (previously a snapshot-write failure published an account
+    with no recoverable secret). `Vault::save_mnemonic` restores the
+    previous live record on commit failure; replacement of an existing
+    account is now rejected explicitly. Regression:
+    `identity_snapshot_failure_preserves_memory_disk_and_public_state`.
+56. **Transactional core mutations** — `create_goal`, `create_milestone`,
+    `create_directive`, `set_milestone_status`, `reschedule_directive`,
+    `advance_progressive_step`, `upsert_check_in`, `record_bailout`,
+    `save_settings` commit row(s) + encrypted outbox op + HLC head in
+    ONE transaction using the row's exact HLC (was autocommit + separate
+    emit → permanent unsynced divergence on failure). Phases atomic;
+    nonpositive durations rejected; missing milestone now NotFound.
+57. **Relay auth hardening** — one-shot challenge consumption (parallel
+    verify cannot double-mint), expiry now `<= now`, canonical lowercase
+    64-hex public keys only, session-quota → HTTP 429, honest token docs.
+58. **Per-account dedup** — relay operation_id uniqueness scoped to
+    `(account_id, operation_id)` in BOTH stores (SQLite idempotent PK
+    rebuild, Postgres DO-block swap): a cross-account id collision no
+    longer silently drops the second account's op. Regression:
+    `operation_id_collisions_stay_scoped_per_account`.
+59. **Pull cursor integrity** — an empty pull batch must restate the
+    exact cursor or the cycle aborts before advancing (no silent data
+    skips); per-op pull bounds (sealed size, table allow-list) match the
+    push side.
+60. **Crypto hygiene** — BIP39 seed, HKDF output and AEAD payload keys
+    held in `Zeroizing`/borrowed views; migration timestamps degrade
+    pre-epoch clocks to 0 and saturate overflow (no startup panic);
+    adversarial test header corrected.
+61. **Blank-window root causes closed** — release build hook now pins
+    `dx build --release --debug-symbols false` (wasm-opt SIGABRT shipped
+    a 3.7 MB debug wasm instead of 0.8 MB optimized); `build.rs` FAILS
+    the shell build when the embedded frontend dist is missing (a plain
+    cargo build previously booted a silently blank window); stale
+    bundle leftovers no longer accumulate after clean rebuilds; setup
+    paints the webview background `#131312` so boot never flashes white.
+62. **App identity serialization** — generate/restore/unlock serialize
+    on the identity mutex; invalid persisted device ids fail closed
+    instead of silently rotating the CRDT device identifier;
+    IPC restore/API-key inputs wrapped in `Zeroizing`.
+63. **Verification gates** — 147 workspace + 15 wl-app tests pass,
+    clippy 0 warnings (workspace + wl-app), rustfmt clean,
+    `scripts/smoke-native.sh` pixel-asserts the release window
+    (stddev 104, canvas 0.26 on KDE/Wayland); idle release binary
+    measured at 2 ticks / 20 s CPU (0.01%) and 151 MiB RSS.
+    Known deferred (documented, not fixed): HLC arrival-sequence cutover,
+    AEAD AAD operation_id/HLC binding, AI batch atomicity, vault API-key
+    rollback, spawn_blocking refactor for sync IPC.

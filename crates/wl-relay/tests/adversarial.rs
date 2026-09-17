@@ -524,7 +524,7 @@ async fn operation_id_collisions_stay_scoped_per_account() {
     );
     assert!(out.duplicates.is_empty());
     // Exact re-push stays idempotent within one account...
-    let out = state.blobs.insert_ops(&[a.clone()]).unwrap();
+    let out = state.blobs.insert_ops(std::slice::from_ref(&a)).unwrap();
     assert_eq!(out.duplicates, vec![a.operation_id.clone()]);
     // ...and pulls return each account only its own row.
     let rows_a = state.blobs.pull_ops(&a.account, "", "", 100).unwrap();
