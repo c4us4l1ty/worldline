@@ -29,6 +29,7 @@ pub enum VaultError {
 
 pub struct Vault {
     stronghold: tauri_plugin_stronghold::stronghold::Stronghold,
+    snapshot: PathBuf,
 }
 
 impl Vault {
