@@ -19,17 +19,19 @@ fn valid_challenge(phrase: &[String], indices: &[usize]) -> bool {
     phrase.len() == 12
         && phrase.iter().all(|word| !word.trim().is_empty())
         && indices.len() == 3
-        && indices.iter().enumerate().all(|(i, &idx)| {
-            idx < phrase.len() && !indices[..i].contains(&idx)
-        })
+        && indices
+            .iter()
+            .enumerate()
+            .all(|(i, &idx)| idx < phrase.len() && !indices[..i].contains(&idx))
 }
 
 fn backup_matches(phrase: &[String], indices: &[usize], words: &[String]) -> bool {
     valid_challenge(phrase, indices)
         && words.len() == indices.len()
-        && indices.iter().zip(words).all(|(&idx, word)| {
-            word.trim().eq_ignore_ascii_case(&phrase[idx])
-        })
+        && indices
+            .iter()
+            .zip(words)
+            .all(|(&idx, word)| word.trim().eq_ignore_ascii_case(&phrase[idx]))
 }
 
 #[derive(Clone, Default, serde::Deserialize)]
@@ -126,9 +128,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
         let mut g = generated;
         let seeded = verify_phrase.clone();
         if !backup_matches(&seeded, &ch, &words) {
-            error.set(
-                "Those words don't match the sequence. Check your backup again.".to_string(),
-            );
+            error.set("Those words don't match the sequence. Check your backup again.".to_string());
             return;
         }
         busy.set(true);
@@ -317,5 +317,65 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn phrase() -> Vec<String> {
+        (0..12).map(|i| format!("word{i}")).collect()
+    }
+
+    #[test]
+    fn generation_completion_preserves_restore_selection() {
+        assert_eq!(generation_mode("intro", true), "display");
+        assert_eq!(generation_mode("intro", false), "generation_failed");
+        for succeeded in [true, false] {
+            assert_eq!(generation_mode("restore", succeeded), "restore");
+            assert_eq!(generation_mode("verify", succeeded), "verify");
+        }
+    }
+
+    #[test]
+    fn challenge_requires_three_distinct_in_range_positions() {
+        let phrase = phrase();
+        assert!(valid_challenge(&phrase, &[2, 6, 10]));
+        for indices in [
+            vec![],
+            vec![2],
+            vec![2, 6],
+            vec![2, 6, 10, 11],
+            vec![2, 2, 10],
+            vec![2, 6, 12],
+            vec![2, 6, usize::MAX],
+        ] {
+            assert!(!valid_challenge(&phrase, &indices));
+        }
+        assert!(!valid_challenge(&[], &[2, 6, 10]));
+        assert!(!valid_challenge(&phrase[..11], &[2, 6, 10]));
+        let mut blank = phrase;
+        blank[2] = " ".into();
+        assert!(!valid_challenge(&blank, &[2, 6, 10]));
+    }
+
+    #[test]
+    fn backup_verification_rejects_truncated_or_extra_answers() {
+        let phrase = phrase();
+        let indices = [2, 6, 10];
+        let mut words = vec![" WORD2 ".into(), "word6".into(), "word10".into()];
+        assert!(backup_matches(&phrase, &indices, &words));
+        for len in 0..3 {
+            assert!(!backup_matches(&phrase, &indices, &words[..len]));
+        }
+        words.push("word11".into());
+        assert!(!backup_matches(&phrase, &indices, &words));
+        assert!(!backup_matches(&phrase, &[], &[]));
+        assert!(!backup_matches(&phrase, &[2, 2, 10], &words[..3]));
+        assert!(!backup_matches(&phrase, &[2, 6, usize::MAX], &words[..3]));
+        words.pop();
+        words.swap(0, 1);
+        assert!(!backup_matches(&phrase, &indices, &words));
     }
 }

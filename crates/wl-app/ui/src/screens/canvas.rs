@@ -459,6 +459,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_phase_metadata_is_not_rendered() {
+        for phase in [
+            None,
+            Some((0, 2)),
+            Some((-1, 2)),
+            Some((1, 0)),
+            Some((3, 2)),
+        ] {
+            assert_eq!(valid_phase(phase), None);
+        }
+        assert_eq!(valid_phase(Some((1, 2))), Some((1, 2)));
+        assert_eq!(
+            valid_phase(Some((i64::MAX, i64::MAX))),
+            Some((i64::MAX, i64::MAX))
+        );
+    }
+
+    #[test]
+    fn category_shortcuts_require_an_explicit_supported_digit() {
+        for (key, reason) in [
+            ("1", "external_dependency"),
+            ("2", "miscalculated_scope"),
+            ("3", "energy_depletion"),
+        ] {
+            assert_eq!(
+                BailReason::from_key(&Key::Character(key.into())).map(BailReason::as_str),
+                Some(reason)
+            );
+        }
+        for key in [Key::Enter, Key::Escape, Key::Character("4".into())] {
+            assert!(BailReason::from_key(&key).is_none());
+        }
+    }
+
+    #[test]
     fn shared_action_guard_rejects_reentry_until_released() {
         let mut busy = false;
         assert!(!claim_action(&mut busy, false));
