@@ -5,12 +5,41 @@ use dioxus::prelude::*;
 
 use crate::app::{flash, invoke, AppCtx, Screen, VelocityView};
 
+fn claim_submission(busy: &mut bool, submitted: bool) -> bool {
+    if *busy || submitted {
+        return false;
+    }
+    *busy = true;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submission_rejects_duplicates_and_allows_retry_after_failure() {
+        let mut busy = false;
+        assert!(claim_submission(&mut busy, false));
+        assert!(!claim_submission(&mut busy, false));
+        busy = false;
+        assert!(claim_submission(&mut busy, false));
+        busy = false;
+        assert!(!claim_submission(&mut busy, true));
+        assert!(!busy);
+    }
+}
+
 pub fn CheckInScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut note = use_signal(String::new);
     let mut submitted = use_signal(|| false);
+    let mut busy = use_signal(|| false);
 
-    let record = move |outcome: &str| {
+    let mut record = move |outcome: &str| {
+        if *ctx.telemetry_open.peek() || !claim_submission(&mut busy.write(), *submitted.peek()) {
+            return;
+        }
         let ctx = ctx;
         let note = note.read().clone();
         let outcome = outcome.to_string();
@@ -39,6 +68,7 @@ pub fn CheckInScreen() -> Element {
                 }
                 Err(e) => flash(&ctx, &format!("ERR {e}")),
             }
+            busy.set(false);
         });
     };
 
@@ -49,12 +79,6 @@ pub fn CheckInScreen() -> Element {
         div {
             class: "wl-scroll-region",
             tabindex: "0",
-            onkeydown: move |e: Event<KeyboardData>| {
-                if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
-                    let open = *ctx.telemetry_open.read();
-                    { let mut s = ctx.telemetry_open; *s.write() = !open; }
-                }
-            },
             h1 { class: "wl-serif-title",
                 "Evening " span { class: "wl-italic-accent", "recalibration" }
             }
@@ -67,20 +91,21 @@ pub fn CheckInScreen() -> Element {
                     textarea {
                         class: "wl-textarea",
                         placeholder: "Optional: what happened today?",
+                        disabled: *busy.read(),
                         value: "{note.read().clone()}",
                         oninput: move |e| note.set(e.value()),
                     }
                 }
                 div { class: "wl-checkin-row",
-                    button { class: "wl-checkin-choice", onclick: move |_| record("done"),
+                    button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("done"),
                         span { class: "wl-checkin-glyph", "●" }
                         span { class: "wl-checkin-label", "Done" }
                     }
-                    button { class: "wl-checkin-choice", onclick: move |_| record("partial"),
+                    button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("partial"),
                         span { class: "wl-checkin-glyph", "◐" }
                         span { class: "wl-checkin-label", "Partial" }
                     }
-                    button { class: "wl-checkin-choice", onclick: move |_| record("skipped"),
+                    button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("skipped"),
                         span { class: "wl-checkin-glyph", "○" }
                         span { class: "wl-checkin-label", "Skipped" }
                     }

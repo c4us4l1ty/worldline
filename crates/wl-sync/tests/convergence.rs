@@ -146,6 +146,44 @@ async fn authenticate(app: &Router, identity: &Identity) -> String {
 const PHRASE: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_same_date_check_ins_converge_on_device_tiebreak() {
+    use wl_core::domain::CheckInOutcome;
+
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    let b = Repos::new(open_in_memory().unwrap(), 2);
+    for repos in [&a, &b] {
+        repos.hlc.restore(8_000_000_000_000_000_000, 0);
+    }
+    let first = a
+        .upsert_check_in("2026-09-18", CheckInOutcome::Partial, None, Some(&identity))
+        .unwrap();
+    let winner = b
+        .upsert_check_in("2026-09-18", CheckInOutcome::Done, Some("finished"), Some(&identity))
+        .unwrap();
+    assert_eq!(first.hlc_timestamp.physical, winner.hlc_timestamp.physical);
+    assert_eq!(first.hlc_timestamp.counter, winner.hlc_timestamp.counter);
+    assert!(first.hlc_timestamp < winner.hlc_timestamp);
+    assert_ne!(first.id, winner.id);
+
+    sync_cycle(&a, &identity, &transport, 1).unwrap();
+    sync_cycle(&b, &identity, &transport, 1).unwrap();
+    sync_cycle(&a, &identity, &transport, 1).unwrap();
+    for repos in [&a, &b] {
+        assert_eq!(repos.recent_check_ins(10).unwrap(), vec![winner.clone()]);
+    }
+    let updated = a
+        .upsert_check_in("2026-09-18", CheckInOutcome::Skipped, None, Some(&identity))
+        .unwrap();
+    sync_cycle(&a, &identity, &transport, 1).unwrap();
+    sync_cycle(&b, &identity, &transport, 1).unwrap();
+    assert_eq!(b.recent_check_ins(10).unwrap(), vec![updated]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offline_write_then_sync_converges_two_devices() {
     let app = relay_app();
     let identity = Identity::from_phrase(PHRASE).unwrap();

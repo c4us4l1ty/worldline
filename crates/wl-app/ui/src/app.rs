@@ -184,7 +184,11 @@ pub struct TimerSession {
 }
 
 impl TimerSession {
-    fn update(previous: Option<Self>, directive: Option<&DirectiveView>, now_ms: f64) -> Option<Self> {
+    fn update(
+        previous: Option<Self>,
+        directive: Option<&DirectiveView>,
+        now_ms: f64,
+    ) -> Option<Self> {
         let directive = directive?;
         if let Some(session) = previous {
             if session.directive_id == directive.directive_id && session.phase == directive.phase {
@@ -346,7 +350,11 @@ pub fn fmt_mmss(secs: u64) -> String {
 pub fn set_directive(ctx: &AppCtx, directive: Option<DirectiveView>) {
     let directive = active_directive(directive);
     let mut session = ctx.timer_session;
-    let next = TimerSession::update(session.peek().clone(), directive.as_ref(), js_sys::Date::now());
+    let next = TimerSession::update(
+        session.peek().clone(),
+        directive.as_ref(),
+        js_sys::Date::now(),
+    );
     session.set(next);
     let mut current = ctx.directive;
     current.set(directive);

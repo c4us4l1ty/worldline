@@ -316,7 +316,10 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
                 "INSERT INTO check_ins (id,date,outcome,note,hlc_timestamp)
                  VALUES (?1,?2,?3,?4,?5)
                  ON CONFLICT(id) DO UPDATE SET date=?2,outcome=?3,note=?4,hlc_timestamp=?5
-                 WHERE check_ins.hlc_timestamp < ?5",
+                 WHERE check_ins.hlc_timestamp < ?5
+                 ON CONFLICT(date) DO UPDATE SET id=?1,outcome=?3,note=?4,hlc_timestamp=?5
+                 WHERE check_ins.hlc_timestamp < ?5
+                    OR (check_ins.hlc_timestamp = ?5 AND check_ins.id < ?1)",
                 rusqlite::params![op.record_id, get("date"), get("outcome"), get("note"), ts_s],
             )?;
         }
