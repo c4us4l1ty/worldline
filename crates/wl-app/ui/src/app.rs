@@ -241,9 +241,12 @@ fn App() -> Element {
     let _theme = use_context_provider(Theme::new);
 
     // Boot: check identity → route (runs once).
-    let mut boot_attempt = use_signal(|| 0u64);
+    let mut booted = use_signal(|| false);
     use_effect(move || {
-        let _attempt = *boot_attempt.read();
+        if *booted.read() {
+            return;
+        }
+        booted.set(true);
         let ctx2 = ctx;
         spawn(async move {
             let mut screen = ctx2.screen;
