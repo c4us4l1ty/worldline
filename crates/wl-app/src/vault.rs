@@ -63,8 +63,18 @@ impl Vault {
     // -- mnemonic (Item 3) --------------------------------------------
 
     pub fn save_mnemonic(&self, phrase: &str) -> Result<(), VaultError> {
+        let previous = self.get(b"mnemonic")?.map(Zeroizing::new);
         self.put(b"mnemonic", phrase.as_bytes())?;
-        self.commit()
+        if let Err(error) = self.commit() {
+            // Failed persistence must not make a new identity visible to
+            // unlock while SQLite and the durable snapshot still use the old one.
+            match previous {
+                Some(bytes) => self.put(b"mnemonic", &bytes)?,
+                None => { self.del(b"mnemonic")?; }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn get_mnemonic(&self) -> Result<Zeroizing<String>, VaultError> {

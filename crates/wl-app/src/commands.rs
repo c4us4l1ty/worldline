@@ -38,14 +38,7 @@ pub(crate) async fn identity_generate(
     // 12 words (Item 6 — no longer deterministic).
     let mut rng = rand::thread_rng();
     let verify_indices: Vec<usize> = rand::seq::index::sample(&mut rng, 12, 3).into_vec();
-    // Vault first: a crash between memory and disk must not lose the
-    // only recoverable copy shown to the user once.
-    state
-        .vault
-        .save_mnemonic(&phrase)
-        .map_err(|e| ShellError::Vault(e.to_string()))?;
-    state.repos.insert_identity(&identity, false, &verify_indices)?;
-    *current = Some(identity);
+    persist_identity(&state, &mut current, identity, false, &verify_indices)?;
     Ok(GeneratedIdentity {
         phrase,
         account_id,
@@ -123,13 +116,24 @@ pub(crate) async fn identity_restore(
             return Err(ShellError::Invalid("cannot replace this installation's identity".into()));
         }
     }
-    state
-        .vault
-        .save_mnemonic(&phrase)
-        .map_err(|e| ShellError::Vault(e.to_string()))?;
-    state.repos.insert_identity(&identity, true, &verify_indices)?;
-    *current = Some(identity);
+    persist_identity(&state, &mut current, identity, true, &verify_indices)?;
     Ok(account_id)
+}
+
+fn persist_identity(
+    state: &AppState,
+    current: &mut Option<Identity>,
+    identity: Identity,
+    verified: bool,
+    verify_indices: &[usize],
+) -> ShellResult<()> {
+    // Vault first: persistence failure must not publish a new public or
+    // process-resident identity without its recoverable secret.
+    state.vault.save_mnemonic(identity.phrase())
+        .map_err(|e| ShellError::Vault(e.to_string()))?;
+    state.repos.insert_identity(&identity, verified, verify_indices)?;
+    *current = Some(identity);
+    Ok(())
 }
 
 /// Whether an identity exists (onboarding gate).
@@ -972,6 +976,52 @@ use tauri::Manager;
 mod tests {
     use super::*;
     use wl_sync::sync::Transport;
+
+    #[test]
+    fn identity_snapshot_failure_preserves_memory_disk_and_public_state() {
+        let dir = std::env::temp_dir().join(format!("wl-identity-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let state = AppState {
+            repos: Repos::new(wl_core::store::open_in_memory().unwrap(), 1),
+            identity: std::sync::Mutex::new(None),
+            vault: crate::vault::Vault::open(&dir).unwrap(),
+            relay_token: std::sync::Mutex::new(None),
+            relay_url: std::sync::Mutex::new(None),
+        };
+        let mut current = None;
+        let original = Identity::generate().unwrap();
+        let account = original.account_id_hex();
+        let phrase = Zeroizing::new(original.phrase().to_string());
+        persist_identity(&state, &mut current, original, false, &[1, 4, 8]).unwrap();
+        let before = state.repos.identity().unwrap().unwrap();
+        // Preserve the durable snapshot, then make its path unwritable
+        // regardless of process privileges (a directory cannot be a file).
+        let snapshot = dir.join("vault.hold");
+        let saved = dir.join("saved.hold");
+        std::fs::rename(&snapshot, &saved).unwrap();
+        std::fs::create_dir(&snapshot).unwrap();
+        let replacement = Identity::generate().unwrap();
+        assert!(matches!(
+            persist_identity(&state, &mut current, replacement, true, &[0, 3, 7]),
+            Err(ShellError::Vault(_))
+        ));
+        assert_eq!(current.as_ref().unwrap().account_id_hex(), account);
+        assert_eq!(state.vault.get_mnemonic().unwrap().as_str(), phrase.as_str());
+        let after = state.repos.identity().unwrap().unwrap();
+        assert_eq!(after.public_key, before.public_key);
+        assert_eq!(after.bip39_mnemonic_verified, before.bip39_mnemonic_verified);
+        assert_eq!(after.verify_indices, before.verify_indices);
+        let rows: i64 = state.repos.conn.lock().expect("test DB mutex")
+            .query_row("SELECT COUNT(*) FROM identity_config", [], |row| row.get(0)).unwrap();
+        assert_eq!(rows, 1);
+        std::fs::remove_dir(&snapshot).unwrap();
+        std::fs::rename(saved, &snapshot).unwrap();
+        drop(state);
+        let reopened = crate::vault::Vault::open(&dir).unwrap();
+        assert_eq!(reopened.get_mnemonic().unwrap().as_str(), phrase.as_str());
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn transport_works_across_successive_runtime_lifetimes() {
