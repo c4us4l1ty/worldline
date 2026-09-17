@@ -16,7 +16,6 @@
     "frontendDist": "ui/target/dx/wl-ui/release/web/public"
   },
   "app": {
-    "capabilities": ["main-capability"],
     "windows": [
       {
         "label": "main",
@@ -36,6 +35,7 @@
       }
     ],
     "security": {
+      "capabilities": ["main-capability"],
       "csp": {
         "default-src": "'self'",
         "script-src": "'self' 'wasm-unsafe-eval'",

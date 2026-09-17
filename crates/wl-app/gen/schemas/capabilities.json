@@ -1,1 +1,1 @@
-{}
+{"main-capability":{"identifier":"main-capability","description":"Allow the Worldline webview to invoke shell commands","local":true,"windows":["main"],"permissions":["core:default"]}}
