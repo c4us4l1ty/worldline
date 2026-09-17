@@ -160,7 +160,9 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Goal, StoreError> {
         let id = new_id("goal");
-        let ts = self.tick();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
         let goal = Goal {
             id: id.clone(),
             title: title.to_string(),
@@ -169,7 +171,7 @@ impl Repos {
             status: GoalStatus::Active,
             hlc_timestamp: ts,
         };
-        self.conn.lock().unwrap().execute(
+        tx.execute(
             "INSERT INTO goals (id, title, description, target_date, status, hlc_timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -181,12 +183,15 @@ impl Repos {
                 ts.to_string()
             ],
         )?;
-        self.emit(
+        Self::emit_on(&tx,
             identity,
             crate::crdt::CrdtTable::Goals,
             &goal.id,
             &Self::goal_json(&goal),
+            ts,
         )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(goal)
     }
 
@@ -231,7 +236,9 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Milestone, StoreError> {
         let id = new_id("ms");
-        let ts = self.tick();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
         let m = Milestone {
             id: id.clone(),
             goal_id: goal_id.to_string(),
@@ -241,17 +248,20 @@ impl Repos {
             status: MilestoneStatus::Pending,
             hlc_timestamp: ts,
         };
-        self.conn.lock().unwrap().execute(
+        tx.execute(
             "INSERT INTO milestones (id, goal_id, title, description, order_index, status, hlc_timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, goal_id, title, description, order_index, "pending", ts.to_string()],
         )?;
-        self.emit(
+        Self::emit_on(&tx,
             identity,
             crate::crdt::CrdtTable::Milestones,
             &m.id,
             &Self::milestone_json(&m),
+            ts,
         )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(m)
     }
 
@@ -274,21 +284,25 @@ impl Repos {
         status: MilestoneStatus,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let ts = self.tick();
-        self.conn.lock().unwrap().execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
+        if tx.execute(
             "UPDATE milestones SET status = ?2, hlc_timestamp = ?3 WHERE id = ?1",
             params![id, status.as_str(), ts.to_string()],
-        )?;
-        if identity.is_some() {
-            if let Some(m) = self.milestone(id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::Milestones,
-                    &m.id,
-                    &Self::milestone_json(&m),
-                )?;
-            }
+        )? == 0 {
+            return Err(StoreError::NotFound(format!("milestone {id}")));
         }
+        if identity.is_some() {
+            let m = tx.query_row(
+                "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
+                 FROM milestones WHERE id = ?1", [id], milestone_row,
+            )?;
+            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Milestones,
+                &m.id, &Self::milestone_json(&m), ts)?;
+        }
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -339,14 +353,20 @@ impl Repos {
         phases: &[(String, Option<String>, i64)], // (title, instruction, minutes)
         identity: Option<&Identity>,
     ) -> Result<Directive, StoreError> {
-        if progressive_total > 1 && phases.len() as i64 != progressive_total {
+        if estimated_minutes <= 0 || progressive_total < 1 || phases.iter().any(|p| p.2 <= 0) {
+            return Err(StoreError::Invalid("minutes and phase count must be positive".into()));
+        }
+        if (progressive_total == 1 && !phases.is_empty())
+            || (progressive_total > 1 && phases.len() as i64 != progressive_total) {
             return Err(StoreError::Invalid(format!(
                 "progressive_total={progressive_total} but {} phases supplied",
                 phases.len()
             )));
         }
         let id = new_id("dir");
-        let ts = self.tick();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
         let d = Directive {
             id: id.clone(),
             milestone_id: milestone_id.to_string(),
@@ -359,36 +379,32 @@ impl Repos {
             scheduled_for_date: scheduled_for_date.to_string(),
             hlc_timestamp: ts,
         };
-        self.conn.lock().unwrap().execute(
+        tx.execute(
             "INSERT INTO directives (id, milestone_id, title, execution_context,
                 estimated_minutes, progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'queued', ?7, ?8)",
             params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, ts.to_string()],
         )?;
+        Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Directives,
+            &d.id, &Self::directive_json(&d), ts)?;
         for (i, (pt, pi, pm)) in phases.iter().enumerate() {
-            let ts = self.tick();
-            self.conn.lock().unwrap().execute(
+            let ts = self.hlc.now(self.device);
+            tx.execute(
                 "INSERT INTO directive_phases (directive_id, step, title, instruction, minutes, state, hlc_timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![id, (i + 1) as i64, pt, pi, pm, if i == 0 { "active" } else { "pending" }, ts.to_string()],
             )?;
+            let p = DirectivePhase {
+                directive_id: id.clone(), step: (i + 1) as i64, title: pt.clone(),
+                instruction: pi.clone(), minutes: *pm,
+                state: if i == 0 { PhaseState::Active } else { PhaseState::Pending },
+                hlc_timestamp: ts,
+            };
+            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::DirectivePhases,
+                &id, &Self::phase_json(&p), ts)?;
         }
-        if identity.is_some() {
-            self.emit(
-                identity,
-                crate::crdt::CrdtTable::Directives,
-                &d.id,
-                &Self::directive_json(&d),
-            )?;
-            for p in self.phases_for_directive(&d.id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::DirectivePhases,
-                    &d.id,
-                    &Self::phase_json(&p),
-                )?;
-            }
-        }
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(d)
     }
 
@@ -517,21 +533,9 @@ impl Repos {
                 [id],
                 directive_row,
             )?;
-            let payload = serde_json::to_vec(&Self::directive_json(&d))
-                .map_err(|e| StoreError::Invalid(e.to_string()))?;
-            let sealed = aead::seal(identity, &payload, format!("directives:{id}").as_bytes())
-                .map_err(|e| StoreError::Invalid(e.to_string()))?;
-            conn.execute(
-                "INSERT INTO crdt_outbox (operation_id, hlc_timestamp, table_name, record_id,
-                    encrypted_payload, created_at_epoch_ms, pushed)
-                 VALUES (?1, ?2, 'directives', ?3, ?4, ?5, 0)",
-                params![
-                    new_id("op"),
-                    ts.to_string(),
-                    id,
-                    sealed.to_bytes(),
-                    ts.epoch_ms() as i64
-                ],
+            Self::emit_on(
+                conn, Some(identity), crate::crdt::CrdtTable::Directives,
+                id, &Self::directive_json(&d), ts,
             )?;
         }
         Ok(())
@@ -1031,10 +1035,7 @@ impl Repos {
         })
     }
 
-    /// Write-through helper: encrypt + enqueue the canonical JSON for a
-    /// just-written row. No-op when `identity` is `None` (offline vault-
-    /// locked contexts and unit tests that assert storage only).
-    /// Table names go through the CRDT registry — never raw strings.
+    /// Write-through for mutation paths that issue their own outbox tick.
     fn emit(
         &self,
         identity: Option<&Identity>,
@@ -1042,9 +1043,57 @@ impl Repos {
         record_id: &str,
         payload: &serde_json::Value,
     ) -> Result<(), StoreError> {
-        if let Some(idn) = identity {
-            self.enqueue_outbox(idn, table.as_str(), record_id, payload)?;
+        if let Some(identity) = identity {
+            self.enqueue_outbox(identity, table.as_str(), record_id, payload)?;
         }
+        Ok(())
+    }
+
+    /// Enqueues the exact row version within the caller's transaction.
+    fn emit_on(
+        conn: &Connection,
+        identity: Option<&Identity>,
+        table: crate::crdt::CrdtTable,
+        record_id: &str,
+        payload: &serde_json::Value,
+        ts: HlcTimestamp,
+    ) -> Result<(), StoreError> {
+        if let Some(identity) = identity {
+            Self::enqueue_on(conn, identity, table.as_str(), record_id, payload, ts)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_on(
+        conn: &Connection,
+        identity: &Identity,
+        table_name: &str,
+        record_id: &str,
+        payload_json: &serde_json::Value,
+        ts: HlcTimestamp,
+    ) -> Result<String, StoreError> {
+        let op_id = new_id("op");
+        let aad = format!("{table_name}:{record_id}");
+        let plaintext = zeroize::Zeroizing::new(
+            serde_json::to_vec(payload_json).map_err(|e| StoreError::Invalid(e.to_string()))?,
+        );
+        let sealed = aead::seal(identity, &plaintext, aad.as_bytes())
+            .map_err(|e| StoreError::Invalid(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO crdt_outbox (operation_id, hlc_timestamp, table_name, record_id, encrypted_payload, created_at_epoch_ms, pushed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            params![op_id, ts.to_string(), table_name, record_id, sealed.to_bytes(), ts.epoch_ms() as i64],
+        )?;
+        Ok(op_id)
+    }
+
+    fn persist_head_on(&self, conn: &Connection) -> Result<(), StoreError> {
+        let (wall, ctr) = self.hlc.head();
+        conn.execute(
+            "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
+            params![wall as i64, ctr as i64, self.device as i64],
+        )?;
         Ok(())
     }
 
@@ -1057,17 +1106,12 @@ impl Repos {
         record_id: &str,
         payload_json: &serde_json::Value,
     ) -> Result<String, StoreError> {
-        let ts = self.tick();
-        let op_id = new_id("op");
-        let aad = format!("{table_name}:{record_id}");
-        let plaintext = serde_json::to_vec(payload_json).expect("json ser");
-        let sealed = aead::seal(identity, &plaintext, aad.as_bytes())
-            .map_err(|e| StoreError::Invalid(e.to_string()))?;
-        self.conn.lock().unwrap().execute(
-            "INSERT INTO crdt_outbox (operation_id, hlc_timestamp, table_name, record_id, encrypted_payload, created_at_epoch_ms, pushed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-            params![op_id, ts.to_string(), table_name, record_id, sealed.to_bytes(), ts.epoch_ms() as i64],
-        )?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
+        let op_id = Self::enqueue_on(&tx, identity, table_name, record_id, payload_json, ts)?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
         Ok(op_id)
     }
 

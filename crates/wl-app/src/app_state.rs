@@ -107,17 +107,35 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn invalid_device_marker_is_not_replaced() {
+        let dir = std::env::temp_dir().join(format!("wl-device-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let marker = dir.join("device_id");
+        for value in [b"0".as_slice(), b"corrupt", b"65536", b"\xff"] {
+            std::fs::write(&marker, value).unwrap();
+            assert!(device_id_for(&dir).is_err());
+            assert_eq!(std::fs::read(&marker).unwrap(), value);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 /// Stable per-install device id (0 < id < u16::MAX, never 0).
 fn device_id_for(dir: &Path) -> Result<u16, ShellError> {
     let marker = dir.join("device_id");
-    if let Ok(txt) = std::fs::read_to_string(&marker) {
-        if let Ok(v) = txt.trim().parse::<u16>() {
-            if v > 0 {
-                return Ok(v);
-            }
+    match std::fs::read_to_string(&marker) {
+        Ok(txt) => {
+            return txt
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| ShellError::Io("invalid persisted device id".into()));
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ShellError::Io(e.to_string())),
     }
     let id = (uuid::Uuid::new_v4().as_u128() & 0xFFFF) as u16;
     let id = if id == 0 { 1 } else { id };

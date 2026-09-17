@@ -1,6 +1,6 @@
 //! Tauri command surface — thin bridge: Dioxus UI → shell → wl-core.
-//! Secrets (mnemonic, API keys) flow native-side only; per skill §6.3
-//! they never enter DOM dataset attributes.
+//! Recovery display and key entry cross IPC; secrets are never persisted
+//! in SQLite or temporary DOM dataset attributes.
 
 use serde::Serialize;
 use tauri::State;
@@ -22,11 +22,15 @@ use crate::relay;
 
 /// Generates a fresh 12-word identity. Returns the mnemonic ONCE for
 /// onboarding display; it is persisted ONLY in the Stronghold vault
-/// (hardware-backed), never in SQLite.
+/// (encrypted with a device-local key), never in SQLite.
 #[tauri::command]
 pub(crate) async fn identity_generate(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<GeneratedIdentity> {
+    let mut current = state.identity.lock().unwrap();
+    if current.is_some() || state.repos.identity()?.is_some() || state.vault.has_mnemonic() {
+        return Err(ShellError::Invalid("identity already exists; unlock or restore it".into()));
+    }
     let identity = Identity::generate().map_err(|_| ShellError::BadMnemonic)?;
     let phrase = identity.phrase().to_string();
     let account_id = identity.account_id_hex();
@@ -34,19 +38,14 @@ pub(crate) async fn identity_generate(
     // 12 words (Item 6 — no longer deterministic).
     let mut rng = rand::thread_rng();
     let verify_indices: Vec<usize> = rand::seq::index::sample(&mut rng, 12, 3).into_vec();
-    state
-        .repos
-        .insert_identity(&identity, false, &verify_indices)?;
     // Vault first: a crash between memory and disk must not lose the
     // only recoverable copy shown to the user once.
     state
         .vault
         .save_mnemonic(&phrase)
         .map_err(|e| ShellError::Vault(e.to_string()))?;
-    *state.identity.lock().unwrap() = Some(identity);
-    // TODO(stronghold): persist mnemonic to the vault at onboarding
-    // completion instead of keeping it process-resident. v0.1 keeps
-    // the identity in memory; the phrase returned here is shown once.
+    state.repos.insert_identity(&identity, false, &verify_indices)?;
+    *current = Some(identity);
     Ok(GeneratedIdentity {
         phrase,
         account_id,
@@ -78,26 +77,27 @@ pub(crate) async fn identity_verify_backup(
     };
     // Challenge positions come from persisted identity_config — never
     // from the caller — so a hostile UI payload can't pick its own.
-    let stored = state
-        .repos
-        .identity()?
-        .ok_or(ShellError::Locked)?
-        .verify_indices;
-    let indices: Vec<usize> = if !stored.is_empty() {
-        stored
-    } else {
-        // Legacy rows predate persisted indices: the UI's positions
-        // are the best available (recorded for future re-checks).
-        if indices.is_empty() {
-            return Ok(false);
-        }
-        indices
-    };
+    let cfg = state.repos.identity()?.ok_or(ShellError::Locked)?;
+    if cfg.public_key != id.account_id_hex() {
+        return Err(ShellError::Invalid("stored identity does not match the vault".into()));
+    }
+    let stored = cfg.verify_indices;
+    if !valid_backup_challenge(&stored) || indices != stored {
+        return Ok(false);
+    }
     let ok = id.verify_backup_words(&indices, &words);
     if ok {
         state.repos.set_mnemonic_verified(true)?;
     }
     Ok(ok)
+}
+
+fn valid_backup_challenge(indices: &[usize]) -> bool {
+    indices.len() == 3
+        && indices.iter().all(|index| *index < 12)
+        && indices[0] != indices[1]
+        && indices[0] != indices[2]
+        && indices[1] != indices[2]
 }
 
 /// Restores an identity from a 12-word mnemonic (account recovery).
@@ -106,19 +106,29 @@ pub(crate) async fn identity_restore(
     state: State<'_, std::sync::Arc<AppState>>,
     phrase: String,
 ) -> ShellResult<String> {
+    let phrase = Zeroizing::new(phrase);
+    let mut current = state.identity.lock().unwrap();
     let identity = Identity::from_phrase(&phrase).map_err(|_| ShellError::BadMnemonic)?;
     let account_id = identity.account_id_hex();
     // Fresh challenge positions for the re-verified backup check.
     let mut rng = rand::thread_rng();
     let verify_indices: Vec<usize> = rand::seq::index::sample(&mut rng, 12, 3).into_vec();
-    state
-        .repos
-        .insert_identity(&identity, true, &verify_indices)?;
+    if state.repos.identity()?.is_some_and(|cfg| cfg.public_key != account_id) {
+        return Err(ShellError::Invalid("cannot replace this installation's identity".into()));
+    }
+    if state.vault.has_mnemonic() {
+        let existing = state.vault.get_mnemonic().map_err(|e| ShellError::Vault(e.to_string()))?;
+        let existing = Identity::from_phrase(&existing).map_err(|_| ShellError::BadMnemonic)?;
+        if existing.account_id_hex() != account_id {
+            return Err(ShellError::Invalid("cannot replace this installation's identity".into()));
+        }
+    }
     state
         .vault
         .save_mnemonic(&phrase)
         .map_err(|e| ShellError::Vault(e.to_string()))?;
-    *state.identity.lock().unwrap() = Some(identity);
+    state.repos.insert_identity(&identity, true, &verify_indices)?;
+    *current = Some(identity);
     Ok(account_id)
 }
 
@@ -150,25 +160,26 @@ pub struct IdentityStatus {
 pub(crate) async fn identity_unlock(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<String> {
+    let mut current = state.identity.lock().unwrap();
     let phrase = state
         .vault
         .get_mnemonic()
         .map_err(|e| ShellError::Vault(e.to_string()))?;
     let identity = Identity::from_phrase(phrase.as_str()).map_err(|_| ShellError::BadMnemonic)?;
     let account_id = identity.account_id_hex();
-    // Upsert: the public half may already exist from a previous boot.
-    // Keep the persisted challenge positions AND the verified flag (the
-    // onboarding verification actually happened) — overwriting indices
-    // with [] would drop the positional challenge and reopen the S2
-    // membership-bypass via the legacy caller-supplied-indices path.
+    // A vault/public-state mismatch must not silently switch accounts.
+    // Missing legacy challenges remain unverified until recovery proves
+    // possession of the full phrase through identity_restore.
     let (verified, indices) = match state.repos.identity()? {
         Some(cfg) if cfg.public_key == account_id => {
-            (cfg.bip39_mnemonic_verified, cfg.verify_indices)
+            let verified = cfg.bip39_mnemonic_verified;
+            (verified, cfg.verify_indices)
         }
-        _ => (true, Vec::new()),
+        Some(_) => return Err(ShellError::Invalid("stored identity does not match the vault".into())),
+        None => (false, Vec::new()),
     };
     state.repos.insert_identity(&identity, verified, &indices)?;
-    *state.identity.lock().unwrap() = Some(identity);
+    *current = Some(identity);
     Ok(account_id)
 }
 
@@ -184,6 +195,7 @@ pub(crate) async fn set_api_key(
     provider: String,
     key: String,
 ) -> ShellResult<bool> {
+    let key = Zeroizing::new(key);
     if key.trim().is_empty() {
         return Err(ShellError::Invalid("empty API key".into()));
     }

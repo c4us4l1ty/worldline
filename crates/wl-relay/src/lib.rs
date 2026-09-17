@@ -162,6 +162,7 @@ async fn verify(
             err(StatusCode::UNAUTHORIZED, "challenge expired or unknown")
         }
         Err(AuthError::BadSignature) => err(StatusCode::UNAUTHORIZED, "signature rejected"),
+        Err(AuthError::RateLimited) => err(StatusCode::TOO_MANY_REQUESTS, "too many sessions"),
         Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "auth failure"),
     }
 }

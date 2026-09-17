@@ -74,7 +74,7 @@ pub struct VerifyRequest {
 /// Successful auth: short-lived bearer session token.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionToken {
-    /// PASETO v4.local token (or JWT in alternative deployments).
+    /// Opaque random bearer token; validated against relay session state.
     pub token: String,
     /// Epoch seconds until expiry.
     pub expires_at: i64,

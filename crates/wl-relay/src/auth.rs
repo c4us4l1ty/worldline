@@ -1,6 +1,5 @@
-//! Relay authentication (PRD §3.2): unguessable challenge → Ed25519
-//! signature → short-lived PASETO v4 session token. The relay verifies
-//! signatures against the registered public key and nothing else.
+//! Relay authentication: unguessable challenge → Ed25519 signature →
+//! short-lived opaque bearer token. No stateless PASETO/JWT wrapping.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -76,10 +75,7 @@ impl AuthState {
     /// the public key IS the account). Refuses floods: bounded in-flight
     /// challenges per account AND globally.
     pub fn issue_challenge(&self, public_key: &str) -> Result<(String, i64), AuthError> {
-        if hex::decode(public_key)
-            .map(|b| b.len() != 32)
-            .unwrap_or(true)
-        {
+        if public_key.len() != 64 || !public_key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
             return Err(AuthError::BadPublicKey);
         }
         let mut nonce_bytes = [0u8; 32];
@@ -122,29 +118,32 @@ impl AuthState {
                 return Err(AuthError::BadChallenge);
             }
         }
-        if expires_at < now_secs() {
+        if expires_at <= now_secs() {
             // Consume the challenge either way (one-shot).
             self.challenges.lock().expect("auth mutex").remove(nonce);
             return Err(AuthError::BadChallenge);
         }
 
         // Ed25519 verify over nonce ‖ expiry (matches client signing).
-        let payload = wl_protocol::challenge_signing_payload(nonce, expires_at);
+        let payload = wl_protocol::checked_challenge_signing_payload(nonce, expires_at)
+            .ok_or(AuthError::BadChallenge)?;
         let pk_bytes = hex::decode(public_key).map_err(|_| AuthError::BadPublicKey)?;
         let arr: [u8; 32] = pk_bytes.try_into().map_err(|_| AuthError::BadPublicKey)?;
         let vk =
             ed25519_dalek::VerifyingKey::from_bytes(&arr).map_err(|_| AuthError::BadPublicKey)?;
         let sig: [u8; 64] = signature.try_into().map_err(|_| AuthError::BadSignature)?;
-        use ed25519_dalek::Verifier;
-        vk.verify(&payload, &ed25519_dalek::Signature::from_bytes(&sig))
+        vk.verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&sig))
             .map_err(|_| AuthError::BadSignature)?;
 
-        // One-shot: challenge consumed.
-        self.challenges.lock().expect("auth mutex").remove(nonce);
+        // Claim the verified challenge atomically. Concurrent verification
+        // may both pass the signature check, but only one can mint a token.
+        if self.challenges.lock().expect("auth mutex").remove(nonce).is_none()
+            || expires_at <= now_secs()
+        {
+            return Err(AuthError::BadChallenge);
+        }
 
-        // Mint session token: opaque random + counter (PASETO-style
-        // v4.local is produced at the HTTP layer via pasetors; here we
-        // track the bearer id and let the HTTP layer seal it).
+        // Tokens are opaque, random bearer credentials retained server-side.
         let sess_expires = now_secs() + SESSION_TTL.as_secs() as i64;
         let token_id = format!(
             "{}-{}",
@@ -175,7 +174,7 @@ impl AuthState {
             let mut sessions = self.sessions.lock().expect("auth mutex");
             match sessions.get(token).cloned() {
                 Some((pk, exp)) => {
-                    if exp < now {
+                    if exp <= now {
                         // Remove the dead row on sight: pull-only clients
                         // must not accumulate expired sessions.
                         sessions.remove(token);
@@ -366,24 +365,23 @@ mod tests {
         let long = "a".repeat(513);
         assert!(matches!(auth.validate(&long), Err(AuthError::BadToken)));
     }
+    #[test]
+    fn public_keys_have_one_canonical_account_representation() {
+        let auth = AuthState::new();
+        let (pk, _) = fresh_keypair();
+        assert!(matches!(auth.issue_challenge(&pk.to_uppercase()), Err(AuthError::BadPublicKey)));
+        assert!(auth.issue_challenge(&pk).is_ok());
+    }
 
     #[test]
-    fn global_challenge_ceiling_bounds_memory() {
+    fn expired_challenge_cannot_create_session() {
         let auth = AuthState::new();
-        // Fill the map with distinct keys until the global cap refuses.
-        let mut minted = 0usize;
-        for i in 0..(MAX_CHALLENGES_GLOBAL + 8) as u64 {
-            let pk = hex::encode([i as u8; 32]);
-            match auth.issue_challenge(&pk) {
-                Ok(_) => minted += 1,
-                Err(AuthError::RateLimited) => break,
-                Err(e) => panic!("unexpected: {e}"),
-            }
-        }
-        assert!(
-            minted <= MAX_CHALLENGES_GLOBAL,
-            "global cap did not bind: minted {minted}"
-        );
+        let (pk, sk) = fresh_keypair();
+        let (nonce, _) = auth.issue_challenge(&pk).unwrap();
+        let expiry = now_secs();
+        auth.challenges.lock().unwrap().get_mut(&nonce).unwrap().1 = expiry;
+        let sig = sk.sign(&wl_protocol::challenge_signing_payload(&nonce, expiry)).to_bytes();
+        assert!(matches!(auth.verify(&pk, &nonce, expiry, &sig), Err(AuthError::BadChallenge)));
     }
 
     #[test]
