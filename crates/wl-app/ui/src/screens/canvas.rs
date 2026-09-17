@@ -163,7 +163,7 @@ export function start_timer(tick) {
         timeout = setTimeout(update, 1000);
     }
     document.addEventListener('visibilitychange', update);
-    update();
+    if (!document.hidden) timeout = setTimeout(update, 1000);
     return () => {
         stopped = true;
         clearTimeout(timeout);
@@ -297,6 +297,7 @@ fn EscapeModal(note: Signal<String>) -> Element {
     let bail_scope = bail;
     let bail_energy = bail;
     let note_len = note.read().chars().count();
+    let busy = *ctx.directive_busy.read();
 
     rsx! {
         div {
@@ -304,6 +305,10 @@ fn EscapeModal(note: Signal<String>) -> Element {
             tabindex: "0",
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
+                e.stop_propagation();
+                if *ctx.directive_busy.peek() {
+                    return;
+                }
                 match e.key() {
                     Key::Character(ref c) if c == "1" => bail_dep("external_dependency"),
                     Key::Character(ref c) if c == "2" => bail_scope("miscalculated_scope"),
@@ -331,15 +336,15 @@ fn EscapeModal(note: Signal<String>) -> Element {
                         },
                     }
                     p { class: "wl-char-count wl-mono", "{note_len}/140" }
-                    button { class: "wl-bailout-reason", onclick: move |_| bail("external_dependency"),
+                    button { class: "wl-bailout-reason", disabled: busy, onclick: move |_| bail("external_dependency"),
                         div { class: "wl-bailout-reason-title", "[1] Dependency blocked" }
                         div { class: "wl-bailout-reason-sub", "Waiting for 3rd party API, merge, or response." }
                     }
-                    button { class: "wl-bailout-reason", onclick: move |_| bail("miscalculated_scope"),
+                    button { class: "wl-bailout-reason", disabled: busy, onclick: move |_| bail("miscalculated_scope"),
                         div { class: "wl-bailout-reason-title", "[2] Scope miscalculation" }
                         div { class: "wl-bailout-reason-sub", "Directive exceeds allotted time boundary (>2x). Dispatcher splits it; quota untouched." }
                     }
-                    button { class: "wl-bailout-reason", onclick: move |_| bail("energy_depletion"),
+                    button { class: "wl-bailout-reason", disabled: busy, onclick: move |_| bail("energy_depletion"),
                         div { class: "wl-bailout-reason-title", "[3] Cognitive / energy depletion" }
                         div { class: "wl-bailout-reason-sub", "Focus ceiling reached; request a downscaled task + 10-minute rest." }
                     }
@@ -366,12 +371,48 @@ fn EscapeModal(note: Signal<String>) -> Element {
     }
 }
 
-async fn complete_current(ctx: &AppCtx) {
-    let mut d = ctx.directive;
-    match invoke::<DirectiveView>("complete_directive", ()).await {
-        Ok(next) => {
-            *d.write() = Some(next);
+fn claim_action(busy: &mut bool, has_directive: bool) -> bool {
+    if *busy || !has_directive {
+        return false;
+    }
+    *busy = true;
+    true
+}
+
+fn begin_directive_action(ctx: &AppCtx) -> bool {
+    let mut busy = ctx.directive_busy;
+    let claimed = claim_action(&mut busy.write(), ctx.directive.peek().is_some());
+    claimed
+}
+
+fn complete_current(ctx: &AppCtx) {
+    if *ctx.escape_open.peek() || !begin_directive_action(ctx) {
+        return;
+    }
+    let ctx = *ctx;
+    dioxus::core::spawn_forever(async move {
+        match invoke::<Option<DirectiveView>>("complete_directive", ()).await {
+            Ok(next) => set_directive(&ctx, next),
+            Err(e) => flash(&ctx, &format!("ERR {e}")),
         }
-        Err(e) => flash(ctx, &format!("ERR {e}")),
+        let mut busy = ctx.directive_busy;
+        busy.set(false);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_action_guard_rejects_reentry_until_released() {
+        let mut busy = false;
+        assert!(!claim_action(&mut busy, false));
+        assert!(!busy);
+        assert!(claim_action(&mut busy, true));
+        assert!(!claim_action(&mut busy, true));
+        assert!(busy);
+        busy = false;
+        assert!(claim_action(&mut busy, true));
     }
 }
