@@ -453,54 +453,68 @@ impl Repos {
         state: DirectiveState,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        // Stackelberg invariant: at most one directive is ever active.
-        // Park any *other* active back to queued first (self-healing for
-        // stray callers and merged remote states — never hide a second
-        // active behind `LIMIT 1`). Each parked row gets its own tick +
-        // outbox write-through so peers converge on the same single
-        // active.
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM directives WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::NotFound(format!("directive {id}")));
+        }
         if state == DirectiveState::Active {
-            let others: Vec<String> = {
-                let conn = self.conn.lock().unwrap();
-                let mut stmt =
-                    conn.prepare("SELECT id FROM directives WHERE state = 'active' AND id != ?1")?;
-                let rows = stmt
-                    .query_map([id], |r| r.get(0))?
-                    .collect::<Result<_, _>>()?;
-                rows
-            };
-            for other in others {
-                let pts = self.tick();
-                self.conn.lock().unwrap().execute(
-                    "UPDATE directives SET state = 'queued', hlc_timestamp = ?2 WHERE id = ?1",
-                    params![other, pts.to_string()],
-                )?;
-                if identity.is_some() {
-                    if let Some(d) = self.directive(&other)? {
-                        self.emit(
-                            identity,
-                            crate::crdt::CrdtTable::Directives,
-                            &d.id,
-                            &Self::directive_json(&d),
-                        )?;
-                    }
-                }
+            loop {
+                let other: Option<String> = tx.query_row(
+                    "SELECT id FROM directives WHERE state = 'active' AND id != ?1 LIMIT 1",
+                    [id],
+                    |r| r.get(0),
+                ).optional()?;
+                let Some(other) = other else { break };
+                Self::write_directive_state(&tx, &other, DirectiveState::Queued,
+                    self.hlc.now(self.device), identity)?;
             }
         }
-        let ts = self.tick();
-        self.conn.lock().unwrap().execute(
+        Self::write_directive_state(&tx, id, state, self.hlc.now(self.device), identity)?;
+        let (wall, ctr) = self.hlc.head();
+        tx.execute(
+            "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
+            params![wall as i64, ctr as i64, self.device as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_directive_state(
+        conn: &Connection,
+        id: &str,
+        state: DirectiveState,
+        ts: HlcTimestamp,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
+        conn.execute(
             "UPDATE directives SET state = ?2, hlc_timestamp = ?3 WHERE id = ?1",
             params![id, state.as_str(), ts.to_string()],
         )?;
-        if identity.is_some() {
-            if let Some(d) = self.directive(id)? {
-                self.emit(
-                    identity,
-                    crate::crdt::CrdtTable::Directives,
-                    &d.id,
-                    &Self::directive_json(&d),
-                )?;
-            }
+        if let Some(identity) = identity {
+            let d = conn.query_row(
+                "SELECT id, milestone_id, title, execution_context, estimated_minutes,
+                        progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
+                 FROM directives WHERE id = ?1",
+                [id],
+                directive_row,
+            )?;
+            let payload = serde_json::to_vec(&Self::directive_json(&d))
+                .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            let sealed = aead::seal(identity, &payload, format!("directives:{id}").as_bytes())
+                .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            conn.execute(
+                "INSERT INTO crdt_outbox (operation_id, hlc_timestamp, table_name, record_id,
+                    encrypted_payload, created_at_epoch_ms, pushed)
+                 VALUES (?1, ?2, 'directives', ?3, ?4, ?5, 0)",
+                params![new_id("op"), ts.to_string(), id, sealed.to_bytes(), ts.epoch_ms() as i64],
+            )?;
         }
         Ok(())
     }
@@ -543,6 +557,13 @@ impl Repos {
         scheduled_for_date: &str,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
+        let phases = self.phases_for_directive(id)?;
+        if estimated_minutes <= 0 || estimated_minutes < phases.len() as i64 {
+            return Err(StoreError::Invalid("estimate must allow one minute per phase".into()));
+        }
+        if phases.iter().any(|p| p.minutes <= 0) {
+            return Err(StoreError::Invalid("phase minutes must be positive".into()));
+        }
         let ts = self.tick();
         self.conn.lock().unwrap().execute(
             "UPDATE directives SET state='queued', estimated_minutes=?2, scheduled_for_date=?3,
@@ -552,34 +573,25 @@ impl Repos {
         // Rescale phase minutes proportionally so the rows sum to the
         // new total (floor 1 min per phase; the last phase absorbs
         // rounding drift). Monolithic directives have no rows: no-op.
-        let phases = self.phases_for_directive(id)?;
         if !phases.is_empty() {
-            let old_total: i64 = phases.iter().map(|p| p.minutes).sum();
-            if old_total > 0 {
-                let mut acc = 0i64;
-                for (i, p) in phases.iter().enumerate() {
-                    let scaled = if i + 1 == phases.len() {
-                        (estimated_minutes - acc).max(1)
-                    } else {
-                        ((p.minutes as f64 * estimated_minutes as f64 / old_total as f64).round()
-                            as i64)
-                            .max(1)
-                    };
-                    acc += scaled;
-                    let ts = self.tick();
-                    let state = if p.step == 1 { "active" } else { "pending" };
-                    self.conn.lock().unwrap().execute(
-                        "UPDATE directive_phases SET minutes=?3, state=?4, hlc_timestamp=?5
-                         WHERE directive_id=?1 AND step=?2",
-                        params![id, p.step, scaled, state, ts.to_string()],
-                    )?;
-                }
-            } else {
+            let old_total: i128 = phases.iter().map(|p| i128::from(p.minutes)).sum();
+            let mut remaining = estimated_minutes;
+            for (i, p) in phases.iter().enumerate() {
+                let reserved = (phases.len() - i - 1) as i64;
+                let scaled = if reserved == 0 {
+                    remaining
+                } else {
+                    let rounded = (i128::from(p.minutes) * i128::from(estimated_minutes)
+                        + old_total / 2) / old_total;
+                    (rounded as i64).clamp(1, remaining - reserved)
+                };
+                remaining -= scaled;
                 let ts = self.tick();
+                let state = if p.step == 1 { "active" } else { "pending" };
                 self.conn.lock().unwrap().execute(
-                    "UPDATE directive_phases SET state=(CASE WHEN step=1 THEN 'active' ELSE 'pending' END),
-                        hlc_timestamp=?2 WHERE directive_id=?1",
-                    params![id, ts.to_string()],
+                    "UPDATE directive_phases SET minutes=?3, state=?4, hlc_timestamp=?5
+                     WHERE directive_id=?1 AND step=?2",
+                    params![id, p.step, scaled, state, ts.to_string()],
                 )?;
             }
         }

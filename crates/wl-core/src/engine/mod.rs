@@ -93,7 +93,7 @@ impl<'a> Engine<'a> {
     /// interactable at any moment.
     pub fn activate_next(&self, date: &str) -> Result<EngineOutcome, EngineError> {
         if let Some(active) = self.repos.active_directive()? {
-            let estimated_minutes = self.current_phase_minutes(&active);
+            let estimated_minutes = self.current_phase_minutes(&active)?;
             let phase = self.phase_view(&active);
             return Ok(EngineOutcome::DirectiveActive {
                 directive_id: active.id,
@@ -105,10 +105,10 @@ impl<'a> Engine<'a> {
         let Some(next) = self.repos.next_runnable_directive(date)? else {
             return Ok(EngineOutcome::Idle);
         };
+        let estimated_minutes = self.current_phase_minutes(&next)?;
         self.repos
             .set_directive_state(&next.id, DirectiveState::Active, self.identity)?;
         self.ensure_milestone_active(&next.milestone_id)?;
-        let estimated_minutes = self.current_phase_minutes(&next)?;
         let phase = self.phase_view(&next);
         Ok(EngineOutcome::DirectiveActive {
             directive_id: next.id.clone(),
@@ -145,7 +145,7 @@ impl<'a> Engine<'a> {
                 .repos
                 .directive(&d.id)?
                 .ok_or_else(|| StoreError::NotFound(format!("directive {}", d.id)))?;
-            let estimated_minutes = self.current_phase_minutes(&fresh);
+            let estimated_minutes = self.current_phase_minutes(&fresh)?;
             let phase = self.phase_view(&fresh);
             return Ok(EngineOutcome::DirectiveActive {
                 directive_id: fresh.id,
@@ -187,6 +187,9 @@ impl<'a> Engine<'a> {
         let Some(d) = self.repos.active_directive()? else {
             return self.activate_next(date);
         };
+        if reason == BailoutReason::MiscalculatedScope && date_plus_days(date, 1).is_none() {
+            return Err(StoreError::Invalid("bad date".into()).into());
+        }
         self.repos
             .record_bailout(&d.id, reason, note, self.identity)?;
         let recovery = match reason {
@@ -194,7 +197,7 @@ impl<'a> Engine<'a> {
                 self.repos
                     .set_directive_state(&d.id, DirectiveState::Blocked, self.identity)?;
                 // Advance to the next unblocked queued thread.
-                let next = self.repos.runnable_directives(date)?.into_iter().next();
+                let next = self.repos.next_runnable_directive(date)?;
                 Some(RecoveryAction::AdvanceUnblocked {
                     next_directive_id: next.map(|n| n.id).unwrap_or_default(),
                 })
@@ -267,16 +270,16 @@ impl<'a> Engine<'a> {
     }
 
     /// Estimated minutes of the current execution unit.
-    fn current_phase_minutes(&self, d: &Directive) -> i64 {
+    fn current_phase_minutes(&self, d: &Directive) -> Result<i64, EngineError> {
         if d.uses_progressive_activation() {
-            let phases = self.repos.phases_for_directive(&d.id).unwrap_or_default();
-            phases
-                .iter()
-                .find(|p| p.step == d.progressive_step)
-                .map(|p| p.minutes)
-                .unwrap_or(d.estimated_minutes)
+            let minutes = self.repos.conn.lock().unwrap().query_row(
+                "SELECT minutes FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
+                rusqlite::params![d.id, d.progressive_step],
+                |r| r.get::<_, i64>(0),
+            ).optional().map_err(StoreError::Sqlite)?;
+            minutes.ok_or_else(|| StoreError::Invalid("current phase missing".into()).into())
         } else {
-            d.estimated_minutes
+            Ok(d.estimated_minutes)
         }
     }
 

@@ -326,33 +326,6 @@ fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod validation_regressions {
-    use super::*;
-
-    #[test]
-    fn phase_validation_rejects_unrepresentable_totals_without_panicking() {
-        let draft = DirectiveDraft {
-            title: "Boundary estimate".into(),
-            execution_context: None,
-            estimated_minutes: i64::MAX,
-            phases: vec![
-                PhaseDraft {
-                    title: "First".into(),
-                    instruction: None,
-                    minutes: i64::MAX,
-                },
-                PhaseDraft {
-                    title: "Second".into(),
-                    instruction: None,
-                    minutes: 1,
-                },
-            ],
-        };
-        assert!(validate_directive(&draft).is_err());
-    }
-}
-
 fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
     validate_text("directive.title", &d.title)?;
     validate_text("execution_context", d.execution_context.as_deref().unwrap_or(""))?;

@@ -118,7 +118,6 @@ pub fn sync_cycle<T: Transport>(
         // ops whose earlier push response was lost.
         let mut drained = resp.accepted;
         drained.extend(resp.duplicates.iter().cloned());
-            .ok_or_else(|| SyncError::Protocol("invalid push acknowledgement".into()))?;
         repos.mark_outbox_pushed(&drained)?;
         pushed += drained.len();
         if drained.is_empty() {

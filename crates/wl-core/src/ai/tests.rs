@@ -223,6 +223,61 @@ fn parse_plan_rejects_phases_contradicting_estimate() {
 }
 
 #[test]
+fn validation_bounds_and_persistence_preflight() {
+    let r = repos();
+    let mut plan = parse_plan(PLAN_JSON).unwrap();
+    for minutes in [i64::MIN, 0, i64::MAX] {
+        plan.milestones[0].directives[1].phases[0].minutes = minutes;
+        assert!(persist_plan(&r, None, &plan, None).is_err());
+        assert!(parse_plan(&serde_json::to_string(&plan).unwrap()).is_err());
+        assert!(r.active_goal().unwrap().is_none());
+    }
+    let mut plan = parse_plan(PLAN_JSON).unwrap();
+    plan.milestones[0].directives[1].estimated_minutes = i64::MAX;
+    assert!(persist_plan(&r, None, &plan, None).is_err());
+    for count in [1, 5] {
+        let mut plan = parse_plan(PLAN_JSON).unwrap();
+        let d = &mut plan.milestones[0].directives[1];
+        d.phases = vec![d.phases[0].clone(); count];
+        assert!(persist_plan(&r, None, &plan, None).is_err());
+    }
+    let mut plan = parse_plan(PLAN_JSON).unwrap();
+    plan.milestones[0].directives = vec![plan.milestones[0].directives[0].clone(); 33];
+    assert!(persist_plan(&r, None, &plan, None).is_err());
+    let mut plan = parse_plan(PLAN_JSON).unwrap();
+    plan.milestones[1].description = Some("x".repeat(16 * 1024 + 1));
+    assert!(persist_plan(&r, None, &plan, None).is_err());
+    assert!(r.active_goal().unwrap().is_none());
+
+    let goal = r.create_goal("Goal", None, None, None).unwrap();
+    r.create_milestone(&goal.id, "Milestone", None, 0, None).unwrap();
+    let mut brief = BriefingResult {
+        directives: parse_plan(PLAN_JSON).unwrap().milestones[0].directives.clone(),
+    };
+    brief.directives[1].title.clear();
+    assert!(persist_briefing(&r, &brief, "2026-09-13", None).is_err());
+    assert!(r.runnable_directives("2026-09-13").unwrap().is_empty());
+}
+
+#[test]
+fn response_size_checked_before_parsing_and_persistence() {
+    let raw = " ".repeat(256 * 1024 + 1);
+    assert!(matches!(parse_plan(&raw), Err(DispatchError::Invalid { field: "response", .. })));
+    assert!(matches!(parse_briefing(&raw), Err(DispatchError::Invalid { field: "response", .. })));
+    let r = repos();
+    let provider = ProviderAdapter::Anthropic {
+        api_key: Zeroizing::new("test".into()),
+        model: "test".into(),
+    };
+    let result = AiDispatcher::master_plan(
+        &provider, "Goal", None, None, "",
+        |_, _, _| Ok(raw.clone()), &r, None,
+    );
+    assert!(matches!(result, Err(DispatchError::Invalid { field: "response", .. })));
+    assert!(r.active_goal().unwrap().is_none());
+}
+
+#[test]
 fn provider_debug_redacts_api_key() {
     // A derived Debug would print key material into any {:?} path.
     let oa = ProviderAdapter::OpenAiCompat {
