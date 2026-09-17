@@ -251,10 +251,12 @@ fn EscapeModal(note: Signal<String>) -> Element {
     let mut confirming = use_signal(|| false);
 
     let bail = move |reason: &str| {
-        let ctx = ctx;
+        if !*ctx.escape_open.peek() || !begin_directive_action(&ctx) {
+            return;
+        }
         let note = note.read().clone();
         let reason = reason.to_string();
-        spawn(async move {
+        dioxus::core::spawn_forever(async move {
             #[derive(serde::Serialize)]
             struct BailReq {
                 reason: String,
@@ -275,15 +277,18 @@ fn EscapeModal(note: Signal<String>) -> Element {
                     let mut escape = ctx.escape_open;
                     *escape.write() = false;
                     flash(&ctx, "VELOCITY ADJUSTED — NO GUILT");
-                    let mut d = ctx.directive;
-                    match invoke::<DirectiveView>("current_directive", ()).await {
-                        Ok(dv) => *d.write() = Some(dv),
-                        Err(_) => *d.write() = None,
+                    match invoke::<Option<DirectiveView>>("current_directive", ()).await {
+                        Ok(dv) => set_directive(&ctx, dv),
+                        Err(e) => {
+                            set_directive(&ctx, None);
+                            flash(&ctx, &format!("ERR {e}"));
+                        }
                     }
                 }
                 Err(e) => flash(&ctx, &format!("ERR {e}")),
             }
-            confirming.set(false);
+            let mut busy = ctx.directive_busy;
+            busy.set(false);
         });
     };
 
