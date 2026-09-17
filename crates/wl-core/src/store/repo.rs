@@ -437,14 +437,19 @@ impl Repos {
     }
 
     pub fn next_runnable_directive(&self, date: &str) -> Result<Option<Directive>, StoreError> {
-        self.conn.lock().unwrap().query_row(
-            "SELECT id, milestone_id, title, execution_context, estimated_minutes,
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id, milestone_id, title, execution_context, estimated_minutes,
                     progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
              FROM directives WHERE state = 'queued' AND scheduled_for_date <= ?1
              ORDER BY scheduled_for_date, hlc_timestamp, id LIMIT 1",
-            [date],
-            directive_row,
-        ).optional().map_err(StoreError::Sqlite)
+                [date],
+                directive_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)
     }
 
     pub fn set_directive_state(
@@ -465,14 +470,21 @@ impl Repos {
         }
         if state == DirectiveState::Active {
             loop {
-                let other: Option<String> = tx.query_row(
-                    "SELECT id FROM directives WHERE state = 'active' AND id != ?1 LIMIT 1",
-                    [id],
-                    |r| r.get(0),
-                ).optional()?;
+                let other: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM directives WHERE state = 'active' AND id != ?1 LIMIT 1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
                 let Some(other) = other else { break };
-                Self::write_directive_state(&tx, &other, DirectiveState::Queued,
-                    self.hlc.now(self.device), identity)?;
+                Self::write_directive_state(
+                    &tx,
+                    &other,
+                    DirectiveState::Queued,
+                    self.hlc.now(self.device),
+                    identity,
+                )?;
             }
         }
         Self::write_directive_state(&tx, id, state, self.hlc.now(self.device), identity)?;
@@ -513,7 +525,13 @@ impl Repos {
                 "INSERT INTO crdt_outbox (operation_id, hlc_timestamp, table_name, record_id,
                     encrypted_payload, created_at_epoch_ms, pushed)
                  VALUES (?1, ?2, 'directives', ?3, ?4, ?5, 0)",
-                params![new_id("op"), ts.to_string(), id, sealed.to_bytes(), ts.epoch_ms() as i64],
+                params![
+                    new_id("op"),
+                    ts.to_string(),
+                    id,
+                    sealed.to_bytes(),
+                    ts.epoch_ms() as i64
+                ],
             )?;
         }
         Ok(())
@@ -559,7 +577,9 @@ impl Repos {
     ) -> Result<(), StoreError> {
         let phases = self.phases_for_directive(id)?;
         if estimated_minutes <= 0 || estimated_minutes < phases.len() as i64 {
-            return Err(StoreError::Invalid("estimate must allow one minute per phase".into()));
+            return Err(StoreError::Invalid(
+                "estimate must allow one minute per phase".into(),
+            ));
         }
         if phases.iter().any(|p| p.minutes <= 0) {
             return Err(StoreError::Invalid("phase minutes must be positive".into()));
@@ -582,7 +602,8 @@ impl Repos {
                     remaining
                 } else {
                     let rounded = (i128::from(p.minutes) * i128::from(estimated_minutes)
-                        + old_total / 2) / old_total;
+                        + old_total / 2)
+                        / old_total;
                     (rounded as i64).clamp(1, remaining - reserved)
                 };
                 remaining -= scaled;
@@ -808,7 +829,9 @@ impl Repos {
     /// for Tier 2 / recalibration).
     pub fn recent_check_ins(&self, days: i64) -> Result<Vec<CheckIn>, StoreError> {
         if !(0..=1024).contains(&days) {
-            return Err(StoreError::Invalid("check-in limit must be in 0–1024".into()));
+            return Err(StoreError::Invalid(
+                "check-in limit must be in 0–1024".into(),
+            ));
         }
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

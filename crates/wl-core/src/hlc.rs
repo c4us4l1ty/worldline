@@ -124,10 +124,7 @@ impl Hlc {
     fn increment(physical: u64, counter: u16) -> (u64, u16) {
         match counter.checked_add(1) {
             Some(counter) => (physical, counter),
-            None => (
-                physical.checked_add(1).expect("HLC timestamp exhausted"),
-                0,
-            ),
+            None => (physical.checked_add(1).expect("HLC timestamp exhausted"), 0),
         }
     }
 
@@ -466,7 +463,10 @@ mod tests {
                 device: 9,
             };
             let merged = hlc.observe(&remote, 1);
-            assert_eq!((merged.physical, merged.counter), (u64::MAX, expected_counter));
+            assert_eq!(
+                (merged.physical, merged.counter),
+                (u64::MAX, expected_counter)
+            );
         }
     }
 

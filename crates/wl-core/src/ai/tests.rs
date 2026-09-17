@@ -250,9 +250,12 @@ fn validation_bounds_and_persistence_preflight() {
     assert!(r.active_goal().unwrap().is_none());
 
     let goal = r.create_goal("Goal", None, None, None).unwrap();
-    r.create_milestone(&goal.id, "Milestone", None, 0, None).unwrap();
+    r.create_milestone(&goal.id, "Milestone", None, 0, None)
+        .unwrap();
     let mut brief = BriefingResult {
-        directives: parse_plan(PLAN_JSON).unwrap().milestones[0].directives.clone(),
+        directives: parse_plan(PLAN_JSON).unwrap().milestones[0]
+            .directives
+            .clone(),
     };
     brief.directives[1].title.clear();
     assert!(persist_briefing(&r, &brief, "2026-09-13", None).is_err());
@@ -262,18 +265,42 @@ fn validation_bounds_and_persistence_preflight() {
 #[test]
 fn response_size_checked_before_parsing_and_persistence() {
     let raw = " ".repeat(256 * 1024 + 1);
-    assert!(matches!(parse_plan(&raw), Err(DispatchError::Invalid { field: "response", .. })));
-    assert!(matches!(parse_briefing(&raw), Err(DispatchError::Invalid { field: "response", .. })));
+    assert!(matches!(
+        parse_plan(&raw),
+        Err(DispatchError::Invalid {
+            field: "response",
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_briefing(&raw),
+        Err(DispatchError::Invalid {
+            field: "response",
+            ..
+        })
+    ));
     let r = repos();
     let provider = ProviderAdapter::Anthropic {
         api_key: Zeroizing::new("test".into()),
         model: "test".into(),
     };
     let result = AiDispatcher::master_plan(
-        &provider, "Goal", None, None, "",
-        |_, _, _| Ok(raw.clone()), &r, None,
+        &provider,
+        "Goal",
+        None,
+        None,
+        "",
+        |_, _, _| Ok(raw.clone()),
+        &r,
+        None,
     );
-    assert!(matches!(result, Err(DispatchError::Invalid { field: "response", .. })));
+    assert!(matches!(
+        result,
+        Err(DispatchError::Invalid {
+            field: "response",
+            ..
+        })
+    ));
     assert!(r.active_goal().unwrap().is_none());
 }
 

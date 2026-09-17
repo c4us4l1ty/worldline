@@ -419,7 +419,10 @@ mod tests {
         assert_eq!(date_plus_days(&max, 1), None);
         assert_eq!(date_plus_days("2026-09-13", i64::MAX), None);
         assert_eq!(date_plus_days("2026-09-13", i64::MIN), None);
-        assert_eq!(date_plus_days("2024-03-01", -1).as_deref(), Some("2024-02-29"));
+        assert_eq!(
+            date_plus_days("2024-03-01", -1).as_deref(),
+            Some("2024-02-29")
+        );
         assert_eq!(date_plus_days("garbage", 1), None);
     }
 

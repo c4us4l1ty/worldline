@@ -306,7 +306,10 @@ fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
     }
     for m in &p.milestones {
         validate_text("milestone.title", &m.title)?;
-        validate_text("milestone.description", m.description.as_deref().unwrap_or(""))?;
+        validate_text(
+            "milestone.description",
+            m.description.as_deref().unwrap_or(""),
+        )?;
         if m.directives.len() > MAX_DIRECTIVES_PER_MILESTONE {
             return Err(DispatchError::Invalid {
                 field: "milestone.directives",
@@ -328,7 +331,10 @@ fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
 
 fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
     validate_text("directive.title", &d.title)?;
-    validate_text("execution_context", d.execution_context.as_deref().unwrap_or(""))?;
+    validate_text(
+        "execution_context",
+        d.execution_context.as_deref().unwrap_or(""),
+    )?;
     if d.title.trim().is_empty() {
         return Err(DispatchError::MissingField("directive.title"));
     }

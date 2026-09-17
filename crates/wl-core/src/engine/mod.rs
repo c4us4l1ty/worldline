@@ -272,11 +272,18 @@ impl<'a> Engine<'a> {
     /// Estimated minutes of the current execution unit.
     fn current_phase_minutes(&self, d: &Directive) -> Result<i64, EngineError> {
         if d.uses_progressive_activation() {
-            let minutes = self.repos.conn.lock().unwrap().query_row(
-                "SELECT minutes FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
-                rusqlite::params![d.id, d.progressive_step],
-                |r| r.get::<_, i64>(0),
-            ).optional().map_err(StoreError::Sqlite)?;
+            let minutes = self
+                .repos
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT minutes FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
+                    rusqlite::params![d.id, d.progressive_step],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(StoreError::Sqlite)?;
             minutes.ok_or_else(|| StoreError::Invalid("current phase missing".into()).into())
         } else {
             Ok(d.estimated_minutes)
