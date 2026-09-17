@@ -176,6 +176,37 @@ pub enum Screen {
     Settings,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimerSession {
+    directive_id: String,
+    phase: Option<(i64, i64)>,
+    pub started_ms: f64,
+}
+
+impl TimerSession {
+    fn update(previous: Option<Self>, directive: Option<&DirectiveView>, now_ms: f64) -> Option<Self> {
+        let directive = directive?;
+        if let Some(session) = previous {
+            if session.directive_id == directive.directive_id && session.phase == directive.phase {
+                return Some(session);
+            }
+        }
+        Some(Self {
+            directive_id: directive.directive_id.clone(),
+            phase: directive.phase,
+            started_ms: now_ms,
+        })
+    }
+}
+
+pub fn active_directive(directive: Option<DirectiveView>) -> Option<DirectiveView> {
+    directive.filter(|d| d.state == "active" && !d.directive_id.is_empty())
+}
+
+pub fn elapsed_secs(started_ms: f64, now_ms: f64) -> u64 {
+    ((now_ms - started_ms).max(0.0) / 1000.0) as u64
+}
+
 #[derive(Clone, Copy)]
 pub struct AppCtx {
     pub screen: Signal<Screen>,
@@ -183,7 +214,9 @@ pub struct AppCtx {
     pub velocity: Signal<VelocityView>,
     pub settings: Signal<AppSettingsView>,
     pub toast: Signal<Option<String>>,
-    pub timer_secs: Signal<u64>,
+    pub timer_session: Signal<Option<TimerSession>>,
+    pub directive_busy: Signal<bool>,
+    pub toast_task: Signal<Option<Task>>,
     pub escape_open: Signal<bool>,
     pub telemetry_open: Signal<bool>,
     pub sync_status: Signal<String>,
@@ -196,7 +229,9 @@ fn App() -> Element {
         velocity: Signal::new(VelocityView::default()),
         settings: Signal::new(AppSettingsView::default()),
         toast: Signal::new(None),
-        timer_secs: Signal::new(0),
+        timer_session: Signal::new(None),
+        directive_busy: Signal::new(false),
+        toast_task: Signal::new(None),
         escape_open: Signal::new(false),
         telemetry_open: Signal::new(false),
         sync_status: Signal::new("LOCAL".to_string()),
@@ -248,22 +283,6 @@ fn App() -> Element {
                 };
             }
             *settings_sig.write() = settings;
-        });
-    });
-
-    // HUD tick (timer) driver — gated on the Canvas screen so idle
-    // onboarding/settings/dormant screens cost zero wake-ups (near-0-CPU).
-    use_effect(move || {
-        let mut timer = ctx.timer_secs;
-        let screen = ctx.screen;
-        spawn(async move {
-            loop {
-                gloo_timers::future::TimeoutFuture::new(1000).await;
-                if matches!(*screen.read(), Screen::Canvas) {
-                    let next = timer.read().saturating_add(1);
-                    timer.set(next);
-                }
-            }
         });
     });
 

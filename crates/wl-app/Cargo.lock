@@ -5520,7 +5520,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 
@@ -6684,11 +6683,10 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
- "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wl-core",
  "wl-protocol",
 ]
 

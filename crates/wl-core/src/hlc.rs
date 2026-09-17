@@ -85,13 +85,9 @@ impl Hlc {
         if wall > inner.last_wall_nanos {
             inner.last_wall_nanos = wall;
             inner.counter = 0;
-        } else if inner.counter == u16::MAX {
-            // Same-instant counter exhausted: step physical forward so
-            // the new timestamp still exceeds every predecessor.
-            inner.last_wall_nanos = inner.last_wall_nanos.saturating_add(1).max(wall);
-            inner.counter = 0;
         } else {
-            inner.counter += 1;
+            (inner.last_wall_nanos, inner.counter) =
+                Self::increment(inner.last_wall_nanos, inner.counter);
         }
         HlcTimestamp {
             physical: inner.last_wall_nanos,
@@ -107,20 +103,31 @@ impl Hlc {
     pub fn observe(&self, remote: &HlcTimestamp, device: u16) -> HlcTimestamp {
         let mut inner = self.inner.lock().expect("HLC mutex poisoned");
         let wall = self.wall_nanos();
-        let pt = wall.max(remote.physical);
-        if pt > inner.last_wall_nanos {
-            inner.last_wall_nanos = pt;
-            inner.counter = 0;
-        } else if inner.counter == u16::MAX {
-            inner.last_wall_nanos = inner.last_wall_nanos.saturating_add(1).max(pt);
-            inner.counter = 0;
+        let pt = wall.max(inner.last_wall_nanos).max(remote.physical);
+        let next = if pt == inner.last_wall_nanos && pt == remote.physical {
+            Self::increment(pt, inner.counter.max(remote.counter))
+        } else if pt == inner.last_wall_nanos {
+            Self::increment(pt, inner.counter)
+        } else if pt == remote.physical {
+            Self::increment(pt, remote.counter)
         } else {
-            inner.counter += 1;
-        }
+            (pt, 0)
+        };
+        (inner.last_wall_nanos, inner.counter) = next;
         HlcTimestamp {
             physical: inner.last_wall_nanos,
             counter: inner.counter,
             device,
+        }
+    }
+
+    fn increment(physical: u64, counter: u16) -> (u64, u16) {
+        match counter.checked_add(1) {
+            Some(counter) => (physical, counter),
+            None => (
+                physical.checked_add(1).expect("HLC timestamp exhausted"),
+                0,
+            ),
         }
     }
 
@@ -382,5 +389,125 @@ mod tests {
         assert_eq!(a.cmp(&b), Ordering::Less);
         assert!(h1.observe(&a, 1) > a);
         assert!(h2.observe(&b, 2) > b);
+    }
+
+    #[test]
+    fn observe_remote_future_advances_remote_counter() {
+        let hlc = Hlc::new();
+        let remote = HlcTimestamp {
+            physical: u64::MAX - 100,
+            counter: 7,
+            device: 9,
+        };
+        let merged = hlc.observe(&remote, 1);
+        assert_eq!((merged.physical, merged.counter), (remote.physical, 8));
+        assert!(merged > remote);
+        assert_eq!(hlc.head(), (remote.physical, 8));
+    }
+
+    #[test]
+    fn observe_equal_physical_advances_larger_counter() {
+        for (local_counter, remote_counter) in [(2, 7), (7, 2), (7, 7)] {
+            let hlc = Hlc::new();
+            let physical = u64::MAX - 100;
+            hlc.restore(physical, local_counter);
+            let remote = HlcTimestamp {
+                physical,
+                counter: remote_counter,
+                device: 9,
+            };
+            let merged = hlc.observe(&remote, 1);
+            assert_eq!((merged.physical, merged.counter), (physical, 8));
+            assert!(merged > remote);
+        }
+    }
+
+    #[test]
+    fn backward_wall_clock_advances_local_counter() {
+        let hlc = Hlc::new();
+        hlc.set_drift_nanos(u64::MAX);
+        let previous = hlc.now(1);
+        hlc.set_drift_nanos(0);
+        let remote = HlcTimestamp {
+            physical: previous.physical - 1,
+            counter: u16::MAX,
+            device: 9,
+        };
+        let merged = hlc.observe(&remote, 1);
+        assert_eq!((merged.physical, merged.counter), (previous.physical, 1));
+        let next = hlc.now(1);
+        assert_eq!((next.physical, next.counter), (previous.physical, 2));
+        assert!(merged > previous);
+        assert!(merged > remote);
+        assert!(next > merged);
+    }
+
+    #[test]
+    fn observe_wall_winner_resets_counter_and_ties_use_matching_head() {
+        for (local_physical, remote_physical, expected_counter) in [
+            (1, 2, 0),
+            (u64::MAX, 2, 4),
+            (1, u64::MAX, 8),
+            (u64::MAX, u64::MAX, 8),
+        ] {
+            let hlc = Hlc::new();
+            hlc.set_drift_nanos(u64::MAX);
+            hlc.restore(local_physical, 3);
+            let remote = HlcTimestamp {
+                physical: remote_physical,
+                counter: 7,
+                device: 9,
+            };
+            let merged = hlc.observe(&remote, 1);
+            assert_eq!((merged.physical, merged.counter), (u64::MAX, expected_counter));
+        }
+    }
+
+    #[test]
+    fn counter_carry_advances_physical() {
+        let physical = u64::MAX - 100;
+        for (local_physical, local_counter, remote_counter) in [
+            (physical - 1, 2, u16::MAX),
+            (physical, 2, u16::MAX),
+            (physical, u16::MAX, 2),
+        ] {
+            let hlc = Hlc::new();
+            hlc.restore(local_physical, local_counter);
+            let remote = HlcTimestamp {
+                physical,
+                counter: remote_counter,
+                device: 9,
+            };
+            let merged = hlc.observe(&remote, 1);
+            assert_eq!((merged.physical, merged.counter), (physical + 1, 0));
+            assert!(merged > remote);
+            assert!(hlc.now(1) > merged);
+        }
+        let hlc = Hlc::new();
+        hlc.restore(physical, u16::MAX);
+        let next = hlc.now(1);
+        assert_eq!((next.physical, next.counter), (physical + 1, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "HLC timestamp exhausted")]
+    fn now_fails_explicitly_at_representational_exhaustion() {
+        let hlc = Hlc::new();
+        hlc.restore(u64::MAX, u16::MAX);
+        hlc.now(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "HLC timestamp exhausted")]
+    fn observe_fails_explicitly_at_representational_exhaustion() {
+        let hlc = Hlc::new();
+        hlc.observe(
+            &HlcTimestamp {
+                physical: u64::MAX,
+                counter: u16::MAX,
+                device: 9,
+            },
+            1,
+        );
     }
 }

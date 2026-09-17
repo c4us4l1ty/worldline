@@ -359,11 +359,8 @@ pub fn today_local() -> String {
 /// Adds `days` to a YYYY-MM-DD date string.
 pub fn date_plus_days(date: &str, days: i64) -> Option<String> {
     let d = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    Some(
-        (d + chrono::Duration::days(days))
-            .format("%Y-%m-%d")
-            .to_string(),
-    )
+    d.checked_add_signed(chrono::Duration::try_days(days)?)
+        .map(|nd| nd.format("%Y-%m-%d").to_string())
 }
 
 /// Days between two YYYY-MM-DD dates (a - b).
@@ -409,6 +406,21 @@ mod tests {
         assert_eq!(days_between("2026-09-13", "2026-09-10").unwrap(), 3);
         assert!(days_between("2026-09-13", "garbage").is_none());
         assert!(today_local().len() == 10);
+    }
+
+    #[test]
+    fn date_plus_days_extremes_return_none_not_panic() {
+        assert_eq!(date_plus_days("2026-09-13", 0).unwrap(), "2026-09-13");
+        let min = chrono::NaiveDate::MIN.format("%Y-%m-%d").to_string();
+        let max = chrono::NaiveDate::MAX.format("%Y-%m-%d").to_string();
+        assert_eq!(date_plus_days(&min, 0), Some(min.clone()));
+        assert_eq!(date_plus_days(&max, 0), Some(max.clone()));
+        assert_eq!(date_plus_days(&min, -1), None);
+        assert_eq!(date_plus_days(&max, 1), None);
+        assert_eq!(date_plus_days("2026-09-13", i64::MAX), None);
+        assert_eq!(date_plus_days("2026-09-13", i64::MIN), None);
+        assert_eq!(date_plus_days("2024-03-01", -1).as_deref(), Some("2024-02-29"));
+        assert_eq!(date_plus_days("garbage", 1), None);
     }
 
     #[test]

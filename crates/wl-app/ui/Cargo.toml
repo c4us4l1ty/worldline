@@ -19,4 +19,4 @@ js-sys = "0.3"
 
 [features]
 default = ["web"]
-web = []
+web = ["dioxus/web"]

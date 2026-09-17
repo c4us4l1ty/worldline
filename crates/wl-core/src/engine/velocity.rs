@@ -34,7 +34,12 @@ pub fn compute(repos: &Repos, today: &str) -> Result<Option<Velocity>, EngineErr
     let milestones = repos.milestones_for_goal(&goal.id)?;
     let remaining = milestones
         .iter()
-        .filter(|m| m.status == crate::domain::MilestoneStatus::Pending)
+        .filter(|m| {
+            matches!(
+                m.status,
+                crate::domain::MilestoneStatus::Pending | crate::domain::MilestoneStatus::Active
+            )
+        })
         .count() as i64;
 
     let days_remaining = goal
@@ -171,5 +176,37 @@ mod tests {
         let v = compute(&r, "2026-09-13").unwrap().unwrap();
         assert_eq!(v.completion_ratio, 0.5);
         assert!((v.estimate_adjustment - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn active_milestones_count_as_remaining() {
+        let r = fresh();
+        let g = r
+            .create_goal("Ship", None, Some("2026-09-23"), None)
+            .unwrap();
+        let m1 = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
+        r.create_milestone(&g.id, "M2", None, 1, None).unwrap();
+        r.create_milestone(&g.id, "M3", None, 2, None).unwrap();
+        r.set_milestone_status(&m1.id, MilestoneStatus::Active, None)
+            .unwrap();
+        let next = r.next_pending_milestone(&g.id).unwrap().unwrap();
+        r.set_milestone_status(&next.id, MilestoneStatus::Completed, None)
+            .unwrap();
+        let v = compute(&r, "2026-09-13").unwrap().unwrap();
+        assert_eq!(v.milestones_remaining, 2);
+    }
+
+    #[test]
+    fn demoted_milestones_do_not_count_as_remaining() {
+        let r = fresh();
+        let g = r
+            .create_goal("Ship", None, Some("2026-09-23"), None)
+            .unwrap();
+        let m1 = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
+        r.create_milestone(&g.id, "M2", None, 1, None).unwrap();
+        r.set_milestone_status(&m1.id, MilestoneStatus::Demoted, None)
+            .unwrap();
+        let v = compute(&r, "2026-09-13").unwrap().unwrap();
+        assert_eq!(v.milestones_remaining, 1);
     }
 }

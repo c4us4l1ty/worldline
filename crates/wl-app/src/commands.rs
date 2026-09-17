@@ -628,7 +628,16 @@ struct ReqwestTransport {
 /// cost — construction is lazy on first sync).
 fn shared_client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new).clone()
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("HTTP client")
+        })
+        .clone()
 }
 
 impl wl_sync::sync::Transport for ReqwestTransport {
@@ -786,6 +795,9 @@ pub struct SyncStatsView {
 /// Reads the provider key from the vault (keys never cross the
 /// command boundary from the UI anymore — Item 2).
 fn vault_api_key(state: &AppState, provider: &str) -> ShellResult<Zeroizing<String>> {
+    if !matches!(provider, "anthropic" | "openai" | "openrouter" | "gemini-compat") {
+        return Err(ShellError::Invalid("unknown AI provider".into()));
+    }
     state
         .vault
         .get_api_key(provider)
@@ -803,32 +815,37 @@ pub(crate) async fn master_plan(
     target_date: Option<String>,
     context: String,
 ) -> ShellResult<String> {
-    let api_key = vault_api_key(&state, &provider)?;
-    // Move the Zeroizing wrapper straight into the adapter: no
-    // intermediate plain-String clone (the old `.to_string()` left a
-    // non-zeroized copy on the heap next to the wiped original).
-    let adapter = match provider.as_str() {
-        "anthropic" => ProviderAdapter::Anthropic { api_key, model },
-        _ => ProviderAdapter::OpenAiCompat {
-            base_url: base_for(&provider),
-            api_key,
-            model,
-        },
-    };
-    let (goal_id, _plan) = state.with_identity_opt(|identity| {
-        AiDispatcher::master_plan(
-            &adapter,
-            &goal_title,
-            goal_description.as_deref(),
-            target_date.as_deref(),
-            &context,
-            http_execute,
-            &state.repos,
-            identity,
-        )
-        .map_err(ShellError::from)
-    })?;
-    Ok(goal_id)
+    let shared: std::sync::Arc<AppState> = (*state).clone();
+    tokio::task::spawn_blocking(move || {
+        let api_key = vault_api_key(&shared, &provider)?;
+        // Move the Zeroizing wrapper straight into the adapter: no
+        // intermediate plain-String clone (the old `.to_string()` left a
+        // non-zeroized copy on the heap next to the wiped original).
+        let adapter = match provider.as_str() {
+            "anthropic" => ProviderAdapter::Anthropic { api_key, model },
+            _ => ProviderAdapter::OpenAiCompat {
+                base_url: base_for(&provider),
+                api_key,
+                model,
+            },
+        };
+        let (goal_id, _plan) = shared.with_identity_opt(|identity| {
+            AiDispatcher::master_plan(
+                &adapter,
+                &goal_title,
+                goal_description.as_deref(),
+                target_date.as_deref(),
+                &context,
+                http_execute,
+                &shared.repos,
+                identity,
+            )
+            .map_err(ShellError::from)
+        })?;
+        Ok(goal_id)
+    })
+    .await
+    .map_err(|e| ShellError::Io(format!("master plan task: {e}")))?
 }
 
 fn base_for(provider: &str) -> String {
@@ -853,8 +870,22 @@ fn http_execute(
         for (k, v) in headers {
             req = req.header(k, v);
         }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
-        resp.text().await.map_err(|e| e.to_string())
+        let mut resp = req.send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+        if resp.content_length().is_some_and(|len| len > MAX_RESPONSE_BYTES as u64) {
+            return Err("AI response body too large".into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+            if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
+                return Err("AI response body too large".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        String::from_utf8(bytes).map_err(|e| e.to_string())
     })
 }
 
@@ -865,31 +896,36 @@ pub(crate) async fn morning_briefing(
     model: String,
     constraints: String,
 ) -> ShellResult<Vec<String>> {
-    let api_key = vault_api_key(&state, &provider)?;
-    // Same move-not-clone discipline as master_plan (see there).
-    let adapter = match provider.as_str() {
-        "anthropic" => ProviderAdapter::Anthropic { api_key, model },
-        _ => ProviderAdapter::OpenAiCompat {
-            base_url: base_for(&provider),
-            api_key,
-            model,
-        },
-    };
-    let today = today_local();
-    let velocity_json = serde_json::to_string(&velocity_inner(&state.repos)?).unwrap_or_default();
-    let brief = state.with_identity_opt(|identity| {
-        AiDispatcher::morning_briefing(
-            &adapter,
-            &today,
-            &constraints,
-            &velocity_json,
-            http_execute,
-            &state.repos,
-            identity,
-        )
-        .map_err(ShellError::from)
-    })?;
-    Ok(brief.directives.into_iter().map(|d| d.title).collect())
+    let shared: std::sync::Arc<AppState> = (*state).clone();
+    tokio::task::spawn_blocking(move || {
+        let api_key = vault_api_key(&shared, &provider)?;
+        // Same move-not-clone discipline as master_plan (see there).
+        let adapter = match provider.as_str() {
+            "anthropic" => ProviderAdapter::Anthropic { api_key, model },
+            _ => ProviderAdapter::OpenAiCompat {
+                base_url: base_for(&provider),
+                api_key,
+                model,
+            },
+        };
+        let today = today_local();
+        let velocity_json = serde_json::to_string(&velocity_inner(&shared.repos)?).unwrap_or_default();
+        let brief = shared.with_identity_opt(|identity| {
+            AiDispatcher::morning_briefing(
+                &adapter,
+                &today,
+                &constraints,
+                &velocity_json,
+                http_execute,
+                &shared.repos,
+                identity,
+            )
+            .map_err(ShellError::from)
+        })?;
+        Ok(brief.directives.into_iter().map(|d| d.title).collect())
+    })
+    .await
+    .map_err(|e| ShellError::Io(format!("morning briefing task: {e}")))?
 }
 
 // ---------------------------------------------------------------------------

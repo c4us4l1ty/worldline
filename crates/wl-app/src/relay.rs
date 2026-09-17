@@ -25,7 +25,12 @@ async fn handshake_async(
     base: &str,
     identity: &Identity,
 ) -> ShellResult<wl_protocol::SessionToken> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| ShellError::Relay(format!("HTTP client: {e}")))?;
     let public_key = identity.public_key_hex();
 
     // 1. Unguessable challenge (also registers the account server-side).
@@ -128,6 +133,7 @@ mod tests {
                 .header("authorization", format!("Bearer {}", session.token))
                 .json(&wl_protocol::PullRequest {
                     since_hlc: String::new(),
+                    since_op_id: String::new(),
                     limit: 10,
                 })
                 .send()
