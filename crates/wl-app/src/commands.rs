@@ -647,11 +647,10 @@ impl wl_sync::sync::Transport for ReqwestTransport {
                 .await
                 .map_err(|e| e.to_string())?;
             let status = resp.status();
-            let text = resp.text().await.map_err(|e| e.to_string())?;
             if !status.is_success() {
-                return Err(format!("HTTP {status}: {text}"));
+                return Err(format!("HTTP {status}"));
             }
-            Ok(text)
+            relay::read_body(resp, 16 * 1024 * 1024).await
         })
     }
 }
@@ -796,7 +795,10 @@ pub struct SyncStatsView {
 /// Reads the provider key from the vault (keys never cross the
 /// command boundary from the UI anymore — Item 2).
 fn vault_api_key(state: &AppState, provider: &str) -> ShellResult<Zeroizing<String>> {
-    if !matches!(provider, "anthropic" | "openai" | "openrouter" | "gemini-compat") {
+    if !matches!(
+        provider,
+        "anthropic" | "openai" | "openrouter" | "gemini-compat"
+    ) {
         return Err(ShellError::Invalid("unknown AI provider".into()));
     }
     state
@@ -913,7 +915,8 @@ pub(crate) async fn morning_briefing(
             },
         };
         let today = today_local();
-        let velocity_json = serde_json::to_string(&velocity_inner(&shared.repos)?).unwrap_or_default();
+        let velocity_json =
+            serde_json::to_string(&velocity_inner(&shared.repos)?).unwrap_or_default();
         let brief = shared.with_identity_opt(|identity| {
             AiDispatcher::morning_briefing(
                 &adapter,
@@ -952,3 +955,38 @@ pub(crate) async fn toggle_window_visibility(app: tauri::AppHandle) -> ShellResu
 }
 
 use tauri::Manager;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wl_sync::sync::Transport;
+
+    #[tokio::test]
+    async fn transport_works_across_successive_runtime_lifetimes() {
+        let app = axum::Router::new().route(
+            "/sync/pull",
+            axum::routing::post(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::task::spawn_blocking(move || {
+            let transport = ReqwestTransport {
+                base,
+                token: "test-session".into(),
+            };
+            for _ in 0..3 {
+                let response = transport
+                    .post("/sync/pull", &serde_json::json!({}))
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&response).unwrap()["ok"],
+                    true
+                );
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
+    }
+}

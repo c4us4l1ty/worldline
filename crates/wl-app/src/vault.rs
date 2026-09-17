@@ -194,9 +194,8 @@ fn vault_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => {
             restrict_permissions(&path)?;
-            let bytes = Zeroizing::new(
-                std::fs::read(&path).map_err(|e| VaultError::Io(e.to_string()))?,
-            );
+            let bytes =
+                Zeroizing::new(std::fs::read(&path).map_err(|e| VaultError::Io(e.to_string()))?);
             if bytes.len() != 32 {
                 return Err(VaultError::Stronghold(
                     "vault key file has unexpected length".into(),
@@ -225,23 +224,6 @@ fn restrict_permissions(path: &Path) -> Result<(), VaultError> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| VaultError::Io(e.to_string()))
 }
-
-/// Repairs the mode of a pre-existing secret file (vault key created
-/// before this hardening, or under a lax umask). Best-effort: failure
-/// only widens the window that `restrict_permissions` + `write_private`
-/// already narrow for new files.
-#[cfg(unix)]
-fn tighten_existing(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.permissions().mode() & 0o077 != 0 {
-            let _ = restrict_permissions(path);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn tighten_existing(_path: &Path) {}
 
 #[cfg(unix)]
 fn private_directory(path: &Path) -> Result<(), VaultError> {
@@ -408,6 +390,48 @@ mod tests {
             }
             std::fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn missing_key_does_not_replace_existing_snapshot() {
+        let dir = tmpdir();
+        {
+            let vault = Vault::open(&dir).unwrap();
+            vault.save_api_key("openai", "test-key").unwrap();
+        }
+        let snapshot = std::fs::read(dir.join("vault.hold")).unwrap();
+        std::fs::remove_file(dir.join(".vault-key")).unwrap();
+        assert!(Vault::open(&dir).is_err());
+        assert!(!dir.join(".vault-key").exists());
+        assert_eq!(std::fs::read(dir.join("vault.hold")).unwrap(), snapshot);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_key_is_retained() {
+        let dir = tmpdir();
+        let path = dir.join(".vault-key");
+        std::fs::write(&path, b"incomplete-key").unwrap();
+        assert!(vault_key(&dir).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"incomplete-key");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_key_permissions_are_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tmpdir();
+        let key = vault_key(&dir).unwrap();
+        let path = dir.join(".vault-key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(*vault_key(&dir).unwrap(), *key);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

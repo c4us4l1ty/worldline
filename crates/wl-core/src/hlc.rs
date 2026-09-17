@@ -161,21 +161,28 @@ impl Default for Hlc {
 impl HlcTimestamp {
     /// Parses the canonical text encoding `physical.counter.device`.
     pub fn parse(s: &str) -> Result<Self, HlcError> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 3 {
-            return Err(HlcError::Parse(format!(
-                "expected pt.ctr.device, got {s:?}"
-            )));
+        if s.len() > 32 {
+            return Err(HlcError::Parse("timestamp exceeds 32 bytes".into()));
         }
-        let physical: u64 = parts[0]
+        let mut parts = s.split('.');
+        let mut component = || {
+            parts
+                .next()
+                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                .ok_or_else(|| HlcError::Parse("expected pt.ctr.device digits".into()))
+        };
+        let physical: u64 = component()?
             .parse()
-            .map_err(|_| HlcError::Parse(format!("bad physical component in {s:?}")))?;
-        let counter: u16 = parts[1]
+            .map_err(|_| HlcError::Parse("bad physical component".into()))?;
+        let counter: u16 = component()?
             .parse()
-            .map_err(|_| HlcError::Parse(format!("bad counter component in {s:?}")))?;
-        let device: u16 = parts[2]
+            .map_err(|_| HlcError::Parse("bad counter component".into()))?;
+        let device: u16 = component()?
             .parse()
-            .map_err(|_| HlcError::Parse(format!("bad device component in {s:?}")))?;
+            .map_err(|_| HlcError::Parse("bad device component".into()))?;
+        if parts.next().is_some() {
+            return Err(HlcError::Parse("expected three components".into()));
+        }
         Ok(Self {
             physical,
             counter,

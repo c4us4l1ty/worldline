@@ -544,6 +544,7 @@ impl AiDispatcher {
             &super::prompt::tier1_user(goal_title, goal_desc, target_date, context),
         );
         let raw = execute(&url, &headers, &body).map_err(DispatchError::BadJson)?;
+        validate_response_size(&raw)?;
         let resp: serde_json::Value =
             serde_json::from_str(&raw).map_err(|e| DispatchError::BadJson(e.to_string()))?;
         let text = provider
@@ -574,6 +575,7 @@ impl AiDispatcher {
         let user_prompt = super::prompt::tier2_user(repos, today, constraints, velocity_json)?;
         let (url, headers, body) = provider.request(&super::prompt::tier2_system(), &user_prompt);
         let raw = execute(&url, &headers, &body).map_err(DispatchError::BadJson)?;
+        validate_response_size(&raw)?;
         let resp: serde_json::Value =
             serde_json::from_str(&raw).map_err(|e| DispatchError::BadJson(e.to_string()))?;
         let text = provider

@@ -98,8 +98,14 @@ mod tests {
             session.token_for("http://127.0.0.1:8080", "account-a"),
             Some("test-session")
         );
-        assert_eq!(session.token_for("http://127.0.0.1:8081", "account-a"), None);
-        assert_eq!(session.token_for("http://127.0.0.1:8080", "account-b"), None);
+        assert_eq!(
+            session.token_for("http://127.0.0.1:8081", "account-a"),
+            None
+        );
+        assert_eq!(
+            session.token_for("http://127.0.0.1:8080", "account-b"),
+            None
+        );
     }
 }
 

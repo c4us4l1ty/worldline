@@ -81,15 +81,33 @@ async fn post_json<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|e| ShellError::Relay(format!("request failed: {e}")))?;
     let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| ShellError::Relay(format!("read body: {e}")))?;
     if !status.is_success() {
-        // Same envelope as ReqwestTransport so 401 detection is uniform.
-        return Err(ShellError::Relay(format!("HTTP {status}: {text}")));
+        return Err(ShellError::Relay(format!("HTTP {status}")));
     }
+    let text = read_body(resp, 64 * 1024)
+        .await
+        .map_err(ShellError::Relay)?;
     serde_json::from_str(&text).map_err(|e| ShellError::Relay(format!("decode: {e}")))
+}
+
+pub(crate) async fn read_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > limit as u64)
+    {
+        return Err("response body too large".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if chunk.len() > limit - bytes.len() {
+            return Err("response body too large".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| "response body is not valid UTF-8".into())
 }
 
 #[cfg(test)]
@@ -143,6 +161,26 @@ mod tests {
             resp.json().await.unwrap()
         };
         assert_eq!(authed["exhausted"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn response_body_limit_accepts_boundary_and_rejects_excess() {
+        let app = axum::Router::new().route(
+            "/body",
+            axum::routing::get(|| async { "ordinary response" }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/body", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(read_body(response, 17).await.unwrap(), "ordinary response");
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(
+            read_body(response, 16).await.unwrap_err(),
+            "response body too large"
+        );
+        server.abort();
     }
 
     #[test]
