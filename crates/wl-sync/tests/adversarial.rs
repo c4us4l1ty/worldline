@@ -682,6 +682,8 @@ async fn defect_empty_pull_jumps_cursor_permanently_skipping_ops() {
 /// past the client boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let repos = Repos::new(open_in_memory().unwrap(), 1);
     let oversized = wl_protocol::PushOp {
         operation_id: "op-big".into(),
         hlc: "00000000000000000001.00000.00001".into(),

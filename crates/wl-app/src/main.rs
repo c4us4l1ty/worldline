@@ -43,14 +43,13 @@ fn main() {
             hotkey::register_summon_hotkey(app.handle(), &hotkey);
             // Dark boot background: the webview paints #131312 before the
             // first WASM frame instead of WebKit's white default, so the
-            // fixed 9:16 window never flashes a blank white page.
+            // fixed 9:16 window never flashes a blank white page. The same
+            // handle restores the persisted pinned-window preference.
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_background_color(Some(tauri::window::Color {
-                    red: 19,
-                    green: 19,
-                    blue: 18,
-                    alpha: 255,
-                }));
+                let _ = win.set_background_color(Some(tauri::window::Color(19, 19, 18, 255)));
+                if pinned {
+                    let _ = win.set_always_on_top(true);
+                }
             }
             Ok(())
         })
