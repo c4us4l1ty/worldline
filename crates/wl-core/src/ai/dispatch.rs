@@ -232,7 +232,32 @@ fn extract_json_block(s: &str) -> Option<&str> {
     None
 }
 
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_TEXT_BYTES: usize = 16 * 1024;
+const MAX_DIRECTIVES_PER_MILESTONE: usize = 32;
+
+fn validate_response_size(raw: &str) -> Result<(), DispatchError> {
+    if raw.len() > MAX_RESPONSE_BYTES {
+        return Err(DispatchError::Invalid {
+            field: "response",
+            why: "response exceeds 256 KiB".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_text(field: &'static str, text: &str) -> Result<(), DispatchError> {
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(DispatchError::Invalid {
+            field,
+            why: "text exceeds 16 KiB".into(),
+        });
+    }
+    Ok(())
+}
+
 pub fn parse_plan(raw: &str) -> Result<PlanResult, DispatchError> {
+    validate_response_size(raw)?;
     let cleaned = strip_fences(raw);
     let block = extract_json_block(cleaned)
         .ok_or_else(|| DispatchError::BadJson("no JSON object found".into()))?;
@@ -243,11 +268,17 @@ pub fn parse_plan(raw: &str) -> Result<PlanResult, DispatchError> {
 }
 
 pub fn parse_briefing(raw: &str) -> Result<BriefingResult, DispatchError> {
+    validate_response_size(raw)?;
     let cleaned = strip_fences(raw);
     let block = extract_json_block(cleaned)
         .ok_or_else(|| DispatchError::BadJson("no JSON object found".into()))?;
     let b: BriefingResult =
         serde_json::from_str(block).map_err(|e| DispatchError::BadJson(e.to_string()))?;
+    validate_briefing(&b)?;
+    Ok(b)
+}
+
+fn validate_briefing(b: &BriefingResult) -> Result<(), DispatchError> {
     if b.directives.is_empty() {
         return Err(DispatchError::Invalid {
             field: "directives",
@@ -263,7 +294,7 @@ pub fn parse_briefing(raw: &str) -> Result<BriefingResult, DispatchError> {
     for d in &b.directives {
         validate_directive(d)?;
     }
-    Ok(b)
+    Ok(())
 }
 
 fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
@@ -285,6 +316,33 @@ fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod validation_regressions {
+    use super::*;
+
+    #[test]
+    fn phase_validation_rejects_unrepresentable_totals_without_panicking() {
+        let draft = DirectiveDraft {
+            title: "Boundary estimate".into(),
+            execution_context: None,
+            estimated_minutes: i64::MAX,
+            phases: vec![
+                PhaseDraft {
+                    title: "First".into(),
+                    instruction: None,
+                    minutes: i64::MAX,
+                },
+                PhaseDraft {
+                    title: "Second".into(),
+                    instruction: None,
+                    minutes: 1,
+                },
+            ],
+        };
+        assert!(validate_directive(&draft).is_err());
+    }
 }
 
 fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {

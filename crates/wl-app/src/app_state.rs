@@ -11,6 +11,18 @@ use wl_core::store::repo::Repos;
 use crate::vault::Vault;
 use crate::ShellError;
 
+pub struct RelaySession {
+    pub base: String,
+    pub account_id: String,
+    pub token: String,
+}
+
+impl RelaySession {
+    pub fn token_for(&self, base: &str, account_id: &str) -> Option<&str> {
+        (self.base == base && self.account_id == account_id).then_some(self.token.as_str())
+    }
+}
+
 pub struct AppState {
     pub repos: Repos,
     pub identity: Mutex<Option<Identity>>,
