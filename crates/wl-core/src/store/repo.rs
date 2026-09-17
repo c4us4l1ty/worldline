@@ -428,7 +428,7 @@ impl Repos {
                     progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
              FROM directives
              WHERE state = 'queued' AND scheduled_for_date <= ?1
-             ORDER BY scheduled_for_date, hlc_timestamp",
+             ORDER BY scheduled_for_date, hlc_timestamp, id",
         )?;
         let rows = stmt
             .query_map([date], directive_row)?
@@ -543,9 +543,10 @@ impl Repos {
     /// tie-break min `id`); losers are parked to queued with
     /// write-through. Returns the number parked.
     pub fn enforce_single_active(&self, identity: Option<&Identity>) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
         let actives: Vec<String> = {
-            let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT id FROM directives WHERE state = 'active'
                  ORDER BY hlc_timestamp DESC, id ASC",
             )?;
@@ -556,9 +557,22 @@ impl Repos {
         };
         let mut parked = 0;
         for id in actives.iter().skip(1) {
-            self.set_directive_state(id, DirectiveState::Queued, identity)?;
+            Self::write_directive_state(
+                &tx,
+                id,
+                DirectiveState::Queued,
+                self.hlc.now(self.device),
+                identity,
+            )?;
             parked += 1;
         }
+        let (wall, ctr) = self.hlc.head();
+        tx.execute(
+            "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
+            params![wall as i64, ctr as i64, self.device as i64],
+        )?;
+        tx.commit()?;
         Ok(parked)
     }
 

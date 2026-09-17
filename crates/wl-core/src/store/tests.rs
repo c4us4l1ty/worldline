@@ -417,12 +417,16 @@ fn enforce_single_active_keeps_newest() {
     let b = r
         .create_directive(&ms[0].id, "B", None, 20, 1, "2026-09-13", &[], None)
         .unwrap();
+    // Force a genuine tie: both rows share one hlc_timestamp (as a
+    // peer merge can produce), so the id tie-break is exercised
+    // deterministically instead of depending on per-row ticks.
+    let shared_ts = r.hlc.now(1).to_string();
     r.conn
         .lock()
         .unwrap()
         .execute(
-            "UPDATE directives SET state='active' WHERE id IN (?1, ?2)",
-            [&a.id, &b.id],
+            "UPDATE directives SET state='active', hlc_timestamp=?3 WHERE id IN (?1, ?2)",
+            [&a.id, &b.id, &shared_ts],
         )
         .unwrap();
     let parked = r.enforce_single_active(None).unwrap();
@@ -438,8 +442,66 @@ fn enforce_single_active_keeps_newest() {
         )
         .unwrap();
     assert_eq!(count, 1);
+    // Exactly one active survives, and it is deterministic: max
+    // hlc_timestamp, tie-break min id (both rows share one HLC here, so
+    // the lexicographically smallest id wins).
+    let survivor = r.active_directive().unwrap().unwrap();
+    let expected = [&a.id, &b.id].into_iter().min().unwrap().clone();
+    assert_eq!(survivor.id, expected);
+    assert_eq!(
+        r.directive(&expected).unwrap().unwrap().state,
+        DirectiveState::Active
+    );
     // Idempotent when already clean.
     assert_eq!(r.enforce_single_active(None).unwrap(), 0);
+}
+
+#[test]
+fn runnable_directives_order_is_deterministic_on_full_tie() {
+    // Two queued directives sharing (scheduled_for_date, hlc) — the
+    // exact collision a peer merge can produce — must surface in a
+    // stable id order, not SQLite scan order.
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let ts = r.hlc.now(1).to_string();
+    let conn = r.conn.lock().unwrap();
+    for title in ["Twin A", "Twin B"] {
+        conn.execute(
+            "INSERT INTO directives (id, milestone_id, title, execution_context,
+                estimated_minutes, progressive_step, progressive_total, state,
+                scheduled_for_date, hlc_timestamp)
+             VALUES (?1, ?2, ?3, NULL, 20, 1, 1, 'queued', '2026-09-13', ?4)",
+            rusqlite::params![
+                format!("dir-{}", uuid::Uuid::new_v4().simple()),
+                ms[0].id,
+                title,
+                ts
+            ],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let first = r
+        .runnable_directives("2026-09-13")
+        .unwrap()
+        .iter()
+        .map(|d| d.id.clone())
+        .collect::<Vec<_>>();
+    let second = r
+        .runnable_directives("2026-09-13")
+        .unwrap()
+        .iter()
+        .map(|d| d.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(first, second, "repeat reads must agree");
+    assert_eq!(first.len(), 2);
+    let mut sorted = first.clone();
+    sorted.sort();
+    assert_eq!(first, sorted, "id tie-break orders lexicographically");
+    assert_eq!(
+        r.next_runnable_directive("2026-09-13").unwrap().unwrap().id,
+        sorted[0]
+    );
 }
 
 #[test]
