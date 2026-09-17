@@ -185,6 +185,53 @@ mod tests {
     }
 
     #[test]
+    fn malformed_nonce_yields_empty_payload() {
+        assert!(challenge_signing_payload("zz", 42).is_empty());
+        assert!(challenge_signing_payload("", 42).is_empty());
+        // Odd-length hex cannot decode to the fixed 32-byte nonce.
+        assert!(challenge_signing_payload(&"d".repeat(63), 42).is_empty());
+    }
+
+    #[test]
+    fn checked_payload_accepts_only_exact_hex_nonce() {
+        let nonce = "ab".repeat(32);
+        let p = checked_challenge_signing_payload(&nonce, -1).unwrap();
+        assert_eq!(p.len(), 40);
+        assert_eq!(&p[32..], &(-1i64).to_be_bytes());
+        // 31 bytes of hex is not a challenge nonce.
+        assert!(checked_challenge_signing_payload(&"ab".repeat(31), 1).is_none());
+        assert!(checked_challenge_signing_payload("nothex!", 1).is_none());
+        assert!(checked_challenge_signing_payload("", 1).is_none());
+    }
+
+    #[test]
+    fn valid_hlc_matches_canonical_fixed_width_encoding() {
+        assert!(valid_hlc("00000000000000000001.00002.00003"));
+        // Padded/unpadded decimal forms that HlcTimestamp::parse accepts
+        // numerically but that break TEXT ordering are rejected here.
+        assert!(!valid_hlc("1.2.3"));
+        assert!(!valid_hlc("not-an-hlc"));
+        assert!(!valid_hlc(""));
+        // 21-digit physical overflows u64 → not canonical.
+        assert!(!valid_hlc(&format!("{}1.00000.00000", "9".repeat(20))));
+        let ts = wl_core::hlc::HlcTimestamp {
+            physical: u64::MAX,
+            counter: u16::MAX,
+            device: u16::MAX,
+        };
+        assert!(valid_hlc(&ts.to_string()));
+    }
+
+    #[test]
+    fn valid_cursor_bounds_and_pairs() {
+        assert!(valid_cursor("", ""));
+        assert!(!valid_cursor("", "op"));
+        assert!(!valid_cursor("00000000000000000001.00000.00000", ""));
+        assert!(!valid_cursor("00000000000000000001.00000.00000", &"x".repeat(129)));
+        assert!(valid_cursor("00000000000000000001.00000.00000", "op-1"));
+    }
+
+    #[test]
     fn serde_roundtrips() {
         let push = PushRequest {
             ops: vec![PushOp {

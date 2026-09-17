@@ -191,19 +191,32 @@ fn api_key_record(provider: &str) -> Result<Vec<u8>, VaultError> {
 /// envelope as the SQLite DB itself).
 fn vault_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let path = dir.join(".vault-key");
-    if let Ok(bytes) = std::fs::read(&path) {
-        if bytes.len() == 32 {
-            tighten_existing(&path);
-            return Ok(Zeroizing::new(bytes));
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => {
+            restrict_permissions(&path)?;
+            let bytes = Zeroizing::new(
+                std::fs::read(&path).map_err(|e| VaultError::Io(e.to_string()))?,
+            );
+            if bytes.len() != 32 {
+                return Err(VaultError::Stronghold(
+                    "vault key file has unexpected length".into(),
+                ));
+            }
+            return Ok(bytes);
         }
-        return Err(VaultError::Stronghold(
-            "vault key file has unexpected length".into(),
-        ));
+        Ok(_) => return Err(VaultError::Io("vault key is not a regular file".into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(VaultError::Io(e.to_string())),
     }
-    let mut key = vec![0u8; 32];
+    match std::fs::symlink_metadata(dir.join("vault.hold")) {
+        Ok(_) => return Err(VaultError::Io("existing snapshot has no vault key".into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(VaultError::Io(e.to_string())),
+    }
+    let mut key = Zeroizing::new(vec![0u8; 32]);
     getrandom::getrandom(&mut key).map_err(|e| VaultError::Stronghold(e.to_string()))?;
     write_private(&path, &key)?;
-    Ok(Zeroizing::new(key))
+    Ok(key)
 }
 
 #[cfg(unix)]

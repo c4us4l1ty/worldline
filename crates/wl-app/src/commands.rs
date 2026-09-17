@@ -639,7 +639,7 @@ impl wl_sync::sync::Transport for ReqwestTransport {
             .build()
             .map_err(|e| e.to_string())?;
         rt.block_on(async {
-            let resp = shared_client()
+            let resp = http_client()?
                 .post(format!("{}{path}", self.base))
                 .header("authorization", format!("Bearer {}", self.token))
                 .json(body)
@@ -867,7 +867,7 @@ fn http_execute(
         .build()
         .map_err(|e| e.to_string())?;
     rt.block_on(async {
-        let mut req = shared_client().post(url).json(body);
+        let mut req = http_client()?.post(url).json(body);
         for (k, v) in headers {
             req = req.header(k, v);
         }

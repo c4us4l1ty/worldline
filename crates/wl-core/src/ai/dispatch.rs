@@ -429,6 +429,7 @@ pub fn persist_plan(
     plan: &PlanResult,
     identity: Option<&Identity>,
 ) -> Result<String, DispatchError> {
+    validate_plan(plan)?;
     let goal_id = match goal_spec {
         Some((title, desc, target)) => repos.create_goal(title, desc, target, identity)?.id,
         None => repos.create_goal("Untitled goal", None, None, identity)?.id,
@@ -477,6 +478,7 @@ pub fn persist_briefing(
     date: &str,
     identity: Option<&Identity>,
 ) -> Result<Vec<String>, DispatchError> {
+    validate_briefing(brief)?;
     let goal = repos
         .active_goal()?
         .ok_or(StoreError::NotFound("no active goal".into()))?;
