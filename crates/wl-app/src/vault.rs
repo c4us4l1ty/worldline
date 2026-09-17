@@ -70,7 +70,9 @@ impl Vault {
             // unlock while SQLite and the durable snapshot still use the old one.
             match previous {
                 Some(bytes) => self.put(b"mnemonic", &bytes)?,
-                None => { self.del(b"mnemonic")?; }
+                None => {
+                    self.del(b"mnemonic")?;
+                }
             }
             return Err(error);
         }

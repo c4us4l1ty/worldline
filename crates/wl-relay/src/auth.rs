@@ -75,7 +75,11 @@ impl AuthState {
     /// the public key IS the account). Refuses floods: bounded in-flight
     /// challenges per account AND globally.
     pub fn issue_challenge(&self, public_key: &str) -> Result<(String, i64), AuthError> {
-        if public_key.len() != 64 || !public_key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if public_key.len() != 64
+            || !public_key
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(AuthError::BadPublicKey);
         }
         let mut nonce_bytes = [0u8; 32];
@@ -137,7 +141,12 @@ impl AuthState {
 
         // Claim the verified challenge atomically. Concurrent verification
         // may both pass the signature check, but only one can mint a token.
-        if self.challenges.lock().expect("auth mutex").remove(nonce).is_none()
+        if self
+            .challenges
+            .lock()
+            .expect("auth mutex")
+            .remove(nonce)
+            .is_none()
             || expires_at <= now_secs()
         {
             return Err(AuthError::BadChallenge);
@@ -369,7 +378,10 @@ mod tests {
     fn public_keys_have_one_canonical_account_representation() {
         let auth = AuthState::new();
         let (pk, _) = fresh_keypair();
-        assert!(matches!(auth.issue_challenge(&pk.to_uppercase()), Err(AuthError::BadPublicKey)));
+        assert!(matches!(
+            auth.issue_challenge(&pk.to_uppercase()),
+            Err(AuthError::BadPublicKey)
+        ));
         assert!(auth.issue_challenge(&pk).is_ok());
     }
 
@@ -380,8 +392,13 @@ mod tests {
         let (nonce, _) = auth.issue_challenge(&pk).unwrap();
         let expiry = now_secs();
         auth.challenges.lock().unwrap().get_mut(&nonce).unwrap().1 = expiry;
-        let sig = sk.sign(&wl_protocol::challenge_signing_payload(&nonce, expiry)).to_bytes();
-        assert!(matches!(auth.verify(&pk, &nonce, expiry, &sig), Err(AuthError::BadChallenge)));
+        let sig = sk
+            .sign(&wl_protocol::challenge_signing_payload(&nonce, expiry))
+            .to_bytes();
+        assert!(matches!(
+            auth.verify(&pk, &nonce, expiry, &sig),
+            Err(AuthError::BadChallenge)
+        ));
     }
 
     #[test]

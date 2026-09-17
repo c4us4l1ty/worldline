@@ -138,7 +138,7 @@ impl Identity {
 
 /// HKDF-SHA256 → Ed25519 signing subkey for a given BIP-39 seed.
 fn derive_signing_key(seed: &[u8]) -> Result<SigningKey, IdentityError> {
-        let bytes = hkdf_sha256(seed, HKDF_INFO_ED25519);
+    let bytes = hkdf_sha256(seed, HKDF_INFO_ED25519);
     Ok(SigningKey::from_bytes(&bytes))
 }
 /// HKDF-SHA256 → ChaCha20-Poly1305 payload subkey for a given BIP-39 seed.

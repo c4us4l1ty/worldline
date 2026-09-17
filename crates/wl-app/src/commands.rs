@@ -29,7 +29,9 @@ pub(crate) async fn identity_generate(
 ) -> ShellResult<GeneratedIdentity> {
     let mut current = state.identity.lock().unwrap();
     if current.is_some() || state.repos.identity()?.is_some() || state.vault.has_mnemonic() {
-        return Err(ShellError::Invalid("identity already exists; unlock or restore it".into()));
+        return Err(ShellError::Invalid(
+            "identity already exists; unlock or restore it".into(),
+        ));
     }
     let identity = Identity::generate().map_err(|_| ShellError::BadMnemonic)?;
     let phrase = identity.phrase().to_string();
@@ -72,7 +74,9 @@ pub(crate) async fn identity_verify_backup(
     // from the caller — so a hostile UI payload can't pick its own.
     let cfg = state.repos.identity()?.ok_or(ShellError::Locked)?;
     if cfg.public_key != id.account_id_hex() {
-        return Err(ShellError::Invalid("stored identity does not match the vault".into()));
+        return Err(ShellError::Invalid(
+            "stored identity does not match the vault".into(),
+        ));
     }
     let stored = cfg.verify_indices;
     if !valid_backup_challenge(&stored) || indices != stored {
@@ -106,14 +110,25 @@ pub(crate) async fn identity_restore(
     // Fresh challenge positions for the re-verified backup check.
     let mut rng = rand::thread_rng();
     let verify_indices: Vec<usize> = rand::seq::index::sample(&mut rng, 12, 3).into_vec();
-    if state.repos.identity()?.is_some_and(|cfg| cfg.public_key != account_id) {
-        return Err(ShellError::Invalid("cannot replace this installation's identity".into()));
+    if state
+        .repos
+        .identity()?
+        .is_some_and(|cfg| cfg.public_key != account_id)
+    {
+        return Err(ShellError::Invalid(
+            "cannot replace this installation's identity".into(),
+        ));
     }
     if state.vault.has_mnemonic() {
-        let existing = state.vault.get_mnemonic().map_err(|e| ShellError::Vault(e.to_string()))?;
+        let existing = state
+            .vault
+            .get_mnemonic()
+            .map_err(|e| ShellError::Vault(e.to_string()))?;
         let existing = Identity::from_phrase(&existing).map_err(|_| ShellError::BadMnemonic)?;
         if existing.account_id_hex() != account_id {
-            return Err(ShellError::Invalid("cannot replace this installation's identity".into()));
+            return Err(ShellError::Invalid(
+                "cannot replace this installation's identity".into(),
+            ));
         }
     }
     persist_identity(&state, &mut current, identity, true, &verify_indices)?;
@@ -129,9 +144,13 @@ fn persist_identity(
 ) -> ShellResult<()> {
     // Vault first: persistence failure must not publish a new public or
     // process-resident identity without its recoverable secret.
-    state.vault.save_mnemonic(identity.phrase())
+    state
+        .vault
+        .save_mnemonic(identity.phrase())
         .map_err(|e| ShellError::Vault(e.to_string()))?;
-    state.repos.insert_identity(&identity, verified, verify_indices)?;
+    state
+        .repos
+        .insert_identity(&identity, verified, verify_indices)?;
     *current = Some(identity);
     Ok(())
 }
@@ -179,7 +198,11 @@ pub(crate) async fn identity_unlock(
             let verified = cfg.bip39_mnemonic_verified;
             (verified, cfg.verify_indices)
         }
-        Some(_) => return Err(ShellError::Invalid("stored identity does not match the vault".into())),
+        Some(_) => {
+            return Err(ShellError::Invalid(
+                "stored identity does not match the vault".into(),
+            ))
+        }
         None => (false, Vec::new()),
     };
     state.repos.insert_identity(&identity, verified, &indices)?;
@@ -1006,13 +1029,24 @@ mod tests {
             Err(ShellError::Vault(_))
         ));
         assert_eq!(current.as_ref().unwrap().account_id_hex(), account);
-        assert_eq!(state.vault.get_mnemonic().unwrap().as_str(), phrase.as_str());
+        assert_eq!(
+            state.vault.get_mnemonic().unwrap().as_str(),
+            phrase.as_str()
+        );
         let after = state.repos.identity().unwrap().unwrap();
         assert_eq!(after.public_key, before.public_key);
-        assert_eq!(after.bip39_mnemonic_verified, before.bip39_mnemonic_verified);
+        assert_eq!(
+            after.bip39_mnemonic_verified,
+            before.bip39_mnemonic_verified
+        );
         assert_eq!(after.verify_indices, before.verify_indices);
-        let rows: i64 = state.repos.conn.lock().expect("test DB mutex")
-            .query_row("SELECT COUNT(*) FROM identity_config", [], |row| row.get(0)).unwrap();
+        let rows: i64 = state
+            .repos
+            .conn
+            .lock()
+            .expect("test DB mutex")
+            .query_row("SELECT COUNT(*) FROM identity_config", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(rows, 1);
         std::fs::remove_dir(&snapshot).unwrap();
         std::fs::rename(saved, &snapshot).unwrap();

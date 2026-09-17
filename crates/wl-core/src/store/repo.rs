@@ -183,7 +183,8 @@ impl Repos {
                 ts.to_string()
             ],
         )?;
-        Self::emit_on(&tx,
+        Self::emit_on(
+            &tx,
             identity,
             crate::crdt::CrdtTable::Goals,
             &goal.id,
@@ -253,7 +254,8 @@ impl Repos {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, goal_id, title, description, order_index, "pending", ts.to_string()],
         )?;
-        Self::emit_on(&tx,
+        Self::emit_on(
+            &tx,
             identity,
             crate::crdt::CrdtTable::Milestones,
             &m.id,
@@ -290,16 +292,25 @@ impl Repos {
         if tx.execute(
             "UPDATE milestones SET status = ?2, hlc_timestamp = ?3 WHERE id = ?1",
             params![id, status.as_str(), ts.to_string()],
-        )? == 0 {
+        )? == 0
+        {
             return Err(StoreError::NotFound(format!("milestone {id}")));
         }
         if identity.is_some() {
             let m = tx.query_row(
                 "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
-                 FROM milestones WHERE id = ?1", [id], milestone_row,
+                 FROM milestones WHERE id = ?1",
+                [id],
+                milestone_row,
             )?;
-            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Milestones,
-                &m.id, &Self::milestone_json(&m), ts)?;
+            Self::emit_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::Milestones,
+                &m.id,
+                &Self::milestone_json(&m),
+                ts,
+            )?;
         }
         self.persist_head_on(&tx)?;
         tx.commit()?;
@@ -354,10 +365,13 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<Directive, StoreError> {
         if estimated_minutes <= 0 || progressive_total < 1 || phases.iter().any(|p| p.2 <= 0) {
-            return Err(StoreError::Invalid("minutes and phase count must be positive".into()));
+            return Err(StoreError::Invalid(
+                "minutes and phase count must be positive".into(),
+            ));
         }
         if (progressive_total == 1 && !phases.is_empty())
-            || (progressive_total > 1 && phases.len() as i64 != progressive_total) {
+            || (progressive_total > 1 && phases.len() as i64 != progressive_total)
+        {
             return Err(StoreError::Invalid(format!(
                 "progressive_total={progressive_total} but {} phases supplied",
                 phases.len()
@@ -385,8 +399,14 @@ impl Repos {
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'queued', ?7, ?8)",
             params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, ts.to_string()],
         )?;
-        Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Directives,
-            &d.id, &Self::directive_json(&d), ts)?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::Directives,
+            &d.id,
+            &Self::directive_json(&d),
+            ts,
+        )?;
         for (i, (pt, pi, pm)) in phases.iter().enumerate() {
             let ts = self.hlc.now(self.device);
             tx.execute(
@@ -395,13 +415,26 @@ impl Repos {
                 params![id, (i + 1) as i64, pt, pi, pm, if i == 0 { "active" } else { "pending" }, ts.to_string()],
             )?;
             let p = DirectivePhase {
-                directive_id: id.clone(), step: (i + 1) as i64, title: pt.clone(),
-                instruction: pi.clone(), minutes: *pm,
-                state: if i == 0 { PhaseState::Active } else { PhaseState::Pending },
+                directive_id: id.clone(),
+                step: (i + 1) as i64,
+                title: pt.clone(),
+                instruction: pi.clone(),
+                minutes: *pm,
+                state: if i == 0 {
+                    PhaseState::Active
+                } else {
+                    PhaseState::Pending
+                },
                 hlc_timestamp: ts,
             };
-            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::DirectivePhases,
-                &id, &Self::phase_json(&p), ts)?;
+            Self::emit_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::DirectivePhases,
+                &id,
+                &Self::phase_json(&p),
+                ts,
+            )?;
         }
         self.persist_head_on(&tx)?;
         tx.commit()?;
@@ -538,8 +571,12 @@ impl Repos {
                 directive_row,
             )?;
             Self::emit_on(
-                conn, Some(identity), crate::crdt::CrdtTable::Directives,
-                id, &Self::directive_json(&d), ts,
+                conn,
+                Some(identity),
+                crate::crdt::CrdtTable::Directives,
+                id,
+                &Self::directive_json(&d),
+                ts,
             )?;
         }
         Ok(())
@@ -620,8 +657,14 @@ impl Repos {
         d.scheduled_for_date = scheduled_for_date.into();
         d.progressive_step = 1;
         d.hlc_timestamp = ts;
-        Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Directives,
-            id, &Self::directive_json(&d), ts)?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::Directives,
+            id,
+            &Self::directive_json(&d),
+            ts,
+        )?;
         // Rescale phase minutes proportionally so the rows sum to the
         // new total (floor 1 min per phase; the last phase absorbs
         // rounding drift). Monolithic directives have no rows: no-op.
@@ -648,10 +691,20 @@ impl Repos {
                     params![id, p.step, scaled, state, ts.to_string()],
                 )?;
                 p.minutes = scaled;
-                p.state = if p.step == 1 { PhaseState::Active } else { PhaseState::Pending };
+                p.state = if p.step == 1 {
+                    PhaseState::Active
+                } else {
+                    PhaseState::Pending
+                };
                 p.hlc_timestamp = ts;
-                Self::emit_on(&tx, identity, crate::crdt::CrdtTable::DirectivePhases,
-                    id, &Self::phase_json(p), ts)?;
+                Self::emit_on(
+                    &tx,
+                    identity,
+                    crate::crdt::CrdtTable::DirectivePhases,
+                    id,
+                    &Self::phase_json(p),
+                    ts,
+                )?;
             }
         }
         self.persist_head_on(&tx)?;
@@ -672,19 +725,33 @@ impl Repos {
         let cur = d.progressive_step;
         let advanced = cur < d.progressive_total;
         if !phases.iter().any(|p| p.step == cur)
-            || (advanced && !phases.iter().any(|p| p.step == cur + 1)) {
+            || (advanced && !phases.iter().any(|p| p.step == cur + 1))
+        {
             return Err(StoreError::Invalid("current or next phase missing".into()));
         }
-        for p in phases.iter_mut().filter(|p| p.step == cur || (advanced && p.step == cur + 1)) {
-            p.state = if p.step == cur { PhaseState::Done } else { PhaseState::Active };
+        for p in phases
+            .iter_mut()
+            .filter(|p| p.step == cur || (advanced && p.step == cur + 1))
+        {
+            p.state = if p.step == cur {
+                PhaseState::Done
+            } else {
+                PhaseState::Active
+            };
             p.hlc_timestamp = self.hlc.now(self.device);
             tx.execute(
                 "UPDATE directive_phases SET state = ?3, hlc_timestamp = ?4
                  WHERE directive_id = ?1 AND step = ?2",
                 params![id, p.step, p.state.as_str(), p.hlc_timestamp.to_string()],
             )?;
-            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::DirectivePhases,
-                id, &Self::phase_json(p), p.hlc_timestamp)?;
+            Self::emit_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::DirectivePhases,
+                id,
+                &Self::phase_json(p),
+                p.hlc_timestamp,
+            )?;
         }
         if advanced {
             d.progressive_step = cur + 1;
@@ -693,8 +760,14 @@ impl Repos {
                 "UPDATE directives SET progressive_step = ?2, hlc_timestamp = ?3 WHERE id = ?1",
                 params![id, d.progressive_step, d.hlc_timestamp.to_string()],
             )?;
-            Self::emit_on(&tx, identity, crate::crdt::CrdtTable::Directives,
-                id, &Self::directive_json(&d), d.hlc_timestamp)?;
+            Self::emit_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::Directives,
+                id,
+                &Self::directive_json(&d),
+                d.hlc_timestamp,
+            )?;
         }
         self.persist_head_on(&tx)?;
         tx.commit()?;
@@ -777,7 +850,9 @@ impl Repos {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let existing: Option<String> = tx
-            .query_row("SELECT id FROM check_ins WHERE date = ?1", [date], |r| r.get(0))
+            .query_row("SELECT id FROM check_ins WHERE date = ?1", [date], |r| {
+                r.get(0)
+            })
             .optional()?;
         let ts = self.hlc.now(self.device);
         let id = existing.unwrap_or_else(|| new_id("chk"));
@@ -789,10 +864,20 @@ impl Repos {
             params![id, date, outcome.as_str(), note, ts.to_string()],
         )?;
         let c = CheckIn {
-            id, date: date.into(), outcome, note: note.map(Into::into), hlc_timestamp: ts,
+            id,
+            date: date.into(),
+            outcome,
+            note: note.map(Into::into),
+            hlc_timestamp: ts,
         };
-        Self::emit_on(&tx, identity, crate::crdt::CrdtTable::CheckIns,
-            &c.id, &Self::checkin_json(&c), ts)?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::CheckIns,
+            &c.id,
+            &Self::checkin_json(&c),
+            ts,
+        )?;
         self.persist_head_on(&tx)?;
         tx.commit()?;
         Ok(c)
@@ -881,7 +966,8 @@ impl Repos {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, directive_id, reason.as_str(), note, ts.to_string()],
         )?;
-        Self::emit_on(&tx,
+        Self::emit_on(
+            &tx,
             identity,
             crate::crdt::CrdtTable::Bailouts,
             &b.id,
@@ -935,7 +1021,8 @@ impl Repos {
                 ai_provider=?4, tier1_model=?5, tier2_model=?6, relay_url=?7, hlc_timestamp=?8",
             params![s.theme, s.hotkey, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
         )?;
-        Self::emit_on(&tx,
+        Self::emit_on(
+            &tx,
             identity,
             crate::crdt::CrdtTable::AppSettings,
             "settings",

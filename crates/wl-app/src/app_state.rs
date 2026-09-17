@@ -83,6 +83,27 @@ impl AppState {
     }
 }
 
+/// Stable per-install device id (0 < id < u16::MAX, never 0).
+fn device_id_for(dir: &Path) -> Result<u16, ShellError> {
+    let marker = dir.join("device_id");
+    match std::fs::read_to_string(&marker) {
+        Ok(txt) => {
+            return txt
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| ShellError::Io("invalid persisted device id".into()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ShellError::Io(e.to_string())),
+    }
+    let id = (uuid::Uuid::new_v4().as_u128() & 0xFFFF) as u16;
+    let id = if id == 0 { 1 } else { id };
+    std::fs::write(&marker, id.to_string()).map_err(|e| ShellError::Io(e.to_string()))?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,23 +143,3 @@ mod tests {
     }
 }
 
-/// Stable per-install device id (0 < id < u16::MAX, never 0).
-fn device_id_for(dir: &Path) -> Result<u16, ShellError> {
-    let marker = dir.join("device_id");
-    match std::fs::read_to_string(&marker) {
-        Ok(txt) => {
-            return txt
-                .trim()
-                .parse::<u16>()
-                .ok()
-                .filter(|id| *id > 0)
-                .ok_or_else(|| ShellError::Io("invalid persisted device id".into()));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(ShellError::Io(e.to_string())),
-    }
-    let id = (uuid::Uuid::new_v4().as_u128() & 0xFFFF) as u16;
-    let id = if id == 0 { 1 } else { id };
-    std::fs::write(&marker, id.to_string()).map_err(|e| ShellError::Io(e.to_string()))?;
-    Ok(id)
-}

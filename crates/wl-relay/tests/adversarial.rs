@@ -518,7 +518,10 @@ async fn operation_id_collisions_stay_scoped_per_account() {
     let a = mk_op("client-op-1", 1, 1_000_000);
     let b = mk_op("client-op-1", 2, 1_000_001);
     let out = state.blobs.insert_ops(&[a.clone(), b.clone()]).unwrap();
-    assert_eq!(out.accepted, vec![a.operation_id.clone(), b.operation_id.clone()]);
+    assert_eq!(
+        out.accepted,
+        vec![a.operation_id.clone(), b.operation_id.clone()]
+    );
     assert!(out.duplicates.is_empty());
     // Exact re-push stays idempotent within one account...
     let out = state.blobs.insert_ops(&[a.clone()]).unwrap();

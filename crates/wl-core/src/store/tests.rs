@@ -16,33 +16,61 @@ fn directive_creation_rolls_back_when_phase_outbox_fails() {
     let (goal, milestones) = goal_with_milestones(&r);
     let identity = Identity::from_phrase(
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
-    ).unwrap();
-    r.conn.lock().unwrap().execute_batch(
-        "CREATE TEMP TRIGGER reject_phase_outbox BEFORE INSERT ON crdt_outbox
+    )
+    .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_phase_outbox BEFORE INSERT ON crdt_outbox
          WHEN NEW.table_name = 'directive_phases'
          BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END;",
-    ).unwrap();
+        )
+        .unwrap();
     let phases = [("Start".into(), None, 5), ("Finish".into(), None, 25)];
-    assert!(r.create_directive(
-        &milestones[0].id, "Atomic task", None, 30, 2, "2026-09-13", &phases,
-        Some(&identity),
-    ).is_err());
+    assert!(r
+        .create_directive(
+            &milestones[0].id,
+            "Atomic task",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &phases,
+            Some(&identity),
+        )
+        .is_err());
     assert!(r.runnable_directives("2026-09-13").unwrap().is_empty());
     assert!(r.pending_outbox(100).unwrap().is_empty());
     assert_eq!(r.goal(&goal.id).unwrap(), Some(goal));
-    r.conn.lock().unwrap().execute_batch("DROP TRIGGER reject_phase_outbox").unwrap();
-    let directive = r.create_directive(
-        &milestones[0].id, "Atomic task", None, 30, 2, "2026-09-13", &phases,
-        Some(&identity),
-    ).unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_phase_outbox")
+        .unwrap();
+    let directive = r
+        .create_directive(
+            &milestones[0].id,
+            "Atomic task",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &phases,
+            Some(&identity),
+        )
+        .unwrap();
     let outbox = r.pending_outbox(100).unwrap();
-    let directive_op = outbox.iter().find(|op| op.table_name == "directives").unwrap();
+    let directive_op = outbox
+        .iter()
+        .find(|op| op.table_name == "directives")
+        .unwrap();
     assert_eq!(directive_op.hlc_timestamp, directive.hlc_timestamp);
     let stored_phases = r.phases_for_directive(&directive.id).unwrap();
     assert_eq!(stored_phases.len(), 2);
     for phase in stored_phases {
-        assert!(outbox.iter().any(|op|
-            op.table_name == "directive_phases" && op.hlc_timestamp == phase.hlc_timestamp
+        assert!(outbox.iter().any(
+            |op| op.table_name == "directive_phases" && op.hlc_timestamp == phase.hlc_timestamp
         ));
     }
 }
@@ -53,18 +81,32 @@ fn reschedule_directive_rolls_back_when_phase_outbox_fails() {
     let (_, milestones) = goal_with_milestones(&r);
     let identity = Identity::from_phrase(
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
-    ).unwrap();
-    let directive = r.create_directive(
-        &milestones[0].id, "Rescale task", None, 30, 2, "2026-09-13",
-        &[("Start".into(), None, 5), ("Finish".into(), None, 25)],
-        None,
-    ).unwrap();
-    r.conn.lock().unwrap().execute_batch(
-        "CREATE TEMP TRIGGER reject_phase_outbox BEFORE INSERT ON crdt_outbox
+    )
+    .unwrap();
+    let directive = r
+        .create_directive(
+            &milestones[0].id,
+            "Rescale task",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &[("Start".into(), None, 5), ("Finish".into(), None, 25)],
+            None,
+        )
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_phase_outbox BEFORE INSERT ON crdt_outbox
          WHEN NEW.table_name = 'directive_phases'
          BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END;",
-    ).unwrap();
-    assert!(r.reschedule_directive(&directive.id, 15, "2026-09-14", Some(&identity)).is_err());
+        )
+        .unwrap();
+    assert!(r
+        .reschedule_directive(&directive.id, 15, "2026-09-14", Some(&identity))
+        .is_err());
     let unchanged = r.directive(&directive.id).unwrap().unwrap();
     assert_eq!(unchanged.state, DirectiveState::Queued);
     assert_eq!(unchanged.estimated_minutes, 30);
@@ -73,8 +115,13 @@ fn reschedule_directive_rolls_back_when_phase_outbox_fails() {
     let phases = r.phases_for_directive(&directive.id).unwrap();
     assert_eq!((phases[0].minutes, phases[1].minutes), (5, 25));
     assert!(r.pending_outbox(100).unwrap().is_empty());
-    r.conn.lock().unwrap().execute_batch("DROP TRIGGER reject_phase_outbox").unwrap();
-    r.reschedule_directive(&directive.id, 15, "2026-09-14", Some(&identity)).unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_phase_outbox")
+        .unwrap();
+    r.reschedule_directive(&directive.id, 15, "2026-09-14", Some(&identity))
+        .unwrap();
     let down = r.directive(&directive.id).unwrap().unwrap();
     assert_eq!(down.estimated_minutes, 15);
     assert_eq!(down.scheduled_for_date, "2026-09-14");
@@ -82,11 +129,13 @@ fn reschedule_directive_rolls_back_when_phase_outbox_fails() {
     let rescaled = r.phases_for_directive(&directive.id).unwrap();
     let total: i64 = rescaled.iter().map(|p| p.minutes).sum();
     assert_eq!(total, 15);
-    assert!(outbox.iter().any(|op|
-        op.table_name == "directives" && op.hlc_timestamp == down.hlc_timestamp));
+    assert!(outbox
+        .iter()
+        .any(|op| op.table_name == "directives" && op.hlc_timestamp == down.hlc_timestamp));
     for phase in rescaled {
-        assert!(outbox.iter().any(|op|
-            op.table_name == "directive_phases" && op.hlc_timestamp == phase.hlc_timestamp));
+        assert!(outbox.iter().any(
+            |op| op.table_name == "directive_phases" && op.hlc_timestamp == phase.hlc_timestamp
+        ));
     }
 }
 

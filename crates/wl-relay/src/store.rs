@@ -109,8 +109,7 @@ pub mod sqlite_backend {
             conn.pragma_update(None, "journal_mode", "WAL").ok();
             // IMMEDIATE: schema bootstrap plus the legacy rebuild below
             // must not race a concurrent opener on the same database file.
-            let tx =
-                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS accounts (
                     public_key TEXT PRIMARY KEY,

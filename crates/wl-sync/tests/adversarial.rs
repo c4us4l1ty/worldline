@@ -667,9 +667,11 @@ async fn defect_empty_pull_jumps_cursor_permanently_skipping_ops() {
     // so the next real cycle re-pulls from the untouched position.
     let conn = repos.conn.lock().unwrap();
     let row: Option<(String, String)> = conn
-        .query_row("SELECT cursor, op_id FROM sync_cursor WHERE id = 1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT cursor, op_id FROM sync_cursor WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()
         .unwrap();
     assert!(row.is_none(), "cursor must not be persisted: {row:?}");
@@ -725,4 +727,3 @@ async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
         }
     }
 }
-
