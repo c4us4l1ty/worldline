@@ -9,25 +9,29 @@ use crate::app::{elapsed_secs, flash, fmt_mmss, invoke, set_directive, AppCtx, D
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
-    let directive = use_signal::<Option<DirectiveView>>(|| None);
     let escape_reason_note = use_signal(String::new);
 
     // Load the current directive on mount.
     use_effect(move || {
-        let mut d = directive;
-        let ctx_loader = ctx;
-        spawn(async move {
-            match invoke::<DirectiveView>("current_directive", ()).await {
-                Ok(dv) => {
-                    *d.write() = Some(dv);
+        let mut busy = ctx.directive_busy;
+        if *busy.peek() {
+            return;
+        }
+        busy.set(true);
+        dioxus::core::spawn_forever(async move {
+            match invoke::<Option<DirectiveView>>("current_directive", ()).await {
+                Ok(dv) => set_directive(&ctx, dv),
+                Err(e) => {
+                    set_directive(&ctx, None);
+                    flash(&ctx, &format!("ERR {e}"));
                 }
-                Err(e) => flash(&ctx_loader, &format!("ERR {e}")),
             }
+            busy.set(false);
         });
     });
 
-    let d = directive.read().clone();
-    let timer = fmt_mmss(*ctx.timer_secs.read());
+    let d = ctx.directive.read().clone();
+    let unavailable = d.is_none() || *ctx.directive_busy.read();
     let escaping = *ctx.escape_open.read();
     let milestone_label = d
         .as_ref()
