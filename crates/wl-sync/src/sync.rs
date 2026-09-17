@@ -1,6 +1,8 @@
 //! Sync session: push pending outbox ops, pull and apply remote ops.
 //! Transport is injected (native: reqwest; tests: in-process axum).
 
+use std::collections::HashSet;
+
 use wl_core::crypto::aead::{self, Sealed};
 use wl_core::crypto::identity::Identity;
 use wl_core::hlc::HlcTimestamp;
@@ -49,7 +51,7 @@ pub struct SyncStats {
 const MAX_BATCHES_PER_CYCLE: usize = 200;
 /// Wire batch size clamp: ≥1 (a 0 limit would hot-loop empty pulls),
 /// ≤ relay `PULL_HARD_CAP` (oversized requests are refused anyway).
-const MAX_BATCH_LIMIT: usize = 500;
+const MAX_BATCH_LIMIT: usize = wl_protocol::MAX_BATCH_OPS;
 
 /// Runs one push+pull cycle against the relay.
 ///
@@ -103,13 +105,20 @@ pub fn sync_cycle<T: Transport>(
         let resp_text = transport
             .post("/sync/push", &body)
             .map_err(SyncError::Transport)?;
-        let resp: wl_protocol::PushResponse =
-            serde_json::from_str(&resp_text).map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let resp: wl_protocol::PushResponse = decode_response(&resp_text)?;
+        let sent: HashSet<&str> = pending.iter().map(|o| o.operation_id.as_str()).collect();
+        let mut acknowledged = HashSet::new();
+        for id in resp.accepted.iter().chain(&resp.duplicates) {
+            if !sent.contains(id.as_str()) || !acknowledged.insert(id.as_str()) {
+                return Err(SyncError::Protocol("invalid push acknowledgement".into()));
+            }
+        }
         // Accepted + duplicates = everything the relay now durably
         // holds from this batch. Marking only `accepted` would strand
         // ops whose earlier push response was lost.
         let mut drained = resp.accepted;
         drained.extend(resp.duplicates.iter().cloned());
+            .ok_or_else(|| SyncError::Protocol("invalid push acknowledgement".into()))?;
         repos.mark_outbox_pushed(&drained)?;
         pushed += drained.len();
         if drained.is_empty() {
@@ -119,7 +128,7 @@ pub fn sync_cycle<T: Transport>(
             // next cycle and surfaces via the pending count.
             break;
         }
-        if batch_len < batch_limit {
+        if drained.len() < batch_len || batch_len < batch_limit {
             // Last partial batch: the outbox is drained.
             break;
         }
@@ -137,14 +146,15 @@ pub fn sync_cycle<T: Transport>(
         let resp_text = transport
             .post("/sync/pull", &body)
             .map_err(SyncError::Transport)?;
-        let resp: wl_protocol::PullResponse =
-            serde_json::from_str(&resp_text).map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let resp: wl_protocol::PullResponse = decode_response(&resp_text)?;
+        validate_pull_response(&resp, &cursor_hlc, &cursor_op, batch_limit)?;
         for op in &resp.ops {
             if repos.is_op_applied(&op.operation_id)? {
                 continue; // idempotent apply
             }
             match apply_pulled_op(repos, identity, op) {
                 Ok(()) => applied += 1,
+                Err(e @ SyncError::Store(_)) => return Err(e),
                 Err(_) => {
                     // Poison op (bad base64, truncated sealed, wrong
                     // key/AAD, non-JSON payload, malformed HLC): it can
@@ -375,6 +385,57 @@ pub fn save_cursor(repos: &Repos, cursor: &str, op_id: &str) -> Result<(), SyncE
 /// `repos.hlc` like the pull path does.
 pub fn observe_remote(repos: &Repos, remote: &HlcTimestamp) -> HlcTimestamp {
     repos.observe_remote_hlc(remote)
+}
+
+/// Decodes a JSON response body under a hard byte bound — a hostile
+/// relay answering with a multi-gigabyte body must fail closed instead
+/// of exhausting client memory.
+fn decode_response<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, SyncError> {
+    if text.len() > wl_protocol::MAX_RESPONSE_BYTES {
+        return Err(SyncError::Protocol("response exceeds size bound".into()));
+    }
+    serde_json::from_str(text).map_err(|e| SyncError::Protocol(e.to_string()))
+}
+
+/// Validates a pull batch against the relay's own hard caps before any
+/// op is applied: batch size, per-op envelope bounds, monotonic
+/// (hlc, op_id) pagination, and cursor continuity. A hostile relay
+/// serving regressingly-ordered cursors would otherwise wedge the
+/// cycle (or spin it via `exhausted=false` + empty ops).
+fn validate_pull_response(
+    resp: &wl_protocol::PullResponse,
+    since_hlc: &str,
+    since_op_id: &str,
+    batch_limit: usize,
+) -> Result<(), SyncError> {
+    if resp.ops.len() > batch_limit {
+        return Err(SyncError::Protocol("pull batch exceeds requested limit".into()));
+    }
+    if !wl_protocol::valid_cursor(&resp.next_cursor, &resp.next_op_id) {
+        return Err(SyncError::Protocol("invalid next cursor".into()));
+    }
+    if resp.ops.is_empty() {
+        return Ok(());
+    }
+    let mut prev = (since_hlc.to_string(), since_op_id.to_string());
+    for op in &resp.ops {
+        if op.operation_id.is_empty()
+            || op.operation_id.len() > wl_protocol::MAX_HEADER_LEN
+            || !wl_protocol::valid_hlc(&op.hlc)
+            || op.record_id.is_empty()
+            || op.record_id.len() > wl_protocol::MAX_HEADER_LEN
+        {
+            return Err(SyncError::Protocol("pulled op envelope out of bounds".into()));
+        }
+        if op.hlc < prev.0 || (op.hlc == prev.0 && op.operation_id <= prev.1) {
+            return Err(SyncError::Protocol("non-monotonic pull batch".into()));
+        }
+        prev = (op.hlc.clone(), op.operation_id.clone());
+    }
+    if resp.next_cursor != prev.0 || resp.next_op_id != prev.1 {
+        return Err(SyncError::Protocol("cursor does not match last op".into()));
+    }
+    Ok(())
 }
 
 /// `Option` extension used by [`current_cursor`].

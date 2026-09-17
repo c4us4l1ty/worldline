@@ -71,8 +71,9 @@ impl Repos {
     }
 
     fn write_hlc_head(&self) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
         let (wall, ctr) = self.hlc.head();
-        self.conn.lock().unwrap().execute(
+        conn.execute(
             "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
             params![wall as i64, ctr as i64, self.device as i64],
@@ -435,6 +436,17 @@ impl Repos {
         Ok(rows)
     }
 
+    pub fn next_runnable_directive(&self, date: &str) -> Result<Option<Directive>, StoreError> {
+        self.conn.lock().unwrap().query_row(
+            "SELECT id, milestone_id, title, execution_context, estimated_minutes,
+                    progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
+             FROM directives WHERE state = 'queued' AND scheduled_for_date <= ?1
+             ORDER BY scheduled_for_date, hlc_timestamp, id LIMIT 1",
+            [date],
+            directive_row,
+        ).optional().map_err(StoreError::Sqlite)
+    }
+
     pub fn set_directive_state(
         &self,
         id: &str,
@@ -783,6 +795,9 @@ impl Repos {
     /// Recent check-in outcomes ordered by date desc (velocity context
     /// for Tier 2 / recalibration).
     pub fn recent_check_ins(&self, days: i64) -> Result<Vec<CheckIn>, StoreError> {
+        if !(0..=1024).contains(&days) {
+            return Err(StoreError::Invalid("check-in limit must be in 0–1024".into()));
+        }
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, date, outcome, note, hlc_timestamp FROM check_ins
@@ -1013,6 +1028,9 @@ impl Repos {
     /// a bare `ORDER BY created_at_epoch_ms` lets SQLite return either
     /// order — retries could then re-push the same ops shuffled.
     pub fn pending_outbox(&self, limit: i64) -> Result<Vec<OutboxOp>, StoreError> {
+        if !(0..=1024).contains(&limit) {
+            return Err(StoreError::Invalid("outbox limit must be in 0–1024".into()));
+        }
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT operation_id, hlc_timestamp, table_name, record_id, encrypted_payload

@@ -102,15 +102,14 @@ impl<'a> Engine<'a> {
                 estimated_minutes,
             });
         }
-        let candidates = self.repos.runnable_directives(date)?;
-        let Some(next) = candidates.first() else {
+        let Some(next) = self.repos.next_runnable_directive(date)? else {
             return Ok(EngineOutcome::Idle);
         };
         self.repos
             .set_directive_state(&next.id, DirectiveState::Active, self.identity)?;
         self.ensure_milestone_active(&next.milestone_id)?;
-        let estimated_minutes = self.current_phase_minutes(next);
-        let phase = self.phase_view(next);
+        let estimated_minutes = self.current_phase_minutes(&next)?;
+        let phase = self.phase_view(&next);
         Ok(EngineOutcome::DirectiveActive {
             directive_id: next.id.clone(),
             milestone_id: next.milestone_id.clone(),
