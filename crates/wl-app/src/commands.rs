@@ -690,12 +690,18 @@ pub(crate) async fn relay_authenticate(
             .clone()
             .ok_or(ShellError::NoRelay)?;
         let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
-        let session = shared.with_identity(|identity| relay::handshake(&base, identity))?;
-        let account_id = shared.with_identity(|id| Ok(id.account_id_hex()))?;
-        *shared.relay_token.lock().unwrap() = Some(session.token.clone());
-        Ok(RelayAuthView {
-            account_id,
-            expires_at: session.expires_at,
+        shared.with_identity(|identity| {
+            let session = relay::handshake(&base, identity)?;
+            let account_id = identity.account_id_hex();
+            *shared.relay_token.lock().unwrap() = Some(crate::app_state::RelaySession {
+                base,
+                account_id: account_id.clone(),
+                token: session.token,
+            });
+            Ok(RelayAuthView {
+                account_id,
+                expires_at: session.expires_at,
+            })
         })
     })
     .await
@@ -703,34 +709,37 @@ pub(crate) async fn relay_authenticate(
 }
 
 /// Ensures a cached bearer token, handshaking first when absent.
-fn ensure_token(state: &AppState, base: &str) -> ShellResult<String> {
-    if let Some(t) = state.relay_token.lock().unwrap().clone() {
-        return Ok(t);
+fn ensure_token(state: &AppState, base: &str, identity: &Identity) -> ShellResult<String> {
+    let account_id = identity.account_id_hex();
+    if let Some(token) = state
+        .relay_token
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|session| session.token_for(base, &account_id))
+    {
+        return Ok(token.to_string());
     }
-    let token = state
-        .with_identity(|identity| relay::handshake(base, identity).map(|s| s.token.clone()))?;
-    *state.relay_token.lock().unwrap() = Some(token.clone());
+    let token = relay::handshake(base, identity)?.token;
+    *state.relay_token.lock().unwrap() = Some(crate::app_state::RelaySession {
+        base: base.to_string(),
+        account_id,
+        token: token.clone(),
+    });
     Ok(token)
 }
 
 fn run_cycle(
     state: &AppState,
+    identity: &Identity,
     base: &str,
     token: &str,
 ) -> Result<wl_sync::sync::SyncStats, wl_sync::sync::SyncError> {
-    state
-        .with_identity(|identity| {
-            let transport = ReqwestTransport {
-                base: base.to_string(),
-                token: token.to_string(),
-            };
-            wl_sync::sync::sync_cycle(&state.repos, identity, &transport, 200)
-                .map_err(ShellError::Sync)
-        })
-        .map_err(|e| match e {
-            ShellError::Sync(inner) => inner,
-            other => wl_sync::sync::SyncError::Transport(format!("local: {other}")),
-        })
+    let transport = ReqwestTransport {
+        base: base.to_string(),
+        token: token.to_string(),
+    };
+    wl_sync::sync::sync_cycle(&state.repos, identity, &transport, 200)
 }
 
 #[tauri::command]
@@ -748,17 +757,17 @@ pub(crate) async fn sync_now(
             .clone()
             .ok_or(ShellError::NoRelay)?;
         let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
-        let token = ensure_token(&shared, &base)?;
-        let stats = match run_cycle(&shared, &base, &token) {
-            // Session expired server-side (1h TTL) or relay restarted and
-            // lost its session table: re-handshake exactly once, then retry.
-            Err(wl_sync::sync::SyncError::Transport(msg)) if msg.starts_with("HTTP 401") => {
-                *shared.relay_token.lock().unwrap() = None;
-                let fresh = ensure_token(&shared, &base)?;
-                run_cycle(&shared, &base, &fresh)?
+        let stats = shared.with_identity(|identity| {
+            let token = ensure_token(&shared, &base, identity)?;
+            match run_cycle(&shared, identity, &base, &token) {
+                Err(wl_sync::sync::SyncError::Transport(msg)) if msg.starts_with("HTTP 401") => {
+                    *shared.relay_token.lock().unwrap() = None;
+                    let fresh = ensure_token(&shared, &base, identity)?;
+                    run_cycle(&shared, identity, &base, &fresh).map_err(ShellError::from)
+                }
+                other => other.map_err(ShellError::from),
             }
-            other => other?,
-        };
+        })?;
         // NOTE: the UI drives its HUD pill from this return value
         // (no event bridge needed while sync is on-demand only; revisit
         // if background auto-sync ever lands).

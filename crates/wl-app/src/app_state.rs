@@ -27,7 +27,7 @@ pub struct AppState {
     pub repos: Repos,
     pub identity: Mutex<Option<Identity>>,
     pub vault: Vault,
-    pub relay_token: Mutex<Option<String>>,
+    pub relay_token: Mutex<Option<RelaySession>>,
     pub relay_url: Mutex<Option<String>>,
 }
 
