@@ -129,6 +129,16 @@ pub struct VelocityView {
     pub estimate_adjustment: f64,
 }
 
+/// B-005: shell returns what the dispatcher AUTHORED and what it
+/// actually PERSISTED — the UI must not assume the two are equal
+/// (no key / offline / validation failure yield zero persisted).
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
+pub struct BriefingView {
+    pub titles: Vec<String>,
+    #[serde(default)]
+    pub created_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppSettingsView {
     pub theme: String,

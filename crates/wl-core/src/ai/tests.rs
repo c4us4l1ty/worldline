@@ -266,6 +266,7 @@ fn validation_bounds_and_persistence_preflight() {
         directives: parse_plan(PLAN_JSON).unwrap().milestones[0]
             .directives
             .clone(),
+        created_ids: Vec::new(),
     };
     brief.directives[1].title.clear();
     assert!(persist_briefing(&r, &brief, "2026-09-13", None).is_err());

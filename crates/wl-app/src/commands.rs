@@ -988,13 +988,24 @@ fn http_execute(
     })
 }
 
+#[derive(Serialize)]
+pub struct BriefingView {
+    /// Directive titles as authored by the dispatcher (≤3, display only).
+    pub titles: Vec<String>,
+    /// IDs of directive rows actually persisted by this briefing
+    /// (B-005: the UI must not assume persistence succeeded — a
+    /// missing key, offline dispatcher, or validation failure yields
+    /// zero created directives while titles may still render).
+    pub created_ids: Vec<String>,
+}
+
 #[tauri::command]
 pub(crate) async fn morning_briefing(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
     model: String,
     constraints: String,
-) -> ShellResult<Vec<String>> {
+) -> ShellResult<BriefingView> {
     let shared: std::sync::Arc<AppState> = (*state).clone();
     tokio::task::spawn_blocking(move || {
         let api_key = vault_api_key(&shared, &provider)?;
@@ -1021,7 +1032,13 @@ pub(crate) async fn morning_briefing(
             )
             .map_err(ShellError::from)
         })?;
-        Ok(brief.directives.into_iter().map(|d| d.title).collect())
+        let titles = brief.directives.iter().map(|d| d.title.clone()).collect();
+        // IDs actually persisted by this briefing's `persist_briefing`
+        // (single source of truth for what landed in the store — B-005).
+        Ok(BriefingView {
+            titles,
+            created_ids: brief.created_ids,
+        })
     })
     .await
     .map_err(|e| ShellError::Io(format!("morning briefing task: {e}")))?

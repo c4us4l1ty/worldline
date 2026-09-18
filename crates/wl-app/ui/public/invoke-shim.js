@@ -131,7 +131,7 @@
     relay_authenticate: function () { return Promise.resolve({ account_id: 'mock-account', relay_url: null }); },
     master_plan: function (args) { return Promise.resolve('goal-ai-1'); },
     morning_briefing: function (args) {
-      return Promise.resolve(['Write 300 words on Section 2.1', 'Review yesterday\'s test failures']);
+      return Promise.resolve({ titles: ['Write 300 words on Section 2.1', 'Review yesterday\'s test failures'], created_ids: ['dir-mock-1', 'dir-mock-2'] });
     },
     set_always_on_top: function (args) { return Promise.resolve(null); },
     toggle_window_visibility: function () { return Promise.resolve(null); },

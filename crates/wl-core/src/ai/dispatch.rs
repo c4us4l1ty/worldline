@@ -156,6 +156,11 @@ pub struct PlanResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BriefingResult {
     pub directives: Vec<DirectiveDraft>,
+    /// IDs of the directive rows this briefing persisted (empty when
+    /// persistence was skipped/failed upstream — B-005 honesty).
+    /// Not serialized on the wire contract; set by the dispatcher.
+    #[serde(default, skip_serializing)]
+    pub created_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +583,10 @@ impl AiDispatcher {
             .extract_text(&resp)
             .ok_or_else(|| DispatchError::BadJson("no content in response".into()))?;
         let brief = parse_briefing(&text)?;
-        persist_briefing(repos, &brief, today, identity)?;
-        Ok(brief)
+        let created_ids = persist_briefing(repos, &brief, today, identity)?;
+        Ok(BriefingResult {
+            directives: brief.directives,
+            created_ids,
+        })
     }
 }
