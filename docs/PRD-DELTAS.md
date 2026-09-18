@@ -350,4 +350,11 @@ Locked decisions from the planning session are marked [approved].
     dispatches; browser mock verifies backup words positionally like
     the shell; `active_directive` orders by `(hlc DESC, id)` matching
     the `enforce_single_active` winner.
+72. **Release dist prunes stale hashed assets** — `dx build`
+    content-hashes wasm/js but never deletes superseded bundles, so
+    every rebuild permanently added ~800 KiB of dead weight that Tauri
+    embeds into the shipped app. `scripts/prune-dx-dist.sh` (wired into
+    `beforeBuildCommand` via `scripts/build-ui.sh`) keeps exactly the
+    assets reachable from `index.html` (js directly, wasm via the kept
+    js); public assets, fonts, and the shim are never touched.
 
