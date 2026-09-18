@@ -77,7 +77,7 @@ pub fn GoalCreateScreen() -> Element {
         });
     };
 
-    let create_manual = move || {
+    let mut create_manual = move || {
         if *busy.peek() {
             return;
         }

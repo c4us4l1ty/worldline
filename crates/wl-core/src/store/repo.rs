@@ -1038,7 +1038,9 @@ impl Repos {
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
         if s.theme != "dark" && s.theme != "light" {
-            return Err(StoreError::Invalid("theme must be 'dark' or 'light'".into()));
+            return Err(StoreError::Invalid(
+                "theme must be 'dark' or 'light'".into(),
+            ));
         }
         // Empty hotkey normalizes to the default (boot does the same);
         // anything longer than a plausible accelerator is junk.

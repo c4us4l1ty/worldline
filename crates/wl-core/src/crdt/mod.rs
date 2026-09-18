@@ -422,8 +422,22 @@ mod tests {
         // identical full HLCs on different content. Arbitration must
         // still be total: greater operation id wins, on every replica,
         // in every delivery order.
-        let a = op("op-aaa", "goals", "g1", "100.5.1", 1, serde_json::json!({"v": "a"}));
-        let b = op("op-bbb", "goals", "g1", "100.5.1", 1, serde_json::json!({"v": "b"}));
+        let a = op(
+            "op-aaa",
+            "goals",
+            "g1",
+            "100.5.1",
+            1,
+            serde_json::json!({"v": "a"}),
+        );
+        let b = op(
+            "op-bbb",
+            "goals",
+            "g1",
+            "100.5.1",
+            1,
+            serde_json::json!({"v": "b"}),
+        );
         let mut s1 = TableState::new();
         let mut s2 = TableState::new();
         assert!(s1.apply(&a));

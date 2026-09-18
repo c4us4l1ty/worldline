@@ -328,7 +328,9 @@ fn facades_reject_bad_input_before_any_http_call() {
         panic!("HTTP must not be attempted for invalid input")
     };
     // master_plan: blank title, bad date, over-budget context.
-    assert!(AiDispatcher::master_plan(&provider, "  ", None, None, "c", no_http, &r, None).is_err());
+    assert!(
+        AiDispatcher::master_plan(&provider, "  ", None, None, "c", no_http, &r, None).is_err()
+    );
     assert!(AiDispatcher::master_plan(
         &provider,
         "Goal",
@@ -352,16 +354,10 @@ fn facades_reject_bad_input_before_any_http_call() {
     )
     .is_err());
     // morning_briefing: bad date, over-budget constraints.
-    assert!(AiDispatcher::morning_briefing(
-        &provider,
-        "yesterday",
-        "c",
-        "{}",
-        no_http,
-        &r,
-        None
-    )
-    .is_err());
+    assert!(
+        AiDispatcher::morning_briefing(&provider, "yesterday", "c", "{}", no_http, &r, None)
+            .is_err()
+    );
     assert!(AiDispatcher::morning_briefing(
         &provider,
         "2026-09-18",

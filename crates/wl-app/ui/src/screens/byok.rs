@@ -28,7 +28,6 @@ pub fn ByokSetupScreen() -> Element {
     let mut key_saved = use_signal(|| false);
     let mut busy = use_signal(|| false);
 
-    let p = provider.read().clone();
     // Probe vault presence for the selected provider. Subscribes to the
     // provider signal so pill switches re-probe; the in-flight guard
     // drops stale responses from rapid switches.

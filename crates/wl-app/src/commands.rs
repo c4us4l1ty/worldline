@@ -229,7 +229,9 @@ pub(crate) async fn set_api_key(
         return Err(ShellError::Invalid("empty API key".into()));
     }
     if key.trim().chars().count() > 8192 {
-        return Err(ShellError::Invalid("API key exceeds 8192 characters".into()));
+        return Err(ShellError::Invalid(
+            "API key exceeds 8192 characters".into(),
+        ));
     }
     state
         .vault

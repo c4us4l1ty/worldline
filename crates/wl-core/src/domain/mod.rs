@@ -367,8 +367,7 @@ pub const MAX_BAILOUT_NOTE_CHARS: usize = 140;
 /// directive; the bound also keeps phase-rescale arithmetic tame.
 pub const MAX_MINUTES: i64 = 1440;
 /// AI providers the shell knows how to call (BYOK).
-pub const KNOWN_PROVIDERS: &[&str] =
-    &["anthropic", "openai-compat", "openrouter", "gemini-compat"];
+pub const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai-compat", "openrouter", "gemini-compat"];
 
 /// Rejects blank or over-budget text at write boundaries.
 pub fn check_text(field: &'static str, value: &str, max_chars: usize) -> Result<(), String> {
@@ -538,7 +537,14 @@ mod tests {
     fn write_boundary_dates_and_minutes() {
         assert!(check_date("d", "2026-09-18").is_ok());
         assert!(check_date("d", "2024-02-29").is_ok());
-        for bad in ["", "garbage", "2026-13-01", "2026-02-30", "2026-9-8", " 2026-09-18"] {
+        for bad in [
+            "",
+            "garbage",
+            "2026-13-01",
+            "2026-02-30",
+            "2026-9-8",
+            " 2026-09-18",
+        ] {
             assert!(check_date("d", bad).is_err(), "{bad:?} must be rejected");
         }
         assert!(check_minutes("m", 1).is_ok());

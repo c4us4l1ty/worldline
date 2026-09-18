@@ -711,7 +711,12 @@ fn write_paths_reject_blank_oversized_and_malformed_input() {
         .upsert_check_in("09/13/2026", CheckInOutcome::Done, None, None)
         .is_err());
     assert!(r
-        .upsert_check_in("2026-09-13", CheckInOutcome::Done, Some(&"n".repeat(2001)), None)
+        .upsert_check_in(
+            "2026-09-13",
+            CheckInOutcome::Done,
+            Some(&"n".repeat(2001)),
+            None
+        )
         .is_err());
     // Nothing partial was persisted by the rejections above.
     assert!(r.goal(&g.id).unwrap().is_some());
@@ -752,18 +757,21 @@ fn settings_reject_unknown_theme_provider_and_absurd_hotkey() {
         f(&mut s);
         s
     };
-    assert!(r.save_settings(&case(&|s| s.theme = "neon".into()), None).is_err());
-    assert!(
-        r.save_settings(&case(&|s| s.ai_provider = Some("evil-ai".into())), None)
-            .is_err()
-    );
-    assert!(r.save_settings(&case(&|s| s.hotkey = "x".repeat(65)), None).is_err());
-    assert!(
-        r.save_settings(&case(&|s| s.tier1_model = Some("m".repeat(257))), None)
-            .is_err()
-    );
+    assert!(r
+        .save_settings(&case(&|s| s.theme = "neon".into()), None)
+        .is_err());
+    assert!(r
+        .save_settings(&case(&|s| s.ai_provider = Some("evil-ai".into())), None)
+        .is_err());
+    assert!(r
+        .save_settings(&case(&|s| s.hotkey = "x".repeat(65)), None)
+        .is_err());
+    assert!(r
+        .save_settings(&case(&|s| s.tier1_model = Some("m".repeat(257))), None)
+        .is_err());
     // Empty hotkey normalizes to the default in both row and payload.
-    r.save_settings(&case(&|s| s.hotkey = "   ".into()), None).unwrap();
+    r.save_settings(&case(&|s| s.hotkey = "   ".into()), None)
+        .unwrap();
     assert_eq!(r.settings().unwrap().hotkey, "alt+space");
 }
 
@@ -774,8 +782,12 @@ fn reschedule_rejects_out_of_range_estimates_and_dates() {
     let d = r
         .create_directive(&milestones[0].id, "T", None, 30, 1, "2026-09-13", &[], None)
         .unwrap();
-    assert!(r.reschedule_directive(&d.id, 0, "2026-09-14", None).is_err());
-    assert!(r.reschedule_directive(&d.id, 1441, "2026-09-14", None).is_err());
+    assert!(r
+        .reschedule_directive(&d.id, 0, "2026-09-14", None)
+        .is_err());
+    assert!(r
+        .reschedule_directive(&d.id, 1441, "2026-09-14", None)
+        .is_err());
     assert!(r.reschedule_directive(&d.id, 30, "tomorrow", None).is_err());
     let unchanged = r.directive(&d.id).unwrap().unwrap();
     assert_eq!(unchanged.estimated_minutes, 30);
@@ -858,16 +870,15 @@ fn zero_backfill_migration_repairs_legacy_rows() {
         super::migrations::run(&conn).unwrap();
     }
     for p in r.phases_for_directive(&d.id).unwrap() {
-        assert_eq!(
-            (p.hlc_timestamp.physical, p.hlc_timestamp.counter),
-            (0, 0)
-        );
+        assert_eq!((p.hlc_timestamp.physical, p.hlc_timestamp.counter), (0, 0));
     }
     let versions: i64 = r
         .conn
         .lock()
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(versions, 4);
 }

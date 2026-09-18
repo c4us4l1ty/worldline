@@ -509,8 +509,7 @@ async fn poison_constraint_op_quarantines_without_wedging_sync() {
     // failure — retrying changes nothing — so it must quarantine.
     let ts = a.hlc.now(a.device_id());
     assert!(ts > c1.hlc_timestamp);
-    let fields =
-        serde_json::json!({"date": c2.date, "outcome": "done", "note": null});
+    let fields = serde_json::json!({"date": c2.date, "outcome": "done", "note": null});
     let aad = format!("check_ins:{}", c1.id);
     let sealed = wl_core::crypto::aead::seal(
         &identity,
@@ -541,8 +540,14 @@ async fn poison_constraint_op_quarantines_without_wedging_sync() {
     // cursor at cycle end — the relay paginates strictly after it, so
     // the op can never resurface.)
     // Loser rows untouched, winner rows intact.
-    assert_eq!(a.check_in_for_date("2026-09-17").unwrap().unwrap().id, c1.id);
-    assert_eq!(a.check_in_for_date("2026-09-18").unwrap().unwrap().id, c2.id);
+    assert_eq!(
+        a.check_in_for_date("2026-09-17").unwrap().unwrap().id,
+        c1.id
+    );
+    assert_eq!(
+        a.check_in_for_date("2026-09-18").unwrap().unwrap().id,
+        c2.id
+    );
     // The poison op never wedges later cycles.
     let s2 = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!((s2.pulled, s2.quarantined, s2.applied), (0, 0, 0));

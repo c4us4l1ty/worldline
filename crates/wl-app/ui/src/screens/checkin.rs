@@ -13,23 +13,6 @@ fn claim_submission(busy: &mut bool, submitted: bool) -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn submission_rejects_duplicates_and_allows_retry_after_failure() {
-        let mut busy = false;
-        assert!(claim_submission(&mut busy, false));
-        assert!(!claim_submission(&mut busy, false));
-        busy = false;
-        assert!(claim_submission(&mut busy, false));
-        busy = false;
-        assert!(!claim_submission(&mut busy, true));
-        assert!(!busy);
-    }
-}
-
 pub fn CheckInScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut note = use_signal(String::new);
@@ -138,5 +121,22 @@ pub fn CheckInScreen() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claim_submission;
+
+    #[test]
+    fn submission_rejects_duplicates_and_allows_retry_after_failure() {
+        let mut busy = false;
+        assert!(claim_submission(&mut busy, false));
+        assert!(!claim_submission(&mut busy, false));
+        busy = false;
+        assert!(claim_submission(&mut busy, false));
+        busy = false;
+        assert!(!claim_submission(&mut busy, true));
+        assert!(!busy);
     }
 }
