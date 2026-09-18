@@ -147,10 +147,10 @@ pub fn SettingsScreen() -> Element {
                         local.set(v);
                     },
                     option { value: "", "None (manual mode)" }
-                    option { value: "openai-compat", "OpenAI" }
                     option { value: "openrouter", "OpenRouter" }
-                    option { value: "anthropic", "Anthropic" }
-                    option { value: "gemini-compat", "Gemini" }
+                    option { value: "google", "Google" }
+                    option { value: "qwen", "Qwen" }
+                    option { value: "bytez.com", "bytez.com" }
                 }
             }
 
@@ -196,7 +196,7 @@ pub fn SettingsScreen() -> Element {
                                 .read()
                                 .ai_provider
                                 .clone()
-                                .unwrap_or_else(|| "openai-compat".into());
+                                .unwrap_or_else(|| "openrouter".into());
                             let key = api_key.read().clone();
                             if key.trim().is_empty() {
                                 flash(&ctx, "KEY EMPTY");
@@ -231,7 +231,7 @@ pub fn SettingsScreen() -> Element {
                                     .read()
                                     .ai_provider
                                     .clone()
-                                    .unwrap_or_else(|| "openai-compat".into());
+                                    .unwrap_or_else(|| "openrouter".into());
                                 spawn(async move {
                                     match invoke::<bool>(
                                         "delete_api_key",

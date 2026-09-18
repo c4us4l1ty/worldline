@@ -309,7 +309,7 @@ pub struct AppSettings {
     pub hotkey: String,
     /// `true` = window floats above other apps.
     pub always_on_top: bool,
-    /// AI provider: `openai-compat` | `anthropic` (BYOK).
+    /// AI provider: `openrouter` | `google` | `qwen` | `bytez.com` (BYOK).
     pub ai_provider: Option<String>,
     /// User-configurable model ids per tier (Tier 1 architect).
     pub tier1_model: Option<String>,
@@ -366,8 +366,9 @@ pub const MAX_BAILOUT_NOTE_CHARS: usize = 140;
 /// A single directive longer than a day is a planning error, not a
 /// directive; the bound also keeps phase-rescale arithmetic tame.
 pub const MAX_MINUTES: i64 = 1440;
-/// AI providers the shell knows how to call (BYOK).
-pub const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai-compat", "openrouter", "gemini-compat"];
+/// AI providers the shell knows how to call (BYOK): exactly the four
+/// approved OpenAI-compatible endpoints (PRD-DELTAS #73).
+pub const KNOWN_PROVIDERS: &[&str] = &["openrouter", "google", "qwen", "bytez.com"];
 
 /// Rejects blank or over-budget text at write boundaries.
 pub fn check_text(field: &'static str, value: &str, max_chars: usize) -> Result<(), String> {

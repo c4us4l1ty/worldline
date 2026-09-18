@@ -39,7 +39,7 @@ device-id tie-break + tombstones). Convergence is property-tested.
 **AI (PRD §4, BYOK):** Tier-1 Master Architect (goal → milestones), Tier-2
 Tactical Dispatcher (daily 1–3 directives, 48h context window), Tier-3 local
 Rust engine (offline, timers, phases, escape-hatch reactions, velocity EWMA).
-OpenAI-compatible + Anthropic adapters; model ids are user settings. Manual
+OpenAI-compatible adapters (OpenRouter, Google, Qwen, bytez.com); model ids are user settings. Manual
 goal creation works with no API key at all.
 
 ## Build & run

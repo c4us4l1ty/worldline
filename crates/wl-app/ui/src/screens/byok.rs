@@ -9,10 +9,11 @@ use dioxus::prelude::*;
 
 use crate::app::{flash, invoke, AppCtx, Screen};
 
-const PROVIDERS: [(&str, &str); 3] = [
-    ("anthropic", "Anthropic"),
-    ("openai-compat", "OpenAI"),
+const PROVIDERS: [(&str, &str); 4] = [
     ("openrouter", "OpenRouter"),
+    ("google", "Google"),
+    ("qwen", "Qwen"),
+    ("bytez.com", "bytez.com"),
 ];
 
 pub fn ByokSetupScreen() -> Element {
@@ -22,7 +23,7 @@ pub fn ByokSetupScreen() -> Element {
             .read()
             .ai_provider
             .clone()
-            .unwrap_or_else(|| "anthropic".into())
+            .unwrap_or_else(|| "openrouter".into())
     });
     let mut api_key = use_signal(String::new);
     let mut key_saved = use_signal(|| false);
@@ -89,7 +90,7 @@ pub fn ByokSetupScreen() -> Element {
                 input {
                     class: "wl-input wl-mono",
                     r#type: "password",
-                    placeholder: "sk-ant-… (sealed, never displayed again)",
+                    placeholder: "Provider key (sealed, never displayed again)",
                     autocomplete: "off",
                     spellcheck: "false",
                     value: "{api_key.read().clone()}",

@@ -300,6 +300,31 @@ Locked decisions from the planning session are marked [approved].
     AEAD AAD operation_id/HLC binding, AI batch atomicity, vault API-key
     rollback, spawn_blocking refactor for sync IPC.
 
+## Phase-1 fixes (2026-09-19 — B-001…B-009)
+
+73. **Provider matrix pinned to four OpenAI-compatible endpoints** —
+    `openrouter | google | qwen | bytez.com`. The Anthropic-native
+    adapter variant is removed; a single `OpenAiCompat` variant plus a
+    per-provider base URL covers the whole matrix. Endpoints: OpenRouter
+    `https://openrouter.ai/api/v1`, Google
+    `https://generativelanguage.googleapis.com/v1beta/openai`, Qwen
+    `https://dashscope.aliyuncs.com/compatible-mode/v1`, bytez
+    `https://api.bytez.com/models/v2/openai/v1` (per bytez OpenAI-compat
+    docs). `base_for` returns `None` (reject) instead of silently
+    falling back to OpenAI; the shell allow-list is pinned equal to
+    `KNOWN_PROVIDERS` by test; the vault provider-id charset gains `.`
+    for `bytez.com`.
+
+74. **Manual goal auto-seeds its starter set (B-002 option b)** — shell
+    `create_goal` seeds milestone "First steps" + one 25-minute
+    directive titled from the goal, scheduled today, so
+    `Engine::current` activates it on the next canvas load with NO API
+    key and NO unlocked identity. Core `Repos::create_goal` is
+    unchanged (AI `persist_plan` must not inherit seeds). Directive
+    authoring UI is deferred to Phase-2 MVP-1; the
+    `create_manual_milestone` / `create_manual_directive` shell
+    commands already exist for it.
+
 ## Battle-test pass 3 (2026-09-18, singularity audit — 162 workspace + 15 shell + 10 UI tests)
 
 64. **Write-boundary budgets** — every local write path now rejects

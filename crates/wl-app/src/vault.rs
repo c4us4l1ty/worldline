@@ -93,7 +93,7 @@ impl Vault {
     // -- BYOK provider keys (Item 2) -----------------------------------
 
     /// Stores (or replaces) the API key for a provider id such as
-    /// `openai-compat`, `openrouter`, or `anthropic`.
+    /// `openrouter`, `google`, `qwen`, or `bytez.com`.
     pub fn save_api_key(&self, provider: &str, key: &str) -> Result<(), VaultError> {
         let record = api_key_record(provider)?;
         self.put(&record, key.as_bytes())?;
@@ -189,7 +189,13 @@ impl Vault {
 
 fn api_key_record(provider: &str) -> Result<Vec<u8>, VaultError> {
     let p = provider.trim();
-    if p.is_empty() || p.len() > 64 || !p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+    // Dots are legal: the approved provider set contains `bytez.com` (B-001).
+    if p.is_empty()
+        || p.len() > 64
+        || !p
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    {
         return Err(VaultError::Stronghold(format!(
             "invalid provider id {provider:?}"
         )));
@@ -300,22 +306,22 @@ mod tests {
     fn api_key_roundtrip() {
         let dir = tmpdir();
         let v = Vault::open(&dir).unwrap();
-        assert!(!v.has_api_key("openai-compat").unwrap());
-        v.save_api_key("openai-compat", "sk-test-123").unwrap();
-        assert!(v.has_api_key("openai-compat").unwrap());
-        let got = v.get_api_key("openai-compat").unwrap().unwrap();
+        assert!(!v.has_api_key("openrouter").unwrap());
+        v.save_api_key("openrouter", "sk-test-123").unwrap();
+        assert!(v.has_api_key("openrouter").unwrap());
+        let got = v.get_api_key("openrouter").unwrap().unwrap();
         assert_eq!(got.as_str(), "sk-test-123");
         // Provider namespaces are isolated.
-        assert!(v.get_api_key("anthropic").unwrap().is_none());
+        assert!(v.get_api_key("google").unwrap().is_none());
         // Replace + delete.
-        v.save_api_key("openai-compat", "sk-test-456").unwrap();
+        v.save_api_key("openrouter", "sk-test-456").unwrap();
         assert_eq!(
-            v.get_api_key("openai-compat").unwrap().unwrap().as_str(),
+            v.get_api_key("openrouter").unwrap().unwrap().as_str(),
             "sk-test-456"
         );
-        assert!(v.delete_api_key("openai-compat").unwrap());
-        assert!(!v.has_api_key("openai-compat").unwrap());
-        assert!(!v.delete_api_key("openai-compat").unwrap());
+        assert!(v.delete_api_key("openrouter").unwrap());
+        assert!(!v.has_api_key("openrouter").unwrap());
+        assert!(!v.delete_api_key("openrouter").unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -380,7 +386,7 @@ mod tests {
                 assert_eq!(mode(&dir.join(".vault-key")), 0o600);
                 assert!(!dir.join("vault.hold").exists());
                 for value in ["first", "replacement"] {
-                    v.save_api_key("openai-compat", value).unwrap();
+                    v.save_api_key("bytez.com", value).unwrap();
                     assert_eq!(mode(&dir), 0o700);
                     assert_eq!(mode(&dir.join("vault.hold")), 0o600);
                 }
@@ -394,10 +400,10 @@ mod tests {
                 let v = Vault::open(&dir).unwrap();
                 assert_eq!(mode(&dir.join("vault.hold")), 0o600);
                 assert_eq!(
-                    v.get_api_key("openai-compat").unwrap().unwrap().as_str(),
+                    v.get_api_key("bytez.com").unwrap().unwrap().as_str(),
                     "replacement"
                 );
-                assert!(v.delete_api_key("openai-compat").unwrap());
+                assert!(v.delete_api_key("bytez.com").unwrap());
                 assert_eq!(mode(&dir.join("vault.hold")), 0o600);
             }
             std::fs::remove_dir_all(&root).unwrap();
@@ -409,7 +415,7 @@ mod tests {
         let dir = tmpdir();
         {
             let vault = Vault::open(&dir).unwrap();
-            vault.save_api_key("openai", "test-key").unwrap();
+            vault.save_api_key("qwen", "test-key").unwrap();
         }
         let snapshot = std::fs::read(dir.join("vault.hold")).unwrap();
         std::fs::remove_file(dir.join(".vault-key")).unwrap();

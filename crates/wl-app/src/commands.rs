@@ -279,7 +279,7 @@ pub(crate) async fn create_goal(
     // Identity is optional here: logged-out goal drafts still work, but
     // only an unlocked vault write-throughs to the outbox.
     let g = state.with_identity_opt(|identity| {
-        state
+        let g = state
             .repos
             .create_goal(
                 &title,
@@ -287,9 +287,40 @@ pub(crate) async fn create_goal(
                 target_date.as_deref(),
                 identity,
             )
-            .map_err(ShellError::from)
+            .map_err(ShellError::from)?;
+        // B-002 (option b): a manual goal must never be a dead end. Seed
+        // one milestone + one directive from the goal title so the canvas
+        // has a runnable directive with NO API key (the AI restructures
+        // the plan once a key exists). Authoring UI for further
+        // milestones/directives is Phase-2 MVP-1; the manual shell
+        // commands already exist for it.
+        seed_first_steps(&state.repos, &g, identity).map_err(ShellError::from)?;
+        Ok(g)
     })?;
     Ok(goal_json(&g, &state.repos))
+}
+
+/// Seeds the manual-goal starter set: milestone "First steps" + one
+/// 25-minute directive titled from the goal, scheduled today so
+/// `Engine::current` activates it on the next canvas load. 25 minutes
+/// stays under the progressive threshold — no phases to author.
+fn seed_first_steps(
+    repos: &Repos,
+    goal: &Goal,
+    identity: Option<&Identity>,
+) -> Result<(), wl_core::store::StoreError> {
+    let m = repos.create_milestone(&goal.id, "First steps", None, 0, identity)?;
+    repos.create_directive(
+        &m.id,
+        &goal.title,
+        goal.description.as_deref(),
+        25,
+        1,
+        &today_local(),
+        &[],
+        identity,
+    )?;
+    Ok(())
 }
 
 fn goal_json(g: &Goal, repos: &Repos) -> GoalJson {
@@ -849,12 +880,11 @@ pub struct SyncStatsView {
 // ---------------------------------------------------------------------------
 
 /// Reads the provider key from the vault (keys never cross the
-/// command boundary from the UI anymore — Item 2).
+/// command boundary from the UI anymore — Item 2). The allow-list is
+/// exactly `wl_core::domain::KNOWN_PROVIDERS` (B-001 regression test
+/// below pins them equal).
 fn vault_api_key(state: &AppState, provider: &str) -> ShellResult<Zeroizing<String>> {
-    if !matches!(
-        provider,
-        "anthropic" | "openai" | "openrouter" | "gemini-compat"
-    ) {
+    if !KNOWN_PROVIDERS.contains(&provider) {
         return Err(ShellError::Invalid("unknown AI provider".into()));
     }
     state
@@ -880,13 +910,14 @@ pub(crate) async fn master_plan(
         // Move the Zeroizing wrapper straight into the adapter: no
         // intermediate plain-String clone (the old `.to_string()` left a
         // non-zeroized copy on the heap next to the wiped original).
-        let adapter = match provider.as_str() {
-            "anthropic" => ProviderAdapter::Anthropic { api_key, model },
-            _ => ProviderAdapter::OpenAiCompat {
-                base_url: base_for(&provider),
-                api_key,
-                model,
-            },
+        // Every approved provider speaks OpenAI-compatible chat
+        // completions; only the base URL varies (B-001).
+        let base_url = base_for(&provider)
+            .ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        let adapter = ProviderAdapter::OpenAiCompat {
+            base_url,
+            api_key,
+            model,
         };
         let (goal_id, _plan) = shared.with_identity_opt(|identity| {
             AiDispatcher::master_plan(
@@ -907,11 +938,17 @@ pub(crate) async fn master_plan(
     .map_err(|e| ShellError::Io(format!("master plan task: {e}")))?
 }
 
-fn base_for(provider: &str) -> String {
+/// OpenAI-compatible base URL per approved provider id
+/// (`openrouter | google | qwen | bytez.com`). `None` for anything else —
+/// callers already rejected unknown ids in `vault_api_key`, so `None` is
+/// a defence-in-depth path, never a silent OpenAI fallback (B-001).
+fn base_for(provider: &str) -> Option<String> {
     match provider {
-        "openrouter" => "https://openrouter.ai/api/v1".into(),
-        "gemini-compat" => "https://generativelanguage.googleapis.com/v1beta/openai".into(),
-        _ => "https://api.openai.com/v1".into(),
+        "openrouter" => Some("https://openrouter.ai/api/v1".into()),
+        "google" => Some("https://generativelanguage.googleapis.com/v1beta/openai".into()),
+        "qwen" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
+        "bytez.com" => Some("https://api.bytez.com/models/v2/openai/v1".into()),
+        _ => None,
     }
 }
 
@@ -962,13 +999,12 @@ pub(crate) async fn morning_briefing(
     tokio::task::spawn_blocking(move || {
         let api_key = vault_api_key(&shared, &provider)?;
         // Same move-not-clone discipline as master_plan (see there).
-        let adapter = match provider.as_str() {
-            "anthropic" => ProviderAdapter::Anthropic { api_key, model },
-            _ => ProviderAdapter::OpenAiCompat {
-                base_url: base_for(&provider),
-                api_key,
-                model,
-            },
+        let base_url = base_for(&provider)
+            .ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        let adapter = ProviderAdapter::OpenAiCompat {
+            base_url,
+            api_key,
+            model,
         };
         let today = today_local();
         let velocity_json =
@@ -1072,6 +1108,84 @@ mod tests {
         assert_eq!(reopened.get_mnemonic().unwrap().as_str(), phrase.as_str());
         drop(reopened);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn provider_matrix_key_save_to_master_plan_for_all_four() {
+        // B-001 regression: the shell allow-list is exactly the core
+        // 4-provider set, every id maps to an endpoint, and vault key
+        // save → adapter → master_plan (mocked HTTP) succeeds for each.
+        assert_eq!(
+            KNOWN_PROVIDERS,
+            &["openrouter", "google", "qwen", "bytez.com"]
+        );
+        let dir = std::env::temp_dir().join(format!("wl-provider-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let state = AppState {
+            repos: Repos::new(wl_core::store::open_in_memory().unwrap(), 1),
+            identity: std::sync::Mutex::new(None),
+            vault: crate::vault::Vault::open(&dir).unwrap(),
+            relay_token: std::sync::Mutex::new(None),
+            relay_url: std::sync::Mutex::new(None),
+        };
+        const PLAN: &str = r#"{"milestones":[{"title":"M","directives":[
+            {"title":"D","estimated_minutes":10,"phases":[]}]}]}"#;
+        for provider in KNOWN_PROVIDERS {
+            let base = base_for(provider);
+            assert!(base.is_some(), "no endpoint mapping for {provider}");
+            state
+                .vault
+                .save_api_key(provider, "sk-test")
+                .unwrap_or_else(|_| panic!("vault rejected provider id {provider}"));
+            let api_key = vault_api_key(&state, provider).unwrap();
+            let adapter = ProviderAdapter::OpenAiCompat {
+                base_url: base.unwrap(),
+                api_key,
+                model: "m".into(),
+            };
+            let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+                Ok::<String, String>(
+                    serde_json::json!({"choices":[{"message":{"content": PLAN}}]}).to_string(),
+                )
+            };
+            let (goal_id, _) =
+                AiDispatcher::master_plan(&adapter, "G", None, None, "c", execute, &state.repos, None)
+                    .unwrap_or_else(|e| panic!("master_plan failed for {provider}: {e}"));
+            assert!(state.repos.goal(&goal_id).unwrap().is_some());
+        }
+        // Removed providers stay rejected at both layers (no silent fallback).
+        for dead in ["anthropic", "openai", "openai-compat", "gemini-compat"] {
+            assert!(base_for(dead).is_none(), "{dead} still has an endpoint");
+            assert!(
+                vault_api_key(&state, dead).is_err(),
+                "{dead} still passes the allow-list"
+            );
+        }
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn manual_goal_seeds_runnable_directive_without_key_or_identity() {
+        // B-002 (option b): manual goal creation with NO API key and NO
+        // unlocked identity must still yield a runnable directive that
+        // the canvas activates on load.
+        let repos = Repos::new(wl_core::store::open_in_memory().unwrap(), 1);
+        let g = repos.create_goal("Ship it", None, None, None).unwrap();
+        seed_first_steps(&repos, &g, None).unwrap();
+        let today = today_local();
+        let next = repos.next_runnable_directive(&today).unwrap();
+        assert!(next.is_some(), "seeded directive is not runnable");
+        assert_eq!(next.unwrap().title, "Ship it");
+        let engine = Engine::new(&repos, None);
+        match engine.current(&today).unwrap() {
+            EngineOutcome::DirectiveActive { directive_id, .. } => {
+                let active = repos.active_directive().unwrap().unwrap();
+                assert_eq!(active.id, directive_id);
+            }
+            EngineOutcome::Idle => panic!("canvas would show an empty line"),
+            _ => {}
+        }
     }
 
     #[tokio::test]

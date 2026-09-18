@@ -9,6 +9,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0002_sync_lww.sql"),
     include_str!("migrations/0003_settings_hlc.sql"),
     include_str!("migrations/0004_hlc_zero_backfill.sql"),
+    include_str!("migrations/0005_record_heads.sql"),
 ];
 
 pub fn run(conn: &Connection) -> Result<(), StoreError> {

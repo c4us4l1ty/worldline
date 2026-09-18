@@ -284,6 +284,145 @@ async fn offline_write_then_sync_converges_two_devices() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_replicates_and_stays_deleted() {
+    // B-003: delete on A → pull on B → row gone, stays gone after
+    // re-pull; a stale upsert arriving after the tombstone cannot
+    // resurrect the row.
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+    let id = Some(&identity);
+
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    let g = a.create_goal("Doomed goal", None, None, id).unwrap();
+    let goal_hlc = g.hlc_timestamp.to_string();
+    let ms = a.create_milestone(&g.id, "Doomed milestone", None, 0, id).unwrap();
+    let d = a
+        .create_directive(&ms.id, "Doomed directive", None, 10, 1, "2026-09-13", &[], id)
+        .unwrap();
+    sync_cycle(&a, &identity, &transport, 100).unwrap();
+
+    let b = Repos::new(open_in_memory().unwrap(), 2);
+    let sb = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert!(sb.applied >= 3);
+    assert!(b.goal(&g.id).unwrap().is_some());
+
+    // Leaf-first deletes replicate as tombstones.
+    a.delete_directive(&d.id, id).unwrap();
+    a.delete_milestone(&ms.id, id).unwrap();
+    a.delete_goal(&g.id, id).unwrap();
+    let sa = sync_cycle(&a, &identity, &transport, 100).unwrap();
+    assert_eq!(sa.pushed, 3);
+
+    let sb2 = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(sb2.applied, 3);
+    assert!(b.goal(&g.id).unwrap().is_none());
+    assert!(b.directive(&d.id).unwrap().is_none());
+
+    // Re-pull: still gone, nothing applied, cursor holds.
+    let sb3 = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!((sb3.pulled, sb3.applied, sb3.quarantined), (0, 0, 0));
+    assert!(b.goal(&g.id).unwrap().is_none());
+
+    // A stale upsert (older HLC, fresh op id) cannot resurrect.
+    let fields = serde_json::json!({"title": "Zombie goal", "description": null,
+        "target_date": null, "status": "active"});
+    let aad = format!("goals:{}", g.id);
+    let sealed =
+        wl_core::crypto::aead::seal(&identity, &serde_json::to_vec(&fields).unwrap(), aad.as_bytes())
+            .unwrap();
+    let body = serde_json::to_value(wl_protocol::PushRequest {
+        ops: vec![wl_protocol::PushOp {
+            operation_id: "op-zombie-upsert".into(),
+            hlc: goal_hlc,
+            table: "goals".into(),
+            record_id: g.id.clone(),
+            sealed_b64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                sealed.to_bytes(),
+            ),
+        }],
+    })
+    .unwrap();
+    let resp = transport.post("/sync/push", &body).unwrap();
+    let decoded: wl_protocol::PushResponse = serde_json::from_str(&resp).unwrap();
+    assert_eq!(decoded.accepted.len(), 1);
+    let sb4 = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(sb4.applied, 1); // seen, arbitrated, ignored
+    assert!(b.goal(&g.id).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equal_hlc_ops_converge_regardless_of_delivery_order() {
+    // B-009 forked-DB fixture: two ops share one identical full HLC
+    // (forked data dirs, same device, same clock head) with different
+    // op ids and content. The greater op id wins on EVERY replica no
+    // matter which op each replica saw first.
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let maker = Repos::new(open_in_memory().unwrap(), 1);
+    let g = maker.create_goal("Forked goal", None, None, None).unwrap();
+    // One tick, reused for both ops: identical full HLC, like two live
+    // replicas forked from one data dir under a stopped clock.
+    let hlc = maker.hlc.now(maker.device_id()).to_string();
+    let craft = |op_id: &str, title: &str| {
+        let fields = serde_json::json!({"title": title, "description": null,
+            "target_date": null, "status": "active"});
+        let aad = format!("goals:{}", g.id);
+        let sealed = wl_core::crypto::aead::seal(
+            &identity,
+            &serde_json::to_vec(&fields).unwrap(),
+            aad.as_bytes(),
+        )
+        .unwrap();
+        wl_protocol::PushOp {
+            operation_id: op_id.into(),
+            hlc: hlc.clone(),
+            table: "goals".into(),
+            record_id: g.id.clone(),
+            sealed_b64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                sealed.to_bytes(),
+            ),
+        }
+    };
+    // Device C sees the loser first (pushed+pulled alone), then the winner.
+    let c = Repos::new(open_in_memory().unwrap(), 2);
+    let body = serde_json::to_value(wl_protocol::PushRequest {
+        ops: vec![craft("op-aaa", "A-content")],
+    })
+    .unwrap();
+    let resp = transport.post("/sync/push", &body).unwrap();
+    assert_eq!(
+        serde_json::from_str::<wl_protocol::PushResponse>(&resp)
+            .unwrap()
+            .accepted
+            .len(),
+        1
+    );
+    sync_cycle(&c, &identity, &transport, 100).unwrap();
+    assert_eq!(c.goal(&g.id).unwrap().unwrap().title, "A-content");
+    let body = serde_json::to_value(wl_protocol::PushRequest {
+        ops: vec![craft("op-bbb", "B-content")],
+    })
+    .unwrap();
+    transport.post("/sync/push", &body).unwrap();
+    sync_cycle(&c, &identity, &transport, 100).unwrap();
+    // Equal HLC, greater op id: must displace (the old bare-`hlc <`
+    // guard kept A-content here — order-dependent fork).
+    assert_eq!(c.goal(&g.id).unwrap().unwrap().title, "B-content");
+
+    // Device D pulls both at once (relay order): same winner.
+    let d = Repos::new(open_in_memory().unwrap(), 3);
+    sync_cycle(&d, &identity, &transport, 100).unwrap();
+    assert_eq!(d.goal(&g.id).unwrap().unwrap().title, "B-content");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_repull_applies_nothing_twice() {
     let app = relay_app();
     let identity = Identity::from_phrase(PHRASE).unwrap();
@@ -504,9 +643,11 @@ async fn poison_constraint_op_quarantines_without_wedging_sync() {
         .unwrap();
     sync_cycle(&a, &identity, &transport, 100).unwrap();
 
-    // Craft a same-id/different-date row move with a newer HLC: the LWW
-    // id-guard engages, then the write hits UNIQUE(date). Deterministic
-    // failure — retrying changes nothing — so it must quarantine.
+    // A same-id/different-date row move with a newer HLC: one audit per
+    // day forces a choice, and LWW says the newest op owns the date —
+    // since B-009 it merges (c1 takes 2026-09-18, evicting c2 with
+    // delete memory) instead of quarantining. Deterministic either
+    // way; retrying or reordering changes nothing.
     let ts = a.hlc.now(a.device_id());
     assert!(ts > c1.hlc_timestamp);
     let fields = serde_json::json!({"date": c2.date, "outcome": "done", "note": null});
@@ -535,20 +676,26 @@ async fn poison_constraint_op_quarantines_without_wedging_sync() {
     assert_eq!(decoded.accepted.len(), 1);
 
     let s = sync_cycle(&a, &identity, &transport, 100).unwrap();
-    assert_eq!(s.quarantined, 1);
-    // (The quarantine watermark itself is pruned with the advanced
-    // cursor at cycle end — the relay paginates strictly after it, so
-    // the op can never resurface.)
-    // Loser rows untouched, winner rows intact.
-    assert_eq!(
-        a.check_in_for_date("2026-09-17").unwrap().unwrap().id,
-        c1.id
-    );
-    assert_eq!(
-        a.check_in_for_date("2026-09-18").unwrap().unwrap().id,
-        c2.id
-    );
-    // The poison op never wedges later cycles.
+    assert_eq!((s.applied, s.quarantined), (1, 0));
+    // Newest owns the date: c1 moved to 09-18, c2 evicted.
+    assert!(a.check_in_for_date("2026-09-17").unwrap().is_none());
+    let moved = a.check_in_for_date("2026-09-18").unwrap().unwrap();
+    assert_eq!(moved.id, c1.id);
+    assert_eq!(moved.outcome, CheckInOutcome::Done);
+    // Delete memory for the evicted id blocks stale resurrection.
+    let (tomb, head_hlc): (i64, String) = a
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT tombstone, hlc_timestamp FROM record_heads WHERE table_name = 'check_ins' AND record_id = ?1",
+            [&c2.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(tomb, 1);
+    assert_eq!(head_hlc, ts.to_string());
+    // The move never wedges later cycles.
     let s2 = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!((s2.pulled, s2.quarantined, s2.applied), (0, 0, 0));
 }

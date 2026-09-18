@@ -79,67 +79,78 @@ fn parse_briefing_valid_and_bounded() {
 
 #[test]
 fn provider_request_shapes() {
-    let oa = ProviderAdapter::OpenAiCompat {
-        base_url: "https://openrouter.ai/api/v1".into(),
-        api_key: Zeroizing::new("sk-test".into()),
-        model: "user-model-x".into(),
-    };
-    let (url, headers, body) = oa.request("sys", "usr");
-    assert!(url.ends_with("/chat/completions"));
-    assert!(headers
-        .iter()
-        .any(|(k, v)| k == "Authorization" && v == "Bearer sk-test"));
-    assert_eq!(body["model"], "user-model-x");
-    assert_eq!(body["response_format"]["type"], "json_object");
-    let text = oa.extract_text(&serde_json::json!({"choices":[{"message":{"content":"hi"}}]}));
-    assert_eq!(text.as_deref(), Some("hi"));
-
-    let an = ProviderAdapter::Anthropic {
-        api_key: Zeroizing::new("ak".into()),
-        model: "claude-user".into(),
-    };
-    let (url, headers, body) = an.request("sys", "usr");
-    assert_eq!(url, "https://api.anthropic.com/v1/messages");
-    assert!(headers.iter().any(|(k, v)| k == "x-api-key" && v == "ak"));
-    assert_eq!(body["model"], "claude-user");
-    let text = an.extract_text(&serde_json::json!({"content":[{"text":"yo"}]}));
-    assert_eq!(text.as_deref(), Some("yo"));
+    // One OpenAI-compatible shape serves all four approved providers
+    // (openrouter | google | qwen | bytez.com) — only the base URL varies.
+    for base in [
+        "https://openrouter.ai/api/v1",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "https://api.bytez.com/models/v2/openai/v1",
+    ] {
+        let oa = ProviderAdapter::OpenAiCompat {
+            base_url: base.into(),
+            api_key: Zeroizing::new("sk-test".into()),
+            model: "user-model-x".into(),
+        };
+        let (url, headers, body) = oa.request("sys", "usr");
+        assert_eq!(url, format!("{base}/chat/completions"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer sk-test"));
+        assert_eq!(body["model"], "user-model-x");
+        assert_eq!(body["response_format"]["type"], "json_object");
+        let text =
+            oa.extract_text(&serde_json::json!({"choices":[{"message":{"content":"hi"}}]}));
+        assert_eq!(text.as_deref(), Some("hi"));
+    }
 }
 
 #[test]
 fn master_plan_end_to_end_with_injected_http() {
     let r = repos();
-    let provider = ProviderAdapter::Anthropic {
-        api_key: Zeroizing::new("k".into()),
-        model: "m".into(),
-    };
-    let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
-        Ok::<String, String>(serde_json::json!({"content":[{"text": PLAN_JSON}]}).to_string())
-    };
-    let (goal_id, plan) = AiDispatcher::master_plan(
-        &provider,
-        "Ship Worldline",
-        Some("v0.1"),
-        Some("2026-10-01"),
-        "Rust dev",
-        execute,
-        &r,
-        None,
-    )
-    .unwrap();
-    assert_eq!(plan.milestones.len(), 2);
-    let g = r.goal(&goal_id).unwrap().unwrap();
-    assert_eq!(g.title, "Ship Worldline");
-    let ms = r.milestones_for_goal(&goal_id).unwrap();
-    assert_eq!(ms.len(), 2);
-    // 3 directives total across milestones.
+    // B-001 regression: master_plan with mocked `execute` succeeds for
+    // each of the 4 approved providers (base URL is the only variance).
+    for base in [
+        "https://openrouter.ai/api/v1",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "https://api.bytez.com/models/v2/openai/v1",
+    ] {
+        let provider = ProviderAdapter::OpenAiCompat {
+            base_url: base.into(),
+            api_key: Zeroizing::new("k".into()),
+            model: "m".into(),
+        };
+        let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+            Ok::<String, String>(
+                serde_json::json!({"choices":[{"message":{"content": PLAN_JSON}}]}).to_string(),
+            )
+        };
+        let (goal_id, plan) = AiDispatcher::master_plan(
+            &provider,
+            "Ship Worldline",
+            Some("v0.1"),
+            Some("2026-10-01"),
+            "Rust dev",
+            execute,
+            &r,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.milestones.len(), 2);
+        let g = r.goal(&goal_id).unwrap().unwrap();
+        assert_eq!(g.title, "Ship Worldline");
+        let ms = r.milestones_for_goal(&goal_id).unwrap();
+        assert_eq!(ms.len(), 2);
+    }
+    // 3 directives per plan x 4 providers.
     let count: i64 = r
         .conn
         .lock()
         .unwrap()
         .query_row("SELECT COUNT(*) FROM directives", [], |x| x.get(0))
         .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 12);
     // The 50-min directive became progressive with 2 phases and
     // minutes summed from phases.
     let prog = r
@@ -280,7 +291,8 @@ fn response_size_checked_before_parsing_and_persistence() {
         })
     ));
     let r = repos();
-    let provider = ProviderAdapter::Anthropic {
+    let provider = ProviderAdapter::OpenAiCompat {
+        base_url: "http://localhost".into(),
         api_key: Zeroizing::new("test".into()),
         model: "test".into(),
     };
@@ -320,7 +332,8 @@ fn provider_debug_redacts_api_key() {
 #[test]
 fn facades_reject_bad_input_before_any_http_call() {
     let r = repos();
-    let provider = ProviderAdapter::Anthropic {
+    let provider = ProviderAdapter::OpenAiCompat {
+        base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
     };

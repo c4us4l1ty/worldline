@@ -27,7 +27,7 @@ pub fn MorningBriefScreen() -> Element {
                 constraints: String,
             }
             let req = B {
-                provider: provider.clone().unwrap_or_else(|| "openai-compat".into()),
+                provider: provider.clone().unwrap_or_else(|| "openrouter".into()),
                 model: tier2.unwrap_or_else(|| "haiku-class".into()),
                 constraints,
             };

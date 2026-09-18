@@ -53,6 +53,13 @@ impl CrdtTable {
     }
 }
 
+/// Sealed-payload marker for tombstone (delete) ops on the wire.
+/// A pulled op whose decrypted JSON object contains
+/// `{"__tombstone": true}` deletes its row under the same LWW
+/// arbitration as upserts (B-003). The key is namespaced to avoid
+/// colliding with any row field the pull side reads.
+pub const TOMBSTONE_MARKER: &str = "__tombstone";
+
 /// A single replicated mutation. `fields` carries the full row state
 /// for upserts (LWW register value); `tombstone` marks deletes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

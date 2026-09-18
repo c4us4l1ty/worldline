@@ -841,7 +841,7 @@ fn applied_watermark_prunes_only_at_or_below_cursor() {
 
 #[test]
 fn zero_backfill_migration_repairs_legacy_rows() {
-    // Fresh chain (v1–v4), then simulate legacy '0' backfill values on
+    // Fresh chain (v1–v5), then simulate legacy '0' backfill values on
     // real rows, rewind the v4 marker, and re-run: v4 must repair them
     // into parseable canonical-zero timestamps.
     let r = setup();
@@ -880,7 +880,7 @@ fn zero_backfill_migration_repairs_legacy_rows() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(versions, 4);
+    assert_eq!(versions, 5);
 }
 
 #[test]

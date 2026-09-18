@@ -4,9 +4,9 @@
 //! Tier 2 — Tactical Dispatcher (morning briefing, 1–3 directives).
 //! Tier 3 — Local Heuristic Engine (see [`crate::engine`], offline).
 //!
-//! Provider adapters: OpenAI-compatible (covers OpenAI, OpenRouter,
-//! Gemini compat endpoints) and Anthropic native. All model ids are
-//! user-configurable BYOK settings — never hardcoded.
+//! Provider adapters: OpenAI-compatible chat completions for the four
+//! approved BYOK providers (OpenRouter, Google, Qwen, bytez.com).
+//! All model ids are user-configurable BYOK settings — never hardcoded.
 
 pub mod dispatch;
 pub mod prompt;

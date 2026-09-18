@@ -618,8 +618,170 @@ impl Repos {
         Ok(())
     }
 
-    /// Reconciles the single-active invariant after a pull-apply batch:
-    /// LWW arbitration can merge `active` states from two devices. The
+    // ------------------------------------------------------------------
+    // Deletes — tombstone writers (B-003).
+    //
+    // Every delete hard-removes the local row AND enqueues a tombstone
+    // op (sealed `{"__tombstone": true}`) so the delete replicates;
+    // row + op + clock head commit atomically like every other mutation
+    // (#56). Deletes are leaf-first: FKs are enforced, so deleting a
+    // goal/milestone/directive that still has children fails with a
+    // constraint error instead of orphaning rows — delete phases, then
+    // directives, then milestones, then goals. Deleting a missing row
+    // is `NotFound` and enqueues nothing (no local change → no op).
+    // ------------------------------------------------------------------
+
+    /// Deletes one row and replicates the delete as a tombstone op.
+    fn delete_record(
+        &self,
+        table: crate::crdt::CrdtTable,
+        record_id: &str,
+        delete_sql: &str,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
+        if record_id.is_empty() || record_id.len() > 128 {
+            return Err(StoreError::Invalid("bad CRDT record id".into()));
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
+        let removed = tx.execute(delete_sql, params![record_id])?;
+        if removed == 0 {
+            return Err(StoreError::NotFound(format!(
+                "{} {record_id}",
+                table.as_str()
+            )));
+        }
+        let payload = serde_json::json!({ crate::crdt::TOMBSTONE_MARKER: true });
+        let op_id = if let Some(identity) = identity {
+            Some(Self::enqueue_on(
+                &tx,
+                identity,
+                table.as_str(),
+                record_id,
+                &payload,
+                ts,
+            )?)
+        } else {
+            None
+        };
+        // Local delete memory: an older upsert arriving later must not
+        // resurrect the row (mirrors `TableState.tombstones`). Without
+        // an outbox op there is no op id; the tick itself is unique and
+        // monotonic per repo, so it serves as the local-only key.
+        let ts_s = ts.to_string();
+        tx.execute(
+            "INSERT INTO record_heads (table_name, record_id, hlc_timestamp, device, operation_id, tombstone)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT(table_name, record_id) DO UPDATE SET hlc_timestamp=?3, device=?4, operation_id=?5, tombstone=1",
+            params![
+                table.as_str(),
+                record_id,
+                ts_s,
+                ts.device as i64,
+                op_id.as_deref().unwrap_or(&ts_s)
+            ],
+        )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_goal(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+        self.delete_record(
+            crate::crdt::CrdtTable::Goals,
+            id,
+            "DELETE FROM goals WHERE id = ?1",
+            identity,
+        )
+    }
+
+    pub fn delete_milestone(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+        self.delete_record(
+            crate::crdt::CrdtTable::Milestones,
+            id,
+            "DELETE FROM milestones WHERE id = ?1",
+            identity,
+        )
+    }
+
+    pub fn delete_directive(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+        self.delete_record(
+            crate::crdt::CrdtTable::Directives,
+            id,
+            "DELETE FROM directives WHERE id = ?1",
+            identity,
+        )
+    }
+
+    /// Deletes one progressive phase step. Phase ops share the
+    /// directive-level record id (one op per step, mirroring
+    /// `create_directive`'s emit granularity).
+    pub fn delete_directive_phase(
+        &self,
+        directive_id: &str,
+        step: i64,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
+        if directive_id.is_empty() || directive_id.len() > 128 {
+            return Err(StoreError::Invalid("bad CRDT record id".into()));
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
+        let removed = tx.execute(
+            "DELETE FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
+            params![directive_id, step],
+        )?;
+        if removed == 0 {
+            return Err(StoreError::NotFound(format!(
+                "directive_phases {directive_id}:{step}"
+            )));
+        }
+        let payload = serde_json::json!({ crate::crdt::TOMBSTONE_MARKER: true });
+        let op_id = if let Some(identity) = identity {
+            Some(Self::enqueue_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::DirectivePhases.as_str(),
+                directive_id,
+                &payload,
+                ts,
+            )?)
+        } else {
+            None
+        };
+        let ts_s = ts.to_string();
+        tx.execute(
+            "INSERT INTO record_heads (table_name, record_id, hlc_timestamp, device, operation_id, tombstone)
+             VALUES ('directive_phases', ?1, ?2, ?3, ?4, 1)
+             ON CONFLICT(table_name, record_id) DO UPDATE SET hlc_timestamp=?2, device=?3, operation_id=?4, tombstone=1",
+            params![directive_id, ts_s, ts.device as i64, op_id.as_deref().unwrap_or(&ts_s)],
+        )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_check_in(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+        self.delete_record(
+            crate::crdt::CrdtTable::CheckIns,
+            id,
+            "DELETE FROM check_ins WHERE id = ?1",
+            identity,
+        )
+    }
+
+    pub fn delete_bailout(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+        self.delete_record(
+            crate::crdt::CrdtTable::Bailouts,
+            id,
+            "DELETE FROM bailouts WHERE id = ?1",
+            identity,
+        )
+    }
+
+    /// Reconciles the single-active invariant after a pull-apply batch:    /// LWW arbitration can merge `active` states from two devices. The
     /// winner is deterministic across replicas (max `hlc_timestamp`,
     /// tie-break min `id`); losers are parked to queued with
     /// write-through. Returns the number parked.

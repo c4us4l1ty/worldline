@@ -45,7 +45,7 @@ pub fn GoalCreateScreen() -> Element {
                 provider: settings
                     .ai_provider
                     .clone()
-                    .unwrap_or_else(|| "openai-compat".into()),
+                    .unwrap_or_else(|| "openrouter".into()),
                 model: settings
                     .tier1_model
                     .clone()
@@ -112,7 +112,7 @@ pub fn GoalCreateScreen() -> Element {
             };
             match invoke::<serde_json::Value>("create_goal", req).await {
                 Ok(_) => {
-                    flash(&ctx, "GOAL CREATED — ADD MILESTONES");
+                    flash(&ctx, "GOAL CREATED — FIRST DIRECTIVE READY");
                     {
                         let mut s = ctx.screen;
                         *s.write() = Screen::Canvas;

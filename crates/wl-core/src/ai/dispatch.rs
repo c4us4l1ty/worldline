@@ -30,6 +30,11 @@ pub enum DispatchError {
 
 /// BYOK provider endpoints. Model ids are user settings, never baked in.
 ///
+/// The supported provider set is exactly `openrouter | google | qwen |
+/// bytez.com` (PRD-DELTAS #73) — every one speaks OpenAI-compatible chat
+/// completions, so a single variant plus a per-provider base URL covers
+/// the whole matrix (the old Anthropic-native variant is gone).
+///
 /// The key rides in `Zeroizing<String>` end-to-end (vault → adapter →
 /// request): dropping the adapter wipes it. Two residual copies are
 /// unavoidable and short-lived — the `Authorization`/`x-api-key`
@@ -39,15 +44,11 @@ pub enum DispatchError {
 /// into any `{:?}` error path).
 #[derive(Clone)]
 pub enum ProviderAdapter {
-    /// OpenAI-compatible chat completions (OpenAI, OpenRouter,
-    /// Gemini compat, LM Studio, Ollama…).
+    /// OpenAI-compatible chat completions (OpenRouter, Google Gemini
+    /// compat, Qwen compat, bytez gateway). The shell resolves the
+    /// provider id to its base URL; the adapter only carries it.
     OpenAiCompat {
         base_url: String,
-        api_key: Zeroizing<String>,
-        model: String,
-    },
-    /// Anthropic messages API.
-    Anthropic {
         api_key: Zeroizing<String>,
         model: String,
     },
@@ -61,11 +62,6 @@ impl std::fmt::Debug for ProviderAdapter {
             } => f
                 .debug_struct("OpenAiCompat")
                 .field("base_url", base_url)
-                .field("api_key", &"[redacted]")
-                .field("model", model)
-                .finish(),
-            ProviderAdapter::Anthropic { model, .. } => f
-                .debug_struct("Anthropic")
                 .field("api_key", &"[redacted]")
                 .field("model", model)
                 .finish(),
@@ -106,24 +102,6 @@ impl ProviderAdapter {
                 ];
                 (url, headers, body)
             }
-            ProviderAdapter::Anthropic { api_key, model } => {
-                let body = serde_json::json!({
-                    "model": model,
-                    "max_tokens": 4096,
-                    "system": system,
-                    "messages": [{"role": "user", "content": user}]
-                });
-                let headers = vec![
-                    ("x-api-key".into(), api_key.as_str().to_owned()),
-                    ("anthropic-version".into(), "2023-06-01".into()),
-                    ("Content-Type".into(), "application/json".into()),
-                ];
-                (
-                    "https://api.anthropic.com/v1/messages".into(),
-                    headers,
-                    body,
-                )
-            }
         }
     }
 
@@ -133,9 +111,6 @@ impl ProviderAdapter {
             ProviderAdapter::OpenAiCompat { .. } => body["choices"][0]["message"]["content"]
                 .as_str()
                 .map(Into::into),
-            ProviderAdapter::Anthropic { .. } => {
-                body["content"][0]["text"].as_str().map(Into::into)
-            }
         }
     }
 }

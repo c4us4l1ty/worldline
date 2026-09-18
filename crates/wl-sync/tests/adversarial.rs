@@ -681,8 +681,11 @@ async fn defect_empty_pull_jumps_cursor_permanently_skipping_ops() {
 /// FIXED (was: pulled ops were checked for header bounds only —
 /// oversized sealed payloads and unknown tables passed the pull path
 /// while the push path rejects them server-side). A hostile relay must
-/// not drive unbounded blob decoding or enqueue unknown-table poison
-/// past the client boundary.
+/// not drive unbounded blob decoding past the client boundary.
+/// Envelope size bounds still abort; unknown TABLES no longer abort —
+/// since B-008 they quarantine-skip (watermark + advance) so a
+/// future-schema peer can never wedge sync (see
+/// `unknown_table_quarantines_without_wedging_sync`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
     let identity = Identity::from_phrase(PHRASE).unwrap();
@@ -701,13 +704,13 @@ async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
         record_id: "r".into(),
         sealed_b64: String::new(),
     };
-    for (op, last_id) in [(oversized, "op-big"), (unknown, "op-unknown-table")] {
-        let resp = wl_protocol::PullResponse {
-            ops: vec![op],
-            next_cursor: "00000000000000000001.00000.00001".into(),
-            next_op_id: last_id.into(),
-            exhausted: true,
-        };
+    // Oversized sealed payload: envelope bounds still abort the cycle.
+    let resp = wl_protocol::PullResponse {
+        ops: vec![oversized],
+        next_cursor: "00000000000000000001.00000.00001".into(),
+        next_op_id: "op-big".into(),
+        exhausted: true,
+    };
         let resp_json = serde_json::to_value(&resp).unwrap();
         struct HostileTransport {
             resp: serde_json::Value,
@@ -726,5 +729,26 @@ async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
             }
             other => panic!("expected protocol error, got {other:?}"),
         }
+    // Unknown table (valid envelope): B-008 quarantine-skip — the
+    // cycle completes, the cursor advances past the op, nothing applies.
+    let resp = wl_protocol::PullResponse {
+        ops: vec![unknown],
+        next_cursor: "00000000000000000001.00000.00001".into(),
+        next_op_id: "op-unknown-table".into(),
+        exhausted: true,
+    };
+    let resp_json = serde_json::to_value(&resp).unwrap();
+    struct FutureSchemaTransport {
+        resp: serde_json::Value,
     }
+    impl crate::Transport for FutureSchemaTransport {
+        fn post(&self, path: &str, _body: &serde_json::Value) -> Result<String, String> {
+            assert_eq!(path, "/sync/pull");
+            Ok(self.resp.to_string())
+        }
+    }
+    let tx = FutureSchemaTransport { resp: resp_json };
+    let stats = sync_cycle(&repos, &identity, &tx, 100).unwrap();
+    assert_eq!((stats.pulled, stats.applied, stats.quarantined), (1, 0, 1));
+    assert_eq!(stats.cursor, "00000000000000000001.00000.00001");
 }
