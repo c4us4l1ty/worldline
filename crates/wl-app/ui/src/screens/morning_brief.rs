@@ -60,6 +60,36 @@ pub fn MorningBriefScreen() -> Element {
                             *s.write() = v;
                         }
                     }
+                    // Sync surfacing (B-005): show what the briefing left
+                    // in the outbox / last cycle. NoRelay / offline are
+                    // expected here — LOCAL is the honest pill, not an
+                    // error flash; the telemetry drawer still drives
+                    // explicit syncs.
+                    #[derive(serde::Deserialize, Default)]
+                    struct SyncOut {
+                        pushed: usize,
+                        pulled: usize,
+                        #[allow(dead_code)]
+                        applied: usize,
+                        pending: usize,
+                    }
+                    match invoke::<SyncOut>("sync_now", ()).await {
+                        Ok(s) => {
+                            let mut st = ctx.sync_status;
+                            if s.pending > 0 {
+                                *st.write() = format!("{} PENDING", s.pending);
+                            } else {
+                                *st.write() = "SYNCED".to_string();
+                            }
+                            if s.pushed > 0 || s.pulled > 0 {
+                                flash(&ctx, format!("SYNC ↑{} ↓{}", s.pushed, s.pulled).as_str());
+                            }
+                        }
+                        Err(_) => {
+                            let mut st = ctx.sync_status;
+                            *st.write() = "LOCAL".to_string();
+                        }
+                    }
                     briefing.set(Some(brief));
                 }
                 Err(e) => {
