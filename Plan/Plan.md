@@ -35,7 +35,6 @@
 - [x] Design skill binding: `.opencode/skills/worldline/SKILL.md` (435 lines).
 
 ### TODO
-- [ ] **P0-HYGIENE-1 — Restore or ratify `Plan/Frontend.md` deletion.** Worktree shows `D Plan/Frontend.md` (641-line FSM + 9:16 screen spec, still in `HEAD`). Either `git restore Plan/Frontend.md` (recommended — it is the only binding UI FSM: UNINITIALIZED → BIP39_SEED_VAULT → BYOK_KEY_STORE → MORNING_BRIEFING → DIRECTIVE_ACTIVE ⇄ ESCAPE_HATCH_MODAL → EVENING_AUDIT → DORMANT + TELEMETRY_DRAWER) or commit the removal with a delta note. Never leave a dirty delete unacknowledged.
 - [ ] **P0-HYGIENE-2 — Fix stale test-count docs.** `README.md:119-123` + `AGENTS.md:6` claim "80 tests"; truth is 187 (162+15+10). Update both + `Plan/AGENT.md` (currently stale: references `cargo check -p wl-app --lib`, "Node/Webview frontend" — UI is Rust/Dioxus→wasm, shell has no lib target).
 - [ ] **P0-HYGIENE-3 — Pin verification gates in this file.** Canonical gates: `cargo test --workspace` · `cargo clippy --workspace --all-targets` · `cargo fmt --all -- --check` · `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` · `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown`. CI-free repo: every agent runs these before declaring a phase done.
 
