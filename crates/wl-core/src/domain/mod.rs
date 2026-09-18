@@ -107,7 +107,8 @@ pub struct Directive {
     pub title: String,
     pub execution_context: Option<String>,
     pub estimated_minutes: i64,
-    /// 0 = monolithic; N = current progressive phase (1-based).
+    /// 1-based current progressive phase; `progressive_total == 1`
+    /// means monolithic (no phase rows).
     pub progressive_step: i64,
     /// Total phases when the directive uses progressive activation.
     pub progressive_total: i64,
@@ -351,6 +352,75 @@ pub struct IdentityConfig {
 // Utility: date helpers (YYYY-MM-DD, local dates).
 // ---------------------------------------------------------------------------
 
+/// Character budgets for user/AI-supplied text. Anything larger is
+/// rejected at the write boundary (`StoreError::Invalid`): unbounded
+/// strings bloat the encrypted outbox past the relay's 256 KiB/op cap
+/// and wedge sync with an undrainable batch.
+pub const MAX_TITLE_CHARS: usize = 500;
+pub const MAX_DESCRIPTION_CHARS: usize = 4000;
+pub const MAX_CONTEXT_CHARS: usize = 4000;
+pub const MAX_NOTE_CHARS: usize = 2000;
+pub const MAX_MODEL_ID_CHARS: usize = 256;
+/// Bailout context cap from the spec (escape-hatch modal).
+pub const MAX_BAILOUT_NOTE_CHARS: usize = 140;
+/// A single directive longer than a day is a planning error, not a
+/// directive; the bound also keeps phase-rescale arithmetic tame.
+pub const MAX_MINUTES: i64 = 1440;
+/// AI providers the shell knows how to call (BYOK).
+pub const KNOWN_PROVIDERS: &[&str] =
+    &["anthropic", "openai-compat", "openrouter", "gemini-compat"];
+
+/// Rejects blank or over-budget text at write boundaries.
+pub fn check_text(field: &'static str, value: &str, max_chars: usize) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} must not be blank"));
+    }
+    if value.chars().count() > max_chars {
+        return Err(format!("{field} exceeds {max_chars} characters"));
+    }
+    Ok(())
+}
+
+/// Rejects over-budget optional text (`None` always passes).
+pub fn check_optional_text(
+    field: &'static str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<(), String> {
+    if let Some(v) = value {
+        if v.chars().count() > max_chars {
+            return Err(format!("{field} exceeds {max_chars} characters"));
+        }
+    }
+    Ok(())
+}
+
+/// Strict calendar-date check (`YYYY-MM-DD`, real month/day).
+/// Shape-exact (chrono alone accepts `2026-9-8`, which would corrupt
+/// the lexicographic date ordering every query relies on).
+pub fn check_date(field: &'static str, date: &str) -> Result<(), String> {
+    let bytes = date.as_bytes();
+    let shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    if !shaped || chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+        return Err(format!("{field} must be a YYYY-MM-DD calendar date"));
+    }
+    Ok(())
+}
+
+/// Directive/phase minute bounds shared by manual, AI, and reschedule paths.
+pub fn check_minutes(field: &'static str, minutes: i64) -> Result<(), String> {
+    if minutes <= 0 || minutes > MAX_MINUTES {
+        return Err(format!("{field} must be within 1–{MAX_MINUTES} minutes"));
+    }
+    Ok(())
+}
+
 /// Today's local date as YYYY-MM-DD.
 pub fn today_local() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
@@ -448,5 +518,33 @@ mod tests {
             assert_eq!(CheckInOutcome::from_str(s).unwrap().as_str(), s);
         }
         assert!(GoalStatus::from_str("nope").is_none());
+    }
+
+    #[test]
+    fn write_boundary_text_budgets() {
+        assert!(check_text("title", "Ship it", MAX_TITLE_CHARS).is_ok());
+        assert!(check_text("title", "   ", MAX_TITLE_CHARS).is_err());
+        assert!(check_text("title", "", MAX_TITLE_CHARS).is_err());
+        assert!(check_text("title", &"x".repeat(MAX_TITLE_CHARS), MAX_TITLE_CHARS).is_ok());
+        assert!(check_text("title", &"x".repeat(MAX_TITLE_CHARS + 1), MAX_TITLE_CHARS).is_err());
+        // Multi-byte chars count as characters, not bytes.
+        assert!(check_text("t", &"é".repeat(MAX_TITLE_CHARS), MAX_TITLE_CHARS).is_ok());
+        assert!(check_optional_text("d", None, 4).is_ok());
+        assert!(check_optional_text("d", Some("ok"), 4).is_ok());
+        assert!(check_optional_text("d", Some("toolong"), 4).is_err());
+    }
+
+    #[test]
+    fn write_boundary_dates_and_minutes() {
+        assert!(check_date("d", "2026-09-18").is_ok());
+        assert!(check_date("d", "2024-02-29").is_ok());
+        for bad in ["", "garbage", "2026-13-01", "2026-02-30", "2026-9-8", " 2026-09-18"] {
+            assert!(check_date("d", bad).is_err(), "{bad:?} must be rejected");
+        }
+        assert!(check_minutes("m", 1).is_ok());
+        assert!(check_minutes("m", MAX_MINUTES).is_ok());
+        for bad in [0, -5, MAX_MINUTES + 1, i64::MAX] {
+            assert!(check_minutes("m", bad).is_err());
+        }
     }
 }

@@ -37,7 +37,7 @@ pub fn CheckInScreen() -> Element {
     let mut busy = use_signal(|| false);
 
     let mut record = move |outcome: &str| {
-        if *ctx.telemetry_open.peek() || !claim_submission(&mut busy.write(), *submitted.peek()) {
+        if !claim_submission(&mut busy.write(), *submitted.peek()) {
             return;
         }
         let ctx = ctx;

@@ -40,6 +40,18 @@ impl Repos {
         // pre-restart ops (LWW would otherwise invert).
         if let Ok(Some((wall, ctr))) = repos.read_hlc_head() {
             repos.hlc.restore(wall, ctr);
+            // Clone-split jitter: two live replicas forked from one data
+            // dir (file copy, VM snapshot) share device id AND clock head,
+            // so under a regressed wall clock their first ticks would stamp
+            // IDENTICAL HLCs on different content and fork LWW permanently
+            // (strict-`<` guards drop both remote ops). A small per-boot
+            // random counter advance separates the heads with probability
+            // 255/256; when the wall clock is healthy the next tick is
+            // wall-based and the jitter is invisible.
+            let jitter: u16 = rand::Rng::gen_range(&mut rand::thread_rng(), 0..256);
+            if jitter > 0 {
+                repos.hlc.restore(wall, ctr.saturating_add(jitter));
+            }
         }
         repos
     }
@@ -159,6 +171,12 @@ impl Repos {
         target_date: Option<&str>,
         identity: Option<&Identity>,
     ) -> Result<Goal, StoreError> {
+        check_text("goal title", title, MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
+        check_optional_text("goal description", description, MAX_DESCRIPTION_CHARS)
+            .map_err(StoreError::Invalid)?;
+        if let Some(d) = target_date {
+            check_date("goal target date", d).map_err(StoreError::Invalid)?;
+        }
         let id = new_id("goal");
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -236,6 +254,9 @@ impl Repos {
         order_index: i64,
         identity: Option<&Identity>,
     ) -> Result<Milestone, StoreError> {
+        check_text("milestone title", title, MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
+        check_optional_text("milestone description", description, MAX_DESCRIPTION_CHARS)
+            .map_err(StoreError::Invalid)?;
         let id = new_id("ms");
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -364,6 +385,17 @@ impl Repos {
         phases: &[(String, Option<String>, i64)], // (title, instruction, minutes)
         identity: Option<&Identity>,
     ) -> Result<Directive, StoreError> {
+        check_text("directive title", title, MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
+        check_optional_text("directive context", execution_context, MAX_CONTEXT_CHARS)
+            .map_err(StoreError::Invalid)?;
+        check_minutes("directive estimate", estimated_minutes).map_err(StoreError::Invalid)?;
+        check_date("directive date", scheduled_for_date).map_err(StoreError::Invalid)?;
+        for (pt, pi, pm) in phases {
+            check_text("phase title", pt, MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
+            check_optional_text("phase instruction", pi.as_deref(), MAX_CONTEXT_CHARS)
+                .map_err(StoreError::Invalid)?;
+            check_minutes("phase minutes", *pm).map_err(StoreError::Invalid)?;
+        }
         if estimated_minutes <= 0 || progressive_total < 1 || phases.iter().any(|p| p.2 <= 0) {
             return Err(StoreError::Invalid(
                 "minutes and phase count must be positive".into(),
@@ -459,12 +491,16 @@ impl Repos {
     }
 
     /// The single active directive (Stackelberg invariant: ≤1 active).
+    /// Ordered to match the `enforce_single_active` winner (newest HLC,
+    /// lowest id) so a transiently violated invariant still renders
+    /// deterministically instead of an arbitrary row.
     pub fn active_directive(&self) -> Result<Option<Directive>, StoreError> {
         self.conn.lock().unwrap()
             .query_row(
                 "SELECT id, milestone_id, title, execution_context, estimated_minutes,
                         progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
-                 FROM directives WHERE state = 'active' LIMIT 1",
+                 FROM directives WHERE state = 'active'
+                 ORDER BY hlc_timestamp DESC, id ASC LIMIT 1",
                 [],
                 directive_row,
             )
@@ -638,7 +674,9 @@ impl Repos {
         let mut d = Self::directive_on(&tx, id)?
             .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
         let mut phases = Self::phases_on(&tx, id)?;
-        if estimated_minutes <= 0 || estimated_minutes < phases.len() as i64 {
+        check_minutes("new estimate", estimated_minutes).map_err(StoreError::Invalid)?;
+        check_date("rescheduled date", scheduled_for_date).map_err(StoreError::Invalid)?;
+        if estimated_minutes < phases.len() as i64 {
             return Err(StoreError::Invalid(
                 "estimate must allow one minute per phase".into(),
             ));
@@ -847,6 +885,8 @@ impl Repos {
         note: Option<&str>,
         identity: Option<&Identity>,
     ) -> Result<CheckIn, StoreError> {
+        check_date("check-in date", date).map_err(StoreError::Invalid)?;
+        check_optional_text("check-in note", note, MAX_NOTE_CHARS).map_err(StoreError::Invalid)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let existing: Option<String> = tx
@@ -950,6 +990,9 @@ impl Repos {
         note: Option<&str>,
         identity: Option<&Identity>,
     ) -> Result<Bailout, StoreError> {
+        // Spec cap (escape-hatch modal): truncate, never reject — the UI
+        // already trims to 140 chars; this keeps other producers honest.
+        let note: Option<String> = note.map(|n| n.chars().take(MAX_BAILOUT_NOTE_CHARS).collect());
         let id = new_id("bail");
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -958,7 +1001,7 @@ impl Repos {
             id: id.clone(),
             directive_id: directive_id.to_string(),
             reason,
-            note: note.map(Into::into),
+            note: note.clone(),
             hlc_timestamp: ts,
         };
         tx.execute(
@@ -1011,22 +1054,52 @@ impl Repos {
         s: &AppSettings,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
+        if s.theme != "dark" && s.theme != "light" {
+            return Err(StoreError::Invalid("theme must be 'dark' or 'light'".into()));
+        }
+        // Empty hotkey normalizes to the default (boot does the same);
+        // anything longer than a plausible accelerator is junk.
+        let hotkey = if s.hotkey.trim().is_empty() {
+            "alt+space".to_string()
+        } else {
+            s.hotkey.clone()
+        };
+        if hotkey.chars().count() > 64 {
+            return Err(StoreError::Invalid("hotkey is too long".into()));
+        }
+        if let Some(p) = s.ai_provider.as_deref() {
+            if !KNOWN_PROVIDERS.contains(&p) {
+                return Err(StoreError::Invalid("unknown AI provider".into()));
+            }
+        }
+        for (field, v) in [
+            ("tier1 model", s.tier1_model.as_deref()),
+            ("tier2 model", s.tier2_model.as_deref()),
+        ] {
+            check_optional_text(field, v, MAX_MODEL_ID_CHARS).map_err(StoreError::Invalid)?;
+        }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
+        // Row and op payload carry the same normalized hotkey so a pull
+        // can never resurrect the pre-normalization value.
+        let normalized = AppSettings {
+            hotkey,
+            ..s.clone()
+        };
         tx.execute(
             "INSERT INTO app_settings (id, theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET theme=?1, hotkey=?2, always_on_top=?3,
                 ai_provider=?4, tier1_model=?5, tier2_model=?6, relay_url=?7, hlc_timestamp=?8",
-            params![s.theme, s.hotkey, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
+            params![normalized.theme, normalized.hotkey, normalized.always_on_top as i64, normalized.ai_provider, normalized.tier1_model, normalized.tier2_model, normalized.relay_url, ts.to_string()],
         )?;
         Self::emit_on(
             &tx,
             identity,
             crate::crdt::CrdtTable::AppSettings,
             "settings",
-            &Self::settings_json(s),
+            &Self::settings_json(&normalized),
             ts,
         )?;
         self.persist_head_on(&tx)?;
@@ -1222,6 +1295,19 @@ impl Repos {
         Ok(())
     }
 
+    /// Deletes relay-durable outbox rows. Called after the push phase:
+    /// every `pushed = 1` op was acknowledged (accepted or duplicate) by
+    /// the relay, so it is never read locally again — without this the
+    /// outbox grows forever on long-lived installs.
+    pub fn delete_pushed_outbox(&self) -> Result<usize, StoreError> {
+        let n = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM crdt_outbox WHERE pushed = 1", [])?;
+        Ok(n)
+    }
+
     // ------------------------------------------------------------------
     // Applied-op watermark (idempotent remote apply).
     // ------------------------------------------------------------------
@@ -1252,6 +1338,19 @@ impl Repos {
             params![operation_id, hlc],
         )?;
         Ok(())
+    }
+
+    /// Drops applied watermarks at or below the persisted pull cursor.
+    /// The relay paginates strictly after the cursor, so those ops can
+    /// never be re-pulled — without this `crdt_applied` grows forever.
+    /// Callers skip the prune while the cursor is still ("", "").
+    pub fn prune_applied_below(&self, hlc: &str, op_id: &str) -> Result<usize, StoreError> {
+        let n = self.conn.lock().unwrap().execute(
+            "DELETE FROM crdt_applied
+              WHERE hlc_timestamp < ?1 OR (hlc_timestamp = ?1 AND operation_id <= ?2)",
+            params![hlc, op_id],
+        )?;
+        Ok(n)
     }
 
     /// This replica's device id (for HLC receive-event merges).
