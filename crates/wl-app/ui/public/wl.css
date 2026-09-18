@@ -690,6 +690,68 @@ body {
   padding: 0 14px;
 }
 
+/* MVP-1 nav drawer: left slide-out (~65% width), dimmed overlay behind.
+   App name on top; two HORIZONTAL icon buttons pinned to the bottom —
+   goal creation LEFT (coral highlight), settings RIGHT (muted gear). */
+.wl-nav-backdrop {
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 0;
+}
+.wl-nav-sheet {
+  width: 65%;
+  max-width: 273px;
+  background-color: var(--wl-surface-card);
+  border-right: 1px solid var(--wl-border-strong);
+  border-radius: 0 var(--wl-radius-card) var(--wl-radius-card) 0;
+  padding: 24px 20px 22px;
+  display: flex;
+  flex-direction: column;
+  animation: wl-nav-slide var(--duration-modal) var(--ease-tactile);
+}
+@keyframes wl-nav-slide {
+  from { transform: translateX(-24px); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}
+.wl-nav-appname {
+  font-family: var(--font-directive);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--wl-text-primary);
+}
+.wl-nav-spacer { flex: 1; min-height: 24px; }
+.wl-nav-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+}
+.wl-nav-btn {
+  flex: 1;
+  height: 52px;
+  border-radius: var(--wl-radius-btn);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--duration-instant) var(--ease-tactile),
+              filter var(--duration-instant) var(--ease-tactile);
+}
+.wl-nav-btn:hover { filter: brightness(1.06); }
+.wl-nav-btn:active { transform: scale(0.97); }
+.wl-nav-btn-create {
+  background-color: var(--wl-accent-coral);
+  color: var(--wl-canvas);
+  border: none;
+}
+.wl-nav-btn-settings {
+  background-color: var(--wl-surface-elevated);
+  color: var(--wl-text-muted);
+  border: 1px solid var(--wl-border-subtle);
+}
+
 /* Font faces: bundled OFL assets, no CDN (local-first, skill §6) */
 @font-face {
   font-family: 'DM Sans';

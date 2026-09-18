@@ -10,9 +10,25 @@ use dioxus::prelude::*;
 
 use crate::app::{flash, invoke, AppCtx, Screen};
 
+/// MVP-4: shell `SyncStatsView` mirror — only the fields the UI
+/// surfaces (quarantined + cursor are new; skips must be visible).
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
+struct SyncOut {
+    pushed: usize,
+    pulled: usize,
+    #[allow(dead_code)]
+    applied: usize,
+    pending: usize,
+    quarantined: usize,
+    cursor: String,
+}
+
 pub fn TelemetryDrawer() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut busy = use_signal(|| false);
+    // MVP-4: last completed sync cycle, so quarantined ops and the
+    // pull cursor are inspectable instead of silent.
+    let mut last_sync = use_signal(|| None::<SyncOut>);
     let s = ctx.settings.read().clone();
     let sync = ctx.sync_status.read().clone();
     let v = ctx.velocity.read().clone();
@@ -59,15 +75,16 @@ pub fn TelemetryDrawer() -> Element {
                     p { class: "wl-body-muted wl-mono", "Relay state: {sync} · {relay_label}" }
                     p { class: "wl-body-muted wl-mono", "SQLite WAL size: — (no shell command)" }
                     p { class: "wl-body-muted wl-mono", "Velocity: {v.milestones_remaining} left · {v.days_remaining}d · target {v.target_per_day:.2}/day" }
+                    if let Some(last) = last_sync.read().clone() {
+                        p { class: "wl-body-muted wl-mono", "Last sync: ↑{last.pushed} ↓{last.pulled} · quarantined {last.quarantined} · pending {last.pending}" }
+                        p { class: "wl-body-muted wl-mono", "Cursor: {last.cursor}" }
+                    }
                 }
 
                 div { class: "wl-field",
                     label { class: "wl-label", "Desktop viewport runtime" }
                     p { class: "wl-body-muted wl-mono", "Window geometry: 420px × 747px (9:16 fixed)" }
                     p { class: "wl-body-muted wl-mono", "Pin to top: {pin_label} · Summon: {s.hotkey}" }
-                }
-
-                div { style: "display: flex; flex-direction: column; gap: 8px;",
                     button {
                         class: "wl-btn-ghost",
                         disabled: *busy.read(),
@@ -75,14 +92,6 @@ pub fn TelemetryDrawer() -> Element {
                             let ctx = ctx;
                             busy.set(true);
                             spawn(async move {
-                                #[derive(serde::Deserialize, Default)]
-                                struct SyncOut {
-                                    pushed: usize,
-                                    pulled: usize,
-                                    #[allow(dead_code)]
-                                    applied: usize,
-                                    pending: usize,
-                                }
                                 match invoke::<SyncOut>("sync_now", ()).await {
                                     Ok(o) => {
                                         let mut st = ctx.sync_status;
@@ -91,7 +100,13 @@ pub fn TelemetryDrawer() -> Element {
                                         } else {
                                             *st.write() = "SYNCED".to_string();
                                         }
-                                        flash(&ctx, format!("SYNCED ↑{} ↓{}", o.pushed, o.pulled).as_str());
+                                        let msg = if o.quarantined > 0 {
+                                            format!("SYNCED ↑{} ↓{} · {} quarantined", o.pushed, o.pulled, o.quarantined)
+                                        } else {
+                                            format!("SYNCED ↑{} ↓{}", o.pushed, o.pulled)
+                                        };
+                                        flash(&ctx, msg.as_str());
+                                        last_sync.set(Some(o));
                                     }
                                     Err(_) => {
                                         let mut st = ctx.sync_status;

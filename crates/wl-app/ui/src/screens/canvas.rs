@@ -69,6 +69,14 @@ pub fn CanvasScreen() -> Element {
         // HUD (skill §4.A)
         header { class: "wl-hud",
             div { class: "wl-hud-meta",
+                button {
+                    class: "wl-hud-pill",
+                    style: "border: none; cursor: pointer;",
+                    aria_label: "Open navigation",
+                    title: "Navigation",
+                    onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } },
+                    "☰"
+                }
                 if evening {
                     button {
                         class: "wl-hud-pill",
@@ -104,15 +112,12 @@ pub fn CanvasScreen() -> Element {
                 DirectiveCard { d: d }
             } else {
                 div { class: "wl-directive-card",
-                    h1 { class: "wl-serif-title", "The line is clear" }
+                    h1 { class: "wl-serif-title", "No active directive." }
                     p { class: "wl-body-muted",
-                        "No directive is active. Let the architect plan your trajectory."
+                        "Open the menu to create a goal or review settings."
                     }
                     div { style: "display: flex; gap: 8px; margin-top: 18px;",
-                        button { class: "wl-btn-ghost", onclick: move |_| { { let mut s = ctx.screen; *s.write() = crate::app::Screen::MorningBrief; } }, "Morning briefing" }
-                    }
-                    div { style: "display: flex; gap: 8px; margin-top: 8px;",
-                        button { class: "wl-btn-ghost", onclick: move |_| { { let mut s = ctx.screen; *s.write() = crate::app::Screen::GoalCreate; } }, "Create a goal" }
+                        button { class: "wl-btn-ghost", onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } }, "Open menu" }
                     }
                 }
             }

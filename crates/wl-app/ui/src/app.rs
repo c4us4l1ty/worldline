@@ -237,6 +237,10 @@ pub struct AppCtx {
     pub toast_task: Signal<Option<Task>>,
     pub escape_open: Signal<bool>,
     pub telemetry_open: Signal<bool>,
+    /// MVP-1 hamburger nav drawer (left slide; GoalCreate/Settings).
+    /// Separate from the Ctrl+, telemetry drawer: the drawer is
+    /// discovery navigation, telemetry is system inspection.
+    pub nav_open: Signal<bool>,
     pub sync_status: Signal<String>,
 }
 
@@ -252,6 +256,7 @@ fn App() -> Element {
         toast_task: Signal::new(None),
         escape_open: Signal::new(false),
         telemetry_open: Signal::new(false),
+        nav_open: Signal::new(false),
         sync_status: Signal::new("LOCAL".to_string()),
     });
 
@@ -318,8 +323,9 @@ fn App() -> Element {
                 if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
                     let open = *ctx.telemetry_open.read();
                     { let mut s = ctx.telemetry_open; *s.write() = !open; }
-                } else if e.key() == Key::Escape && *ctx.telemetry_open.read() {
+                } else if e.key() == Key::Escape && (*ctx.telemetry_open.read() || *ctx.nav_open.read()) {
                     { let mut s = ctx.telemetry_open; *s.write() = false; }
+                    { let mut s = ctx.nav_open; *s.write() = false; }
                 }
             },
             style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
@@ -340,6 +346,9 @@ fn App() -> Element {
                 Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
                 Screen::MorningBrief => rsx! { crate::screens::MorningBriefScreen {} },
                 Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
+            }
+            if *ctx.nav_open.read() {
+                crate::screens::NavDrawer {}
             }
             if *ctx.telemetry_open.read() {
                 crate::screens::TelemetryDrawer {}

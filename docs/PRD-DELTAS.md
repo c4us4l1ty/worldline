@@ -325,6 +325,21 @@ Locked decisions from the planning session are marked [approved].
     `create_manual_milestone` / `create_manual_directive` shell
     commands already exist for it.
 
+75. **`estimate_adjustment` is observed, not applied (MVP-3 honesty)** —
+    `engine::velocity::compute` returns `adjustment = 0.6 + 0.4·ratio`
+    (floored 0.6) but no writer consumes it: future estimates ignore it
+    (CORE-2/E7 deferred). The check-in screen now labels it
+    "observed adjustment … (not yet applied to future estimates)"
+    instead of claiming "Tomorrow's estimates reflect actual velocity".
+
+76. **Morning briefing exposes authored-vs-persisted split (B-005)** —
+    dispatcher returns `BriefingResult.created_ids` from
+    `persist_briefing`; shell returns `BriefingView { titles,
+    created_ids }`; UI re-fetches `current_directive` + `velocity`,
+    runs one `sync_now` surfacing `pushed/pulled/pending` in the HUD,
+    and shows a GoalCreate CTA when nothing persisted — never a silent
+    blank canvas.
+
 ## Battle-test pass 3 (2026-09-18, singularity audit — 162 workspace + 15 shell + 10 UI tests)
 
 64. **Write-boundary budgets** — every local write path now rejects

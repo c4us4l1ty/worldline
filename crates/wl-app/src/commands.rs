@@ -859,6 +859,8 @@ pub(crate) async fn sync_now(
             pulled: stats.pulled,
             applied: stats.applied,
             pending,
+            quarantined: stats.quarantined,
+            cursor: stats.cursor,
         })
     })
     .await
@@ -872,6 +874,11 @@ pub struct SyncStatsView {
     pub applied: usize,
     /// Outbox ops still awaiting push (0 right after a clean cycle).
     pub pending: usize,
+    /// MVP-4: poison/unknown-table ops watermarked-and-skipped this
+    /// cycle — surfaced in telemetry so skips are never silent.
+    pub quarantined: usize,
+    /// MVP-4: pull position after this cycle (`hlc,op_id` composite).
+    pub cursor: String,
 }
 
 // ---------------------------------------------------------------------------

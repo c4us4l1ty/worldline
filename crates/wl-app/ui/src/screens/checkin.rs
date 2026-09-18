@@ -99,13 +99,13 @@ pub fn CheckInScreen() -> Element {
                     p { class: "wl-body-muted wl-mono", "Remaining scope: {v.milestones_remaining} directives" }
                     p { class: "wl-body-muted wl-mono", "Days to horizon: {v.days_remaining} days" }
                     p { class: "wl-body-muted wl-mono", "Required velocity: {v.target_per_day:.2} / day" }
-                    p { class: "wl-body-muted wl-mono", "Rolling average: {v.completion_ratio:.2} · adjustment {pct}%" }
+                    p { class: "wl-body-muted wl-mono", "Rolling average: {v.completion_ratio:.2} · observed adjustment {pct}% (not yet applied to future estimates)" }
                     p { class: "wl-body-muted", style: "margin-top: 8px;",
                         "V_target = remaining milestones / remaining days. No debt carried forward. Plan recalculated cleanly."
                     }
                 }
                 p { class: "wl-body-muted", style: "margin-top: 4px;",
-                    "Trajectory adjusted for reality. Tomorrow's estimates reflect actual velocity — no backlog guilt."
+                    "Trajectory recorded. Tomorrow's plans still use raw estimates — the observed adjustment above is not applied yet."
                 }
                 button {
                     class: "wl-btn-primary",
