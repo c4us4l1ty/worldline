@@ -678,6 +678,16 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Process-wide HTTP client: connection pools (TCP/TLS sessions) are
+/// reused across sync/AI calls instead of rebuilt per request. The
+/// per-call nested runtimes stay (block_on discipline), only the
+/// client is shared — `Client` is an `Arc` internally, so clones are
+/// free and `&'static` access is race-free.
+pub(crate) fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| http_client().expect("shared HTTP client builds from fixed valid config"))
+}
+
 impl wl_sync::sync::Transport for ReqwestTransport {
     fn post(&self, path: &str, body: &serde_json::Value) -> Result<String, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -685,7 +695,7 @@ impl wl_sync::sync::Transport for ReqwestTransport {
             .build()
             .map_err(|e| e.to_string())?;
         rt.block_on(async {
-            let resp = http_client()?
+            let resp = shared_client()
                 .post(format!("{}{path}", self.base))
                 .header("authorization", format!("Bearer {}", self.token))
                 .json(body)
@@ -728,7 +738,7 @@ pub(crate) async fn relay_authenticate(
             .ok_or(ShellError::NoRelay)?;
         let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
         shared.with_identity(|identity| {
-            let session = relay::handshake(&base, identity)?;
+            let session = relay::handshake(&base, identity, shared_client())?;
             let account_id = identity.account_id_hex();
             *shared.relay_token.lock().unwrap() = Some(crate::app_state::RelaySession {
                 base,
@@ -757,7 +767,7 @@ fn ensure_token(state: &AppState, base: &str, identity: &Identity) -> ShellResul
     {
         return Ok(token.to_string());
     }
-    let token = relay::handshake(base, identity)?.token;
+    let token = relay::handshake(base, identity, shared_client())?.token;
     *state.relay_token.lock().unwrap() = Some(crate::app_state::RelaySession {
         base: base.to_string(),
         account_id,
@@ -915,7 +925,7 @@ fn http_execute(
         .build()
         .map_err(|e| e.to_string())?;
     rt.block_on(async {
-        let mut req = http_client()?.post(url).json(body);
+        let mut req = shared_client().post(url).json(body);
         for (k, v) in headers {
             req = req.header(k, v);
         }

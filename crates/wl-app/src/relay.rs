@@ -12,30 +12,30 @@ use crate::error::{ShellError, ShellResult};
 /// a thread with no Tokio runtime context (production callers wrap it in
 /// `tokio::task::spawn_blocking`; see `relay_authenticate`/`sync_now`).
 /// Calling it directly from async code panics by design (fail fast, not
-/// silent deadlock).
-pub fn handshake(base: &str, identity: &Identity) -> ShellResult<wl_protocol::SessionToken> {
+/// silent deadlock). The HTTP client is shared process-wide
+/// (connection reuse); callers pass `super::commands`-owned client.
+pub fn handshake(
+    base: &str,
+    identity: &Identity,
+    client: &reqwest::Client,
+) -> ShellResult<wl_protocol::SessionToken> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| ShellError::Relay(format!("runtime: {e}")))?;
-    rt.block_on(handshake_async(base, identity))
+    rt.block_on(handshake_async(base, identity, client))
 }
 
 async fn handshake_async(
     base: &str,
     identity: &Identity,
+    client: &reqwest::Client,
 ) -> ShellResult<wl_protocol::SessionToken> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| ShellError::Relay(format!("HTTP client: {e}")))?;
     let public_key = identity.public_key_hex();
 
     // 1. Unguessable challenge (also registers the account server-side).
     let challenge: wl_protocol::Challenge = post_json(
-        &client,
+        client,
         format!("{base}/auth/challenge"),
         vec![],
         &wl_protocol::ChallengeRequest {
@@ -55,7 +55,7 @@ async fn handshake_async(
     // 3. Verify → session token. Challenge parts travel in headers
     // (relay contract), signature hex in the body.
     let session: wl_protocol::SessionToken = post_json(
-        &client,
+        client,
         format!("{base}/auth/verify"),
         vec![
             ("x-nonce", challenge.nonce.clone()),
@@ -140,10 +140,12 @@ mod tests {
         let identity = Identity::generate().unwrap();
         let base = format!("http://{addr}");
         let base2 = base.clone();
-        let session = tokio::task::spawn_blocking(move || handshake(&base2, &identity))
-            .await
-            .unwrap()
-            .expect("handshake succeeds");
+        let session = tokio::task::spawn_blocking(move || {
+            handshake(&base2, &identity, crate::commands::shared_client())
+        })
+        .await
+        .unwrap()
+        .expect("handshake succeeds");
         assert!(!session.token.is_empty());
         assert!(session.expires_at > 0);
 
@@ -191,7 +193,12 @@ mod tests {
     fn handshake_fails_closed_on_unreachable_relay() {
         let identity = Identity::generate().unwrap();
         // Port 1 is unroutable — must error, never panic or hang long.
-        let err = handshake("http://127.0.0.1:1", &identity).unwrap_err();
+        let err = handshake(
+            "http://127.0.0.1:1",
+            &identity,
+            crate::commands::shared_client(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ShellError::Relay(_)));
     }
 }

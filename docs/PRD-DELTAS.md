@@ -299,3 +299,55 @@ Locked decisions from the planning session are marked [approved].
     Known deferred (documented, not fixed): HLC arrival-sequence cutover,
     AEAD AAD operation_id/HLC binding, AI batch atomicity, vault API-key
     rollback, spawn_blocking refactor for sync IPC.
+
+## Battle-test pass 3 (2026-09-18, singularity audit — 162 workspace + 15 shell + 10 UI tests)
+
+64. **Write-boundary budgets** — every local write path now rejects
+    blank/oversized text (titles ≤ 500 chars, descriptions/context ≤
+    4000, notes ≤ 2000, model ids ≤ 256), strict `YYYY-MM-DD` calendar
+    dates (chrono alone accepts `2026-9-8`, corrupting lexicographic
+    date ordering), and directive estimates within 1–1440 min; bailout
+    notes truncate to the spec 140-char cap; settings enforce
+    `dark|light`, a 64-char hotkey (empty normalizes to `alt+space`),
+    and a 4-provider allow-list; AI facades validate before the
+    billable HTTP hop. Motivation: unbounded strings bloat sealed ops
+    past the relay 256 KiB cap and wedge sync with an undrainable batch.
+65. **LWW arbitration is total** — `TableState.last_op` carries a
+    tertiary `operation_id` tie-break (identical full-HLC ops from
+    forked data dirs previously converged order-dependently); strict-`<`
+    SQL guards stay sound because boot jitter (below) makes full-HLC
+    equality unreachable across live replicas.
+66. **Clone-split boot jitter** — `Repos::new` advances a restored HLC
+    head by a random 0–255 counter (persisted on next tick): two live
+    replicas forked from one data dir no longer stamp identical HLCs
+    on different content under a regressed wall clock (permanent fork).
+67. **Constraint conflicts quarantine** — SQLite UNIQUE/FK failures in
+    pull-apply watermark-and-skip instead of aborting the cycle (a
+    same-id/different-date row move used to wedge every future pull);
+    other store errors still abort. Regression:
+    `poison_constraint_op_quarantines_without_wedging_sync`.
+68. **Bounded sync metadata** — relay-durable outbox rows are deleted
+    after the push phase and `crdt_applied` watermarks at/below the
+    persisted cursor are pruned each cycle (both tables grew forever).
+    Migration 0004 repairs the v2/v3 `'0'` HLC backfills to canonical
+    zero (bare `'0'` fails row mapping on legacy rows).
+69. **Shared HTTP client** — one process-wide reqwest client for
+    sync/handshake/AI (connection reuse; per-call nested runtimes
+    unchanged for the block_on discipline). Relay `now_secs` degrades
+    a pre-1970 clock to 0 instead of panicking.
+70. **Dead code removed** — `IdentityVault` (unimplemented Stronghold
+    variant), `EngineError::NotActive`, `Repos::set_phase_state_lww`,
+    `wl_sync::observe_remote`, shim `wlOnHudTick`/`wlIsNative`
+    (the latter's web fallback ran a `setInterval` nothing consumed);
+    `enqueue_outbox` validates table/record bounds.
+71. **UI correctness** — BYOK/settings key probes re-subscribe on
+    provider switch with stale-response guards (pill switch showed the
+    wrong "sealed" state); pin-to-top persists via `settings_save`
+    and reverts on failure (was ephemeral until restart); vault-key
+    removal UI added (`delete_api_key` was shell-only); goal creation
+    double-submit guarded on both paths with title checks; briefing
+    distinguishes missing-key from offline and counts actual
+    dispatches; browser mock verifies backup words positionally like
+    the shell; `active_directive` orders by `(hlc DESC, id)` matching
+    the `enforce_single_active` winner.
+
