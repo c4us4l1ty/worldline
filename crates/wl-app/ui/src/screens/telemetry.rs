@@ -108,6 +108,14 @@ pub fn TelemetryDrawer() -> Element {
                         class: "wl-btn-ghost",
                         onclick: move |_| {
                             { let mut t = ctx.telemetry_open; *t.write() = false; }
+                            { let mut sc = ctx.screen; *sc.write() = Screen::EveningCheckIn; }
+                        },
+                        "Evening audit"
+                    }
+                    button {
+                        class: "wl-btn-ghost",
+                        onclick: move |_| {
+                            { let mut t = ctx.telemetry_open; *t.write() = false; }
                             { let mut sc = ctx.screen; *sc.write() = Screen::Settings; }
                         },
                         "Open full settings"

@@ -711,24 +711,24 @@ async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
         next_op_id: "op-big".into(),
         exhausted: true,
     };
-        let resp_json = serde_json::to_value(&resp).unwrap();
-        struct HostileTransport {
-            resp: serde_json::Value,
+    let resp_json = serde_json::to_value(&resp).unwrap();
+    struct HostileTransport {
+        resp: serde_json::Value,
+    }
+    impl crate::Transport for HostileTransport {
+        fn post(&self, path: &str, _body: &serde_json::Value) -> Result<String, String> {
+            assert_eq!(path, "/sync/pull");
+            Ok(self.resp.to_string())
         }
-        impl crate::Transport for HostileTransport {
-            fn post(&self, path: &str, _body: &serde_json::Value) -> Result<String, String> {
-                assert_eq!(path, "/sync/pull");
-                Ok(self.resp.to_string())
-            }
+    }
+    let tx = HostileTransport { resp: resp_json };
+    let err = sync_cycle(&repos, &identity, &tx, 100).unwrap_err();
+    match &err {
+        wl_sync::sync::SyncError::Protocol(m) => {
+            assert!(m.contains("bounds"), "got: {m}");
         }
-        let tx = HostileTransport { resp: resp_json };
-        let err = sync_cycle(&repos, &identity, &tx, 100).unwrap_err();
-        match &err {
-            wl_sync::sync::SyncError::Protocol(m) => {
-                assert!(m.contains("bounds"), "got: {m}");
-            }
-            other => panic!("expected protocol error, got {other:?}"),
-        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
     // Unknown table (valid envelope): B-008 quarantine-skip — the
     // cycle completes, the cursor advances past the op, nothing applies.
     let resp = wl_protocol::PullResponse {

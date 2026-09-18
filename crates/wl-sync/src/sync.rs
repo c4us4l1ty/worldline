@@ -300,7 +300,15 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
     }
     if op.tombstone {
         apply_delete(&conn, table, &op.record_id)?;
-        store_head(&conn, table.as_str(), &op.record_id, &ts_s, ts.device, &op.operation_id, true)?;
+        store_head(
+            &conn,
+            table.as_str(),
+            &op.record_id,
+            &ts_s,
+            ts.device,
+            &op.operation_id,
+            true,
+        )?;
         return Ok(());
     }
     let f = op.fields.as_ref().unwrap();
@@ -308,7 +316,15 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
         // Matches `TableState`: an op that only beats a tombstone via
         // the device/op tie-break does not resurrect — advance the head
         // but keep delete memory.
-        store_head(&conn, table.as_str(), &op.record_id, &ts_s, ts.device, &op.operation_id, true)?;
+        store_head(
+            &conn,
+            table.as_str(),
+            &op.record_id,
+            &ts_s,
+            ts.device,
+            &op.operation_id,
+            true,
+        )?;
         return Ok(());
     }
     if table == CrdtTable::CheckIns {
@@ -318,7 +334,15 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
     } else {
         apply_upsert(&conn, table, &op.record_id, f, &ts_s, &get)?;
     }
-    store_head(&conn, table.as_str(), &op.record_id, &ts_s, ts.device, &op.operation_id, false)?;
+    store_head(
+        &conn,
+        table.as_str(),
+        &op.record_id,
+        &ts_s,
+        ts.device,
+        &op.operation_id,
+        false,
+    )?;
     Ok(())
 }
 
@@ -380,19 +404,25 @@ fn row_hlc(
     use wl_core::crdt::CrdtTable;
     let hlc: Option<String> = match table {
         CrdtTable::Goals => conn
-            .query_row("SELECT hlc_timestamp FROM goals WHERE id = ?1", [record], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT hlc_timestamp FROM goals WHERE id = ?1",
+                [record],
+                |r| r.get(0),
+            )
             .optional()?,
         CrdtTable::Milestones => conn
-            .query_row("SELECT hlc_timestamp FROM milestones WHERE id = ?1", [record], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT hlc_timestamp FROM milestones WHERE id = ?1",
+                [record],
+                |r| r.get(0),
+            )
             .optional()?,
         CrdtTable::Directives => conn
-            .query_row("SELECT hlc_timestamp FROM directives WHERE id = ?1", [record], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT hlc_timestamp FROM directives WHERE id = ?1",
+                [record],
+                |r| r.get(0),
+            )
             .optional()?,
         // Phase ops share the directive-level record id (one op per
         // step): the coarsest live phase HLC is the fallback.
@@ -405,19 +435,25 @@ fn row_hlc(
             .optional()?
             .flatten(),
         CrdtTable::CheckIns => conn
-            .query_row("SELECT hlc_timestamp FROM check_ins WHERE id = ?1", [record], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT hlc_timestamp FROM check_ins WHERE id = ?1",
+                [record],
+                |r| r.get(0),
+            )
             .optional()?,
         CrdtTable::Bailouts => conn
-            .query_row("SELECT hlc_timestamp FROM bailouts WHERE id = ?1", [record], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT hlc_timestamp FROM bailouts WHERE id = ?1",
+                [record],
+                |r| r.get(0),
+            )
             .optional()?,
         CrdtTable::AppSettings => conn
-            .query_row("SELECT hlc_timestamp FROM app_settings WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT hlc_timestamp FROM app_settings WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .optional()?,
     };
     Ok(hlc)
@@ -547,9 +583,7 @@ fn apply_check_in_win(
     let date = get("date").unwrap_or_default();
     // Key of every row sharing the date: stored head, else row HLC.
     let sharers: Vec<(String, String, u16, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, hlc_timestamp FROM check_ins WHERE date = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT id, hlc_timestamp FROM check_ins WHERE date = ?1")?;
         let rows = stmt
             .query_map(rusqlite::params![date], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -610,7 +644,10 @@ fn apply_delete(
             conn.execute("DELETE FROM directives WHERE id = ?1", [record_id])?;
         }
         CrdtTable::DirectivePhases => {
-            conn.execute("DELETE FROM directive_phases WHERE directive_id = ?1", [record_id])?;
+            conn.execute(
+                "DELETE FROM directive_phases WHERE directive_id = ?1",
+                [record_id],
+            )?;
         }
         CrdtTable::CheckIns => {
             conn.execute("DELETE FROM check_ins WHERE id = ?1", [record_id])?;

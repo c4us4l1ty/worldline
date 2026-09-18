@@ -297,9 +297,20 @@ async fn delete_replicates_and_stays_deleted() {
     let a = Repos::new(open_in_memory().unwrap(), 1);
     let g = a.create_goal("Doomed goal", None, None, id).unwrap();
     let goal_hlc = g.hlc_timestamp.to_string();
-    let ms = a.create_milestone(&g.id, "Doomed milestone", None, 0, id).unwrap();
+    let ms = a
+        .create_milestone(&g.id, "Doomed milestone", None, 0, id)
+        .unwrap();
     let d = a
-        .create_directive(&ms.id, "Doomed directive", None, 10, 1, "2026-09-13", &[], id)
+        .create_directive(
+            &ms.id,
+            "Doomed directive",
+            None,
+            10,
+            1,
+            "2026-09-13",
+            &[],
+            id,
+        )
         .unwrap();
     sync_cycle(&a, &identity, &transport, 100).unwrap();
 
@@ -325,13 +336,23 @@ async fn delete_replicates_and_stays_deleted() {
     assert_eq!((sb3.pulled, sb3.applied, sb3.quarantined), (0, 0, 0));
     assert!(b.goal(&g.id).unwrap().is_none());
 
-    // A stale upsert (older HLC, fresh op id) cannot resurrect.
+    // A stale upsert (older HLC, fresh op id) cannot resurrect the
+    // deleted goal on ANY replica that receives the op. The push lands
+    // at the relay AFTER device B's cursor passed that HLC, so B never
+    // re-receives it (exclusive composite cursor — record_heads
+    // tombstone memory covers B, which already saw the deletes; see
+    // P0-BUG below for the below-cursor late-arrival gap). Device C is
+    // fresh (cursor "") and receives BOTH the tombstones and the
+    // zombie: LWW arbitration drops the upsert.
     let fields = serde_json::json!({"title": "Zombie goal", "description": null,
         "target_date": null, "status": "active"});
     let aad = format!("goals:{}", g.id);
-    let sealed =
-        wl_core::crypto::aead::seal(&identity, &serde_json::to_vec(&fields).unwrap(), aad.as_bytes())
-            .unwrap();
+    let sealed = wl_core::crypto::aead::seal(
+        &identity,
+        &serde_json::to_vec(&fields).unwrap(),
+        aad.as_bytes(),
+    )
+    .unwrap();
     let body = serde_json::to_value(wl_protocol::PushRequest {
         ops: vec![wl_protocol::PushOp {
             operation_id: "op-zombie-upsert".into(),
@@ -348,9 +369,18 @@ async fn delete_replicates_and_stays_deleted() {
     let resp = transport.post("/sync/push", &body).unwrap();
     let decoded: wl_protocol::PushResponse = serde_json::from_str(&resp).unwrap();
     assert_eq!(decoded.accepted.len(), 1);
-    let sb4 = sync_cycle(&b, &identity, &transport, 100).unwrap();
-    assert_eq!(sb4.applied, 1); // seen, arbitrated, ignored
-    assert!(b.goal(&g.id).unwrap().is_none());
+    // Fresh replica C pulls everything: tombstones + zombie upsert.
+    // The zombie loses LWW (older HLC than the delete heads) — no
+    // resurrection, and it is watermarked, not re-fetched forever.
+    let c = Repos::new(open_in_memory().unwrap(), 3);
+    let sc = sync_cycle(&c, &identity, &transport, 100).unwrap();
+    // C receives every op the relay holds: 3 creates + 3 delete
+    // tombstones + the zombie upsert (watermarked after losing LWW).
+    assert_eq!(sc.applied, 7);
+    assert!(c.goal(&g.id).unwrap().is_none());
+    let sc2 = sync_cycle(&c, &identity, &transport, 100).unwrap();
+    assert_eq!((sc2.pulled, sc2.applied, sc2.quarantined), (0, 0, 0));
+    assert!(c.goal(&g.id).unwrap().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -912,8 +912,8 @@ pub(crate) async fn master_plan(
         // non-zeroized copy on the heap next to the wiped original).
         // Every approved provider speaks OpenAI-compatible chat
         // completions; only the base URL varies (B-001).
-        let base_url = base_for(&provider)
-            .ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        let base_url =
+            base_for(&provider).ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
         let adapter = ProviderAdapter::OpenAiCompat {
             base_url,
             api_key,
@@ -999,8 +999,8 @@ pub(crate) async fn morning_briefing(
     tokio::task::spawn_blocking(move || {
         let api_key = vault_api_key(&shared, &provider)?;
         // Same move-not-clone discipline as master_plan (see there).
-        let base_url = base_for(&provider)
-            .ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        let base_url =
+            base_for(&provider).ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
         let adapter = ProviderAdapter::OpenAiCompat {
             base_url,
             api_key,
@@ -1148,9 +1148,17 @@ mod tests {
                     serde_json::json!({"choices":[{"message":{"content": PLAN}}]}).to_string(),
                 )
             };
-            let (goal_id, _) =
-                AiDispatcher::master_plan(&adapter, "G", None, None, "c", execute, &state.repos, None)
-                    .unwrap_or_else(|e| panic!("master_plan failed for {provider}: {e}"));
+            let (goal_id, _) = AiDispatcher::master_plan(
+                &adapter,
+                "G",
+                None,
+                None,
+                "c",
+                execute,
+                &state.repos,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("master_plan failed for {provider}: {e}"));
             assert!(state.repos.goal(&goal_id).unwrap().is_some());
         }
         // Removed providers stay rejected at both layers (no silent fallback).

@@ -696,7 +696,11 @@ impl Repos {
         )
     }
 
-    pub fn delete_milestone(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+    pub fn delete_milestone(
+        &self,
+        id: &str,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
         self.delete_record(
             crate::crdt::CrdtTable::Milestones,
             id,
@@ -705,7 +709,11 @@ impl Repos {
         )
     }
 
-    pub fn delete_directive(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
+    pub fn delete_directive(
+        &self,
+        id: &str,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
         self.delete_record(
             crate::crdt::CrdtTable::Directives,
             id,

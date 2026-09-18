@@ -5,7 +5,9 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{elapsed_secs, flash, fmt_mmss, invoke, set_directive, AppCtx, DirectiveView};
+use crate::app::{
+    elapsed_secs, flash, fmt_mmss, invoke, set_directive, AppCtx, DirectiveView, VelocityView,
+};
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -446,7 +448,19 @@ fn complete_current(ctx: &AppCtx) {
     let ctx = *ctx;
     dioxus::core::spawn_forever(async move {
         match invoke::<Option<DirectiveView>>("complete_directive", ()).await {
-            Ok(next) => set_directive(&ctx, next),
+            Ok(next) => {
+                set_directive(&ctx, next);
+                // MVP-3: velocity must move the moment a directive
+                // completes, not wait for the next evening check-in
+                // (the HUD target/ratio live in the same signal the
+                // telemetry drawer and check-in read).
+                if let Ok(v) = invoke::<VelocityView>("velocity", ()).await {
+                    {
+                        let mut s = ctx.velocity;
+                        *s.write() = v;
+                    }
+                }
+            }
             Err(e) => flash(&ctx, &format!("ERR {e}")),
         }
         let mut busy = ctx.directive_busy;

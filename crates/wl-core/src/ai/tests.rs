@@ -99,8 +99,7 @@ fn provider_request_shapes() {
             .any(|(k, v)| k == "Authorization" && v == "Bearer sk-test"));
         assert_eq!(body["model"], "user-model-x");
         assert_eq!(body["response_format"]["type"], "json_object");
-        let text =
-            oa.extract_text(&serde_json::json!({"choices":[{"message":{"content":"hi"}}]}));
+        let text = oa.extract_text(&serde_json::json!({"choices":[{"message":{"content":"hi"}}]}));
         assert_eq!(text.as_deref(), Some("hi"));
     }
 }
