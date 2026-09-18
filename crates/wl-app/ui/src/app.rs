@@ -172,6 +172,12 @@ impl Default for AppSettingsView {
 #[derive(Clone, PartialEq)]
 pub enum Screen {
     Boot,
+    /// Fail-closed boot: the shell answered with an error (broken or
+    /// unreadable vault/config). Renders wipe/restore guidance instead
+    /// of pretending the install is fresh (MVP-5).
+    BootError {
+        detail: String,
+    },
     SeedVault {
         phrase: Vec<String>,
         verify_indices: Vec<usize>,
@@ -242,6 +248,14 @@ pub struct AppCtx {
     /// discovery navigation, telemetry is system inspection.
     pub nav_open: Signal<bool>,
     pub sync_status: Signal<String>,
+    /// Epoch-ms of the last successful sync cycle (MVP-4). `None` until
+    /// one succeeds, so the HUD can say "never synced" instead of
+    /// implying a freshness it never had.
+    pub last_sync_ms: Signal<Option<f64>>,
+    /// Shared identity state (MVP-5): set at boot, refreshed after
+    /// unlock/restore/generate in Settings. The drawer, canvas and
+    /// settings all read the same signal.
+    pub identity_status: Signal<IdentityStatus>,
 }
 
 fn App() -> Element {
@@ -258,12 +272,18 @@ fn App() -> Element {
         telemetry_open: Signal::new(false),
         nav_open: Signal::new(false),
         sync_status: Signal::new("LOCAL".to_string()),
+        last_sync_ms: Signal::new(None),
+        identity_status: Signal::new(IdentityStatus::default()),
     });
 
     let ctx = use_context::<AppCtx>();
     let _theme = use_context_provider(Theme::new);
 
-    // Boot: check identity → route (runs once).
+    // Boot: load settings/theme and route straight to Home (MVP-5).
+    // No onboarding screens at boot: identity work (unlock, restore,
+    // generate, 12-word phrase) lives in Settings. The ONLY boot
+    // failure that blocks is the shell refusing to answer — a silent
+    // default would disguise a broken vault as a fresh install.
     let mut booted = use_signal(|| false);
     use_effect(move || {
         if *booted.read() {
@@ -274,40 +294,21 @@ fn App() -> Element {
         spawn(async move {
             let mut screen = ctx2.screen;
             let mut settings_sig = ctx2.settings;
-            let status: IdentityStatus = invoke("identity_status", ()).await.unwrap_or_default();
             let settings: AppSettingsView = invoke("settings_get", ()).await.unwrap_or_default();
             crate::theme::apply_data_theme(if settings.theme == "light" {
                 "light"
             } else {
                 "dark"
             });
-            if status.has {
-                if status.unlocked {
-                    *screen.write() = Screen::Canvas;
-                } else {
-                    // Post-restart: try the vault copy before asking the
-                    // user to re-enter the phrase (Item 3 unlock flow).
-                    match invoke::<String>("identity_unlock", ()).await {
-                        Ok(_) => *screen.write() = Screen::Canvas,
-                        Err(_) => {
-                            *screen.write() = Screen::SeedVault {
-                                phrase: Vec::new(),
-                                verify_indices: Vec::new(),
-                                restore: true,
-                                has_identity: true,
-                            }
-                        }
-                    }
-                }
-            } else {
-                *screen.write() = Screen::SeedVault {
-                    phrase: Vec::new(),
-                    verify_indices: Vec::new(),
-                    restore: false,
-                    has_identity: false,
-                };
-            }
             *settings_sig.write() = settings;
+            match invoke::<IdentityStatus>("identity_status", ()).await {
+                Ok(status) => {
+                    let mut st = ctx2.identity_status;
+                    st.set(status);
+                    *screen.write() = Screen::Canvas;
+                }
+                Err(e) => *screen.write() = Screen::BootError { detail: e },
+            }
         });
     });
 
@@ -331,6 +332,7 @@ fn App() -> Element {
             style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
             match ctx.screen.read().clone() {
                 Screen::Boot => rsx! { BootSplash {} },
+                Screen::BootError { detail } => rsx! { BootErrorScreen { detail: detail.clone() } },
                 Screen::SeedVault { phrase, verify_indices, restore, has_identity } => rsx! {
                     crate::screens::SeedVaultScreen {
                         phrase: phrase.clone(),
@@ -369,6 +371,25 @@ fn BootSplash() -> Element {
     }
 }
 
+/// Fail-closed boot (MVP-5): the shell could not answer. Never render
+/// a fresh-looking empty Home over a broken vault — say what failed and
+/// how to recover, without alarm red.
+#[component]
+fn BootErrorScreen(detail: String) -> Element {
+    rsx! {
+        div { class: "wl-directive-container",
+            h1 { class: "wl-serif-title", "Storage could not be opened." }
+            p { class: "wl-body-muted", style: "margin-top: 10px;",
+                "Worldline refused to start with an unreadable vault or database rather than risk writing over your data."
+            }
+            p { class: "wl-body-muted wl-mono", style: "margin-top: 10px;", "{detail}" }
+            p { class: "wl-body-muted", style: "margin-top: 14px;",
+                "Recover by restoring your 12-word phrase, or wipe the application data directory to start over (this deletes local directives)."
+            }
+        }
+    }
+}
+
 pub fn fmt_mmss(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
@@ -397,6 +418,64 @@ pub fn flash(ctx: &AppCtx, msg: &str) {
         gloo_timers::future::TimeoutFuture::new(2200).await;
         toast.set(None);
     })));
+}
+
+/// Shell `SyncStatsView` mirror (MVP-4). One DTO so every call site
+/// (canvas, settings, telemetry, briefing) parses the same shape the
+/// shell serializes.
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
+pub struct SyncStats {
+    pub pushed: usize,
+    pub pulled: usize,
+    #[serde(default)]
+    pub applied: usize,
+    pub pending: usize,
+    #[serde(default)]
+    pub quarantined: usize,
+    #[serde(default)]
+    pub cursor: String,
+}
+
+impl SyncStats {
+    /// Flash/toast copy: quarantined skips are named, never silent.
+    pub fn summary(&self) -> String {
+        if self.quarantined > 0 {
+            format!(
+                "SYNCED ↑{} ↓{} · {} quarantined",
+                self.pushed, self.pulled, self.quarantined
+            )
+        } else {
+            format!("SYNCED ↑{} ↓{}", self.pushed, self.pulled)
+        }
+    }
+}
+
+/// Records a successful sync cycle: HUD pill + freshness timestamp.
+pub fn record_sync(ctx: &AppCtx, stats: &SyncStats) {
+    let mut st = ctx.sync_status;
+    if stats.pending > 0 {
+        *st.write() = format!("{} PENDING", stats.pending);
+    } else {
+        *st.write() = "SYNCED".to_string();
+    }
+    let mut at = ctx.last_sync_ms;
+    at.set(Some(js_sys::Date::now()));
+}
+
+/// HUD label for the current sync state, with age when we have one.
+/// `LOCAL` means no relay session has completed yet — not a failure.
+pub fn sync_label(ctx: &AppCtx) -> String {
+    let status = ctx.sync_status.read().clone();
+    let last = *ctx.last_sync_ms.read();
+    match (status.as_str(), last) {
+        ("OFFLINE", _) => "OFFLINE".to_string(),
+        ("LOCAL", _) => "LOCAL · never synced".to_string(),
+        (_, None) => status,
+        (s, Some(ms)) => {
+            let age = elapsed_secs(ms, js_sys::Date::now());
+            format!("{s} · {age}s ago")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -448,5 +527,48 @@ mod tests {
         let next_directive = TimerSession::update(next_phase, Some(&d), 9000.0);
         assert_eq!(next_directive.as_ref().unwrap().started_ms, 9000.0);
         assert!(TimerSession::update(next_directive, None, 10000.0).is_none());
+    }
+
+    #[test]
+    fn idle_velocity_and_sync_defaults_are_honest() {
+        // A quiet cycle reports what moved and never invents skips.
+        let quiet = SyncStats {
+            pushed: 0,
+            pulled: 0,
+            applied: 0,
+            pending: 0,
+            quarantined: 0,
+            cursor: String::new(),
+        };
+        assert_eq!(quiet.summary(), "SYNCED ↑0 ↓0");
+        let moved = SyncStats {
+            pushed: 3,
+            pulled: 2,
+            ..quiet.clone()
+        };
+        assert_eq!(moved.summary(), "SYNCED ↑3 ↓2");
+        // Quarantined skips are surfaced, never silent (MVP-4).
+        let skipped = SyncStats {
+            pushed: 1,
+            pulled: 1,
+            quarantined: 2,
+            ..quiet.clone()
+        };
+        assert_eq!(skipped.summary(), "SYNCED ↑1 ↓1 · 2 quarantined");
+        // Future/older shells omit the new fields — parse must not fail
+        // (the DTO is the single wire contract for every call site).
+        let legacy: SyncStats =
+            serde_json::from_str(r#"{"pushed":1,"pulled":2,"applied":3,"pending":4}"#).unwrap();
+        assert_eq!(
+            legacy,
+            SyncStats {
+                pushed: 1,
+                pulled: 2,
+                applied: 3,
+                pending: 4,
+                quarantined: 0,
+                cursor: String::new(),
+            }
+        );
     }
 }

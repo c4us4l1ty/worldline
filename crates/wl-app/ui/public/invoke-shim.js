@@ -70,18 +70,16 @@
       });
       return Promise.resolve(ok);
     },
+    // Fresh-install fidelity: no directive until a goal or briefing
+    // creates one, so `dx serve` exercises the "No active directive."
+    // empty-state and the drawer → create-goal path (MVP-1).
     current_directive: function () {
-      mockDb.directive = mockDb.directive || {
-        directive_id: 'dir-demo-1',
-        milestone_id: 'ms-demo-1',
-        title: 'Write 300 words on Section 2.1',
-        instruction: 'Open the manuscript and draft the CRDT merge-semantics prose. No editing — momentum only.',
-        phase: [1, 2],
-        estimated_minutes: 5,
-        state: 'active',
-        milestone_title: 'Persistence Layer',
-      };
-      return Promise.resolve(mockDb.directive);
+      return Promise.resolve(mockDb.directive || {
+        directive_id: '', milestone_id: '',
+        title: 'All clear for today',
+        instruction: 'The queue is empty. Check in this evening or plan tomorrow\'s goal.',
+        phase: null, estimated_minutes: 0, state: 'idle', milestone_title: null,
+      });
     },
     complete_directive: function () {
       var d = mockDb.directive;
@@ -120,18 +118,42 @@
     settings_save: function (args) { return Promise.resolve(null); },
     create_goal: function (args) {
       mockDb.goal = args;
+      // Mirror the shell's B-002 auto-seed: a manual goal arrives with
+      // one starter directive so the MVP path (create → active
+      // directive on canvas) works with no API key.
+      mockDb.directive = {
+        directive_id: 'dir-seeded-1',
+        milestone_id: 'ms-seeded-1',
+        title: args.title,
+        instruction: 'First step: open your tools and start.',
+        phase: null,
+        estimated_minutes: 25,
+        state: 'active',
+        milestone_title: 'First steps',
+      };
       return Promise.resolve({
         id: 'goal-1', title: args.title, target_date: args.target_date || null,
-        milestone_done: 1, milestone_total: 4,
+        milestone_done: 0, milestone_total: 1,
       });
     },
     create_manual_milestone: function (args) { return Promise.resolve('ms-' + Date.now()); },
     create_manual_directive: function (args) { return Promise.resolve('dir-' + Date.now()); },
-    sync_now: function () { return Promise.resolve({ pushed: 0, pulled: 0, applied: 0, pending: 0 }); },
-    relay_authenticate: function () { return Promise.resolve({ account_id: 'mock-account', relay_url: null }); },
+    sync_now: function () { return Promise.resolve({ pushed: 0, pulled: 0, applied: 0, pending: 0, quarantined: 0, cursor: '' }); },
+    relay_authenticate: function () {
+      // Real shell returns RelayAuthView { account_id, expires_at }
+      // (epoch seconds); the settings "Test connection" prints the
+      // remaining session minutes from it.
+      return Promise.resolve({ account_id: '9f2c'.repeat(8), expires_at: Math.floor(Date.now() / 1000) + 3600 });
+    },
     master_plan: function (args) { return Promise.resolve('goal-ai-1'); },
     morning_briefing: function (args) {
-      return Promise.resolve({ titles: ['Write 300 words on Section 2.1', 'Review yesterday\'s test failures'], created_ids: ['dir-mock-1', 'dir-mock-2'] });
+      var titles = ['Write 300 words on Section 2.1', "Review yesterday's test failures"];
+      mockDb.directive = {
+        directive_id: 'dir-brief-1', milestone_id: 'ms-mock-1',
+        title: titles[0], instruction: 'Draft the merge-semantics prose. Momentum only.',
+        phase: [1, 2], estimated_minutes: 25, state: 'active', milestone_title: 'Persistence Layer',
+      };
+      return Promise.resolve({ titles: titles, created_ids: ['dir-brief-1', 'dir-brief-2'] });
     },
     set_always_on_top: function (args) { return Promise.resolve(null); },
     toggle_window_visibility: function () { return Promise.resolve(null); },

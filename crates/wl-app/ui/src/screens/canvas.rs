@@ -6,7 +6,8 @@
 use dioxus::prelude::*;
 
 use crate::app::{
-    elapsed_secs, flash, fmt_mmss, invoke, set_directive, AppCtx, DirectiveView, VelocityView,
+    elapsed_secs, flash, fmt_mmss, invoke, record_sync, set_directive, sync_label, AppCtx,
+    DirectiveView, SyncStats, VelocityView,
 };
 
 pub fn CanvasScreen() -> Element {
@@ -90,7 +91,33 @@ pub fn CanvasScreen() -> Element {
             div { style: "display: flex; gap: 8px; align-items: center;",
                 span { class: "wl-hud-status",
                     span { class: "wl-pulse-dot" }
-                    "{ctx.sync_status.read().clone()}"
+                    "{sync_label(&ctx)}"
+                }
+                button {
+                    // MVP-4: on-demand sync reachable from the canvas
+                    // (previously settings + telemetry only).
+                    class: "wl-hud-pill",
+                    style: "border: none; cursor: pointer;",
+                    aria_label: "Sync now",
+                    title: "Sync now",
+                    disabled: *ctx.directive_busy.read(),
+                    onclick: move |_| {
+                        let ctx = ctx;
+                        dioxus::core::spawn_forever(async move {
+                            match invoke::<SyncStats>("sync_now", ()).await {
+                                Ok(s) => {
+                                    record_sync(&ctx, &s);
+                                    flash(&ctx, s.summary().as_str());
+                                }
+                                Err(_) => {
+                                    let mut st = ctx.sync_status;
+                                    *st.write() = "OFFLINE".to_string();
+                                    flash(&ctx, "SYNC FAILED — OFFLINE?");
+                                }
+                            }
+                        });
+                    },
+                    "⇅"
                 }
                 button {
                     class: "wl-hud-timer",

@@ -8,27 +8,18 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{flash, invoke, AppCtx, Screen};
+use crate::app::{flash, invoke, record_sync, AppCtx, Screen, SyncStats};
 
-/// MVP-4: shell `SyncStatsView` mirror — only the fields the UI
-/// surfaces (quarantined + cursor are new; skips must be visible).
-#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
-struct SyncOut {
-    pushed: usize,
-    pulled: usize,
-    #[allow(dead_code)]
-    applied: usize,
-    pending: usize,
-    quarantined: usize,
-    cursor: String,
-}
+/// MVP-4: detail rows for the last completed cycle. Reuses the shared
+/// `SyncStats` DTO so the wire shape is defined exactly once.
+type SyncDetail = SyncStats;
 
 pub fn TelemetryDrawer() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut busy = use_signal(|| false);
     // MVP-4: last completed sync cycle, so quarantined ops and the
     // pull cursor are inspectable instead of silent.
-    let mut last_sync = use_signal(|| None::<SyncOut>);
+    let mut last_sync = use_signal(|| None::<SyncDetail>);
     let s = ctx.settings.read().clone();
     let sync = ctx.sync_status.read().clone();
     let v = ctx.velocity.read().clone();
@@ -92,20 +83,10 @@ pub fn TelemetryDrawer() -> Element {
                             let ctx = ctx;
                             busy.set(true);
                             spawn(async move {
-                                match invoke::<SyncOut>("sync_now", ()).await {
+                                match invoke::<SyncStats>("sync_now", ()).await {
                                     Ok(o) => {
-                                        let mut st = ctx.sync_status;
-                                        if o.pending > 0 {
-                                            *st.write() = format!("{} PENDING", o.pending);
-                                        } else {
-                                            *st.write() = "SYNCED".to_string();
-                                        }
-                                        let msg = if o.quarantined > 0 {
-                                            format!("SYNCED ↑{} ↓{} · {} quarantined", o.pushed, o.pulled, o.quarantined)
-                                        } else {
-                                            format!("SYNCED ↑{} ↓{}", o.pushed, o.pulled)
-                                        };
-                                        flash(&ctx, msg.as_str());
+                                        record_sync(&ctx, &o);
+                                        flash(&ctx, o.summary().as_str());
                                         last_sync.set(Some(o));
                                     }
                                     Err(_) => {

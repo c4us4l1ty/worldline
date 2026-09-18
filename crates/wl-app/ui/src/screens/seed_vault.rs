@@ -160,7 +160,7 @@ pub fn SeedVaultScreen(
                 g.set(None);
                 words_sig.set(vec![String::new(); 3]);
                 let mut s = ctx.screen;
-                *s.write() = Screen::ByokSetup;
+                *s.write() = Screen::Settings;
             } else {
                 error.set(
                     "Those words don't match the sequence. Check your backup again.".to_string(),
@@ -231,7 +231,7 @@ pub fn SeedVaultScreen(
                                         // that the shell holds it.
                                         restore_input.set(String::new());
                                         let mut s = ctx.screen;
-                                        *s.write() = Screen::ByokSetup;
+                                        *s.write() = Screen::Settings;
                                     }
                                     Err(_) => {
                                         let mut e = error;

@@ -10,7 +10,8 @@
 use dioxus::prelude::*;
 
 use crate::app::{
-    flash, invoke, set_directive, AppCtx, BriefingView, DirectiveView, Screen, VelocityView,
+    flash, invoke, record_sync, set_directive, AppCtx, BriefingView, DirectiveView, Screen,
+    SyncStats, VelocityView,
 };
 
 pub fn MorningBriefScreen() -> Element {
@@ -60,29 +61,15 @@ pub fn MorningBriefScreen() -> Element {
                             *s.write() = v;
                         }
                     }
-                    // Sync surfacing (B-005): show what the briefing left
-                    // in the outbox / last cycle. NoRelay / offline are
-                    // expected here — LOCAL is the honest pill, not an
-                    // error flash; the telemetry drawer still drives
-                    // explicit syncs.
-                    #[derive(serde::Deserialize, Default)]
-                    struct SyncOut {
-                        pushed: usize,
-                        pulled: usize,
-                        #[allow(dead_code)]
-                        applied: usize,
-                        pending: usize,
-                    }
-                    match invoke::<SyncOut>("sync_now", ()).await {
+                    // Sync surfacing (B-005/MVP-4): show what the
+                    // briefing left in the outbox / last cycle. NoRelay
+                    // and offline are expected here — LOCAL is the
+                    // honest pill, not an error flash.
+                    match invoke::<SyncStats>("sync_now", ()).await {
                         Ok(s) => {
-                            let mut st = ctx.sync_status;
-                            if s.pending > 0 {
-                                *st.write() = format!("{} PENDING", s.pending);
-                            } else {
-                                *st.write() = "SYNCED".to_string();
-                            }
+                            record_sync(&ctx, &s);
                             if s.pushed > 0 || s.pulled > 0 {
-                                flash(&ctx, format!("SYNC ↑{} ↓{}", s.pushed, s.pulled).as_str());
+                                flash(&ctx, s.summary().as_str());
                             }
                         }
                         Err(_) => {

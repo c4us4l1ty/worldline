@@ -4,13 +4,20 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{flash, invoke, AppCtx, Screen};
+use crate::app::{flash, invoke, record_sync, AppCtx, IdentityStatus, Screen, SyncStats};
 
 pub fn SettingsScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut local = use_signal(|| ctx.settings.read().clone());
     let mut api_key = use_signal(String::new);
     let mut key_saved = use_signal(|| false);
+    // MVP-4: guards the relay connection test (single in-flight probe).
+    let mut busy = use_signal(|| false);
+    // MVP-5: identity management lives here (not at boot). The phrase
+    // input is write-only and cleared as soon as the shell accepts it.
+    let mut phrase = use_signal(String::new);
+    let mut identity_busy = use_signal(|| false);
+    let mut identity_error = use_signal(String::new);
     // Probe whether a key is already stored for the current provider.
     // Reads `local` inside the effect so provider switches re-probe;
     // the in-flight guard drops stale responses from rapid switches.
@@ -60,10 +67,129 @@ pub fn SettingsScreen() -> Element {
     };
 
     let s = local.read().clone();
+    let status = ctx.identity_status.read().clone();
 
     rsx! {
         div { class: "wl-scroll-region",
             h1 { class: "wl-serif-title", "Settings" }
+
+            // MVP-5: identity (12-word phrase) lives in Settings.
+            // Boot never opens onboarding; this is the only place that
+            // unlocks, restores, or generates the phrase.
+            div { class: "wl-field", style: "margin-top: 18px;",
+                label { class: "wl-label", "Identity (12-word phrase)" }
+                p { class: "wl-body-muted wl-mono",
+                    if !status.has {
+                        "no identity on this install"
+                    } else if status.unlocked {
+                        "unlocked · phrase held in memory"
+                    } else if status.vault_has_mnemonic {
+                        "locked · phrase sealed in the vault"
+                    } else {
+                        "locked · no vault copy — restore from your 12 words"
+                    }
+                }
+                if !status.has {
+                    button {
+                        class: "wl-btn-primary",
+                        style: "margin-top: 8px;",
+                        disabled: *identity_busy.read(),
+                        onclick: move |_| {
+                            {
+                                let mut s = ctx.screen;
+                                *s.write() = Screen::SeedVault {
+                                    phrase: Vec::new(),
+                                    verify_indices: Vec::new(),
+                                    restore: false,
+                                    has_identity: false,
+                                };
+                            };
+                        },
+                        "Generate a new identity"
+                    }
+                } else if !status.unlocked {
+                    if status.vault_has_mnemonic {
+                        button {
+                            class: "wl-btn-primary",
+                            style: "margin-top: 8px;",
+                            disabled: *identity_busy.read(),
+                            onclick: move |_| {
+                                let ctx = ctx;
+                                identity_busy.set(true);
+                                identity_error.set(String::new());
+                                spawn(async move {
+                                    match invoke::<String>("identity_unlock", ()).await {
+                                        Ok(_) => {
+                                            let st: IdentityStatus =
+                                                invoke("identity_status", ()).await.unwrap_or_default();
+                                            { let mut sig = ctx.identity_status; sig.set(st); }
+                                            flash(&ctx, "IDENTITY UNLOCKED");
+                                        }
+                                        Err(e) => identity_error.set(e),
+                                    }
+                                    identity_busy.set(false);
+                                });
+                            },
+                            if *identity_busy.read() { "Unlocking…" } else { "Unlock from vault" }
+                        }
+                    }
+                    div { style: "display: flex; gap: 8px; margin-top: 8px; align-items: center;",
+                        input {
+                            class: "wl-input wl-mono",
+                            r#type: "password",
+                            autocomplete: "off",
+                            spellcheck: "false",
+                            placeholder: "Restore: 12 words, space-separated",
+                            value: "{phrase.read().clone()}",
+                            oninput: move |e| phrase.set(e.value()),
+                        }
+                        button {
+                            class: "wl-btn-ghost",
+                            style: "width: auto;",
+                            disabled: *identity_busy.read(),
+                            onclick: move |_| {
+                                let ctx = ctx;
+                                let words = phrase.read().clone();
+                                if words.split_whitespace().count() != 12 {
+                                    identity_error.set("Enter all 12 words, space-separated.".into());
+                                    return;
+                                }
+                                identity_busy.set(true);
+                                identity_error.set(String::new());
+                                spawn(async move {
+                                    match invoke::<String>(
+                                        "identity_restore",
+                                        serde_json::json!({ "phrase": words }),
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {
+                                            // Secret hygiene: the phrase
+                                            // never lingers in the DOM.
+                                            phrase.set(String::new());
+                                            let st: IdentityStatus =
+                                                invoke("identity_status", ()).await.unwrap_or_default();
+                                            { let mut sig = ctx.identity_status; sig.set(st); }
+                                            flash(&ctx, "IDENTITY RESTORED");
+                                        }
+                                        Err(e) => identity_error.set(e),
+                                    }
+                                    identity_busy.set(false);
+                                });
+                            },
+                            "Restore"
+                        }
+                    }
+                    if !identity_error.read().is_empty() {
+                        p { class: "wl-seed-sub", style: "margin-top: 6px; color: var(--wl-accent-coral);",
+                            "{identity_error.read().clone()}"
+                        }
+                    }
+                }
+                p { class: "wl-seed-sub", style: "margin-top: 6px;",
+                    "The phrase is never written to SQLite or the relay. Local directives work without it; sync and AI keys need it unlocked."
+                }
+            }
 
             div { class: "wl-field", style: "margin-top: 18px;",
                 label { class: "wl-label", "Theme" }
@@ -268,29 +394,53 @@ pub fn SettingsScreen() -> Element {
             div { style: "display: flex; flex-direction: column; gap: 8px; margin-top: 6px;",
                 button { class: "wl-btn-primary", onclick: move |_| save(), "Save settings" }
                 button { class: "wl-btn-ghost",
+                    disabled: *busy.read(),
+                    onclick: move |_| {
+                        // MVP-4: explicit handshake test — the docstring
+                        // promised one, nothing called it. Uses the
+                        // PERSISTED relay URL (the shell reads its own
+                        // copy), so unsaved edits must be saved first.
+                        let ctx = ctx;
+                        busy.set(true);
+                        spawn(async move {
+                            #[derive(serde::Deserialize, Default)]
+                            struct AuthOut {
+                                account_id: String,
+                                expires_at: i64,
+                            }
+                            match invoke::<AuthOut>("relay_authenticate", ()).await {
+                                Ok(a) => {
+                                    let mins = ((a.expires_at - (js_sys::Date::now() / 1000.0) as i64)
+                                        .max(0))
+                                        / 60;
+                                    flash(
+                                        &ctx,
+                                        format!("RELAY OK · session {mins}m · {}", a.account_id)
+                                            .as_str(),
+                                    );
+                                }
+                                Err(e) => {
+                                    let msg = if e.contains("no relay") {
+                                        "NO RELAY URL SAVED".to_string()
+                                    } else {
+                                        format!("RELAY FAILED — {e}")
+                                    };
+                                    flash(&ctx, &msg);
+                                }
+                            }
+                            busy.set(false);
+                        });
+                    },
+                    if *busy.read() { "Testing…" } else { "Test connection" }
+                }
+                button { class: "wl-btn-ghost",
                     onclick: move |_| {
                         let ctx = ctx;
                         spawn(async move {
-                            #[derive(serde::Deserialize, Default)]
-                            struct SyncOut {
-                                pushed: usize,
-                                pulled: usize,
-                                #[allow(dead_code)]
-                                applied: usize,
-                                pending: usize,
-                            }
-                            match invoke::<SyncOut>("sync_now", ()).await {
+                            match invoke::<SyncStats>("sync_now", ()).await {
                                 Ok(s) => {
-                                    let mut st = ctx.sync_status;
-                                    if s.pending > 0 {
-                                        *st.write() = format!("{} PENDING", s.pending);
-                                    } else {
-                                        *st.write() = "SYNCED".to_string();
-                                    }
-                                    flash(
-                                        &ctx,
-                                        format!("SYNCED ↑{} ↓{}", s.pushed, s.pulled).as_str(),
-                                    );
+                                    record_sync(&ctx, &s);
+                                    flash(&ctx, s.summary().as_str());
                                 }
                                 Err(_) => {
                                     let mut st = ctx.sync_status;
