@@ -43,7 +43,12 @@ pub struct GeneratedIdentity {
 }
 
 #[component]
-pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore: bool) -> Element {
+pub fn SeedVaultScreen(
+    phrase: Vec<String>,
+    verify_indices: Vec<usize>,
+    restore: bool,
+    #[props(default = false)] has_identity: bool,
+) -> Element {
     let ctx = use_context::<AppCtx>();
     let generated = use_signal::<Option<Vec<String>>>(|| None);
     let gen_indices = use_signal(Vec::<usize>::new);
@@ -238,18 +243,28 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>, restore:
                         },
                         "Restore identity"
                     }
-                    button {
-                        class: "wl-btn-escape",
-                        style: "margin-top: 6px;",
-                        disabled: *busy.read(),
-                        onclick: move |_| {
-                            if !*busy.peek() {
-                                restore_input.set(String::new());
-                                error.set(String::new());
-                                mode.set(if generated.peek().is_some() || !seeded_phrase.is_empty() { "display" } else { "intro" });
-                            }
-                        },
-                        "Create a new identity instead"
+                    // B-004: when this install already has an identity,
+                    // `identity_generate` can never succeed, so never
+                    // offer "create new" — show honest recovery copy
+                    // instead of an impossible action.
+                    if has_identity {
+                        p { class: "wl-seed-sub",
+                            "This install already has an identity — restore the 12 words or wipe the data dir to start over."
+                        }
+                    } else {
+                        button {
+                            class: "wl-btn-escape",
+                            style: "margin-top: 6px;",
+                            disabled: *busy.read(),
+                            onclick: move |_| {
+                                if !*busy.peek() {
+                                    restore_input.set(String::new());
+                                    error.set(String::new());
+                                    mode.set(if generated.peek().is_some() || !seeded_phrase.is_empty() { "display" } else { "intro" });
+                                }
+                            },
+                            "Create a new identity instead"
+                        }
                     }
                 } else if *mode.read() == "intro" || *mode.read() == "generation_failed" {
                     div { class: "wl-directive-card",

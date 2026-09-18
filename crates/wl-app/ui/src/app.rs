@@ -166,6 +166,10 @@ pub enum Screen {
         phrase: Vec<String>,
         verify_indices: Vec<usize>,
         restore: bool,
+        /// True when this install already has an identity (locked-boot
+        /// restore). The restore screen must not offer "create new",
+        /// which can never succeed then (B-004).
+        has_identity: bool,
     },
     ByokSetup,
     Canvas,
@@ -275,6 +279,7 @@ fn App() -> Element {
                                 phrase: Vec::new(),
                                 verify_indices: Vec::new(),
                                 restore: true,
+                                has_identity: true,
                             }
                         }
                     }
@@ -284,6 +289,7 @@ fn App() -> Element {
                     phrase: Vec::new(),
                     verify_indices: Vec::new(),
                     restore: false,
+                    has_identity: false,
                 };
             }
             *settings_sig.write() = settings;
@@ -309,11 +315,12 @@ fn App() -> Element {
             style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
             match ctx.screen.read().clone() {
                 Screen::Boot => rsx! { BootSplash {} },
-                Screen::SeedVault { phrase, verify_indices, restore } => rsx! {
+                Screen::SeedVault { phrase, verify_indices, restore, has_identity } => rsx! {
                     crate::screens::SeedVaultScreen {
                         phrase: phrase.clone(),
                         verify_indices: verify_indices.clone(),
                         restore,
+                        has_identity,
                     }
                 },
                 Screen::ByokSetup => rsx! { crate::screens::ByokSetupScreen {} },
