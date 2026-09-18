@@ -20,8 +20,6 @@ pub enum EngineError {
     Store(#[from] StoreError),
     #[error("no runnable directive available")]
     NothingRunnable,
-    #[error("directive {0} is not active")]
-    NotActive(String),
     #[error("milestone {0} not found")]
     MilestoneMissing(String),
 }
@@ -184,6 +182,9 @@ impl<'a> Engine<'a> {
         reason: BailoutReason,
         note: Option<&str>,
     ) -> Result<EngineOutcome, EngineError> {
+        if crate::domain::check_date("date", date).is_err() {
+            return Err(StoreError::Invalid("bad date".into()).into());
+        }
         let Some(d) = self.repos.active_directive()? else {
             return self.activate_next(date);
         };
@@ -250,6 +251,9 @@ impl<'a> Engine<'a> {
         outcome: CheckInOutcome,
         note: Option<&str>,
     ) -> Result<EngineOutcome, EngineError> {
+        if crate::domain::check_date("date", date).is_err() {
+            return Err(StoreError::Invalid("bad date".into()).into());
+        }
         self.repos
             .upsert_check_in(date, outcome, note, self.identity)?;
         Ok(EngineOutcome::CheckedIn {

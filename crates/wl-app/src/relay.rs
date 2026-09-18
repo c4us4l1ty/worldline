@@ -45,7 +45,13 @@ async fn handshake_async(
     .await?;
 
     // 2. Sign nonce ‖ expiry with the local Ed25519 key (never leaves).
-    let payload = wl_protocol::challenge_signing_payload(&challenge.nonce, challenge.expires_at);
+    // Fail closed on a malformed relay nonce instead of signing an
+    // empty fallback payload.
+    let payload = wl_protocol::checked_challenge_signing_payload(
+        &challenge.nonce,
+        challenge.expires_at,
+    )
+    .ok_or_else(|| ShellError::Relay("malformed challenge nonce".into()))?;
     let sig = identity.sign(&payload);
 
     // 3. Verify → session token. Challenge parts travel in headers

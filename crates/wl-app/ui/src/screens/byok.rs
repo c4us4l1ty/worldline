@@ -29,15 +29,20 @@ pub fn ByokSetupScreen() -> Element {
     let mut busy = use_signal(|| false);
 
     let p = provider.read().clone();
-    // Probe vault presence for the selected provider.
+    // Probe vault presence for the selected provider. Subscribes to the
+    // provider signal so pill switches re-probe; the in-flight guard
+    // drops stale responses from rapid switches.
     use_effect(move || {
-        let p = p.clone();
+        let p = provider.read().clone();
         let mut saved = key_saved;
+        let current = provider;
         spawn(async move {
             let has: bool = invoke("has_api_key", serde_json::json!({ "provider": p.clone() }))
                 .await
                 .unwrap_or(false);
-            saved.set(has);
+            if *current.peek() == p {
+                saved.set(has);
+            }
         });
     });
 

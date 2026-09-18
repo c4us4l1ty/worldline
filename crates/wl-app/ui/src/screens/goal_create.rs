@@ -15,6 +15,9 @@ pub fn GoalCreateScreen() -> Element {
     let mut busy = use_signal(|| false);
 
     let mut create_ai = move || {
+        if *busy.peek() {
+            return;
+        }
         let ctx = ctx;
         let payload = (
             title.read().clone(),
@@ -22,6 +25,10 @@ pub fn GoalCreateScreen() -> Element {
             target_date.read().clone(),
             context.read().clone(),
         );
+        if payload.0.trim().is_empty() {
+            flash(&ctx, "TITLE REQUIRED");
+            return;
+        }
         let settings = ctx.settings.read().clone();
         busy.set(true);
         spawn(async move {
@@ -71,6 +78,9 @@ pub fn GoalCreateScreen() -> Element {
     };
 
     let create_manual = move || {
+        if *busy.peek() {
+            return;
+        }
         let ctx = ctx;
         let title = title.read().clone();
         let description = description.read().clone();
@@ -79,6 +89,7 @@ pub fn GoalCreateScreen() -> Element {
             flash(&ctx, "TITLE REQUIRED");
             return;
         }
+        busy.set(true);
         spawn(async move {
             #[derive(serde::Serialize)]
             struct G {
@@ -107,7 +118,10 @@ pub fn GoalCreateScreen() -> Element {
                         *s.write() = Screen::Canvas;
                     }
                 }
-                Err(e) => flash(&ctx, &format!("ERR {e}")),
+                Err(e) => {
+                    flash(&ctx, &format!("ERR {e}"));
+                    busy.set(false);
+                }
             }
         });
     };
@@ -150,7 +164,7 @@ pub fn GoalCreateScreen() -> Element {
                 onclick: move |_| create_ai(),
                 if *busy.read() { "Architecting…" } else { "Generate master plan (Tier-1)" }
             }
-            button { class: "wl-btn-escape", style: "margin-top: 6px;",
+            button { class: "wl-btn-escape", style: "margin-top: 6px;", disabled: *busy.read(),
                 onclick: move |_| create_manual(),
                 "Create manually — no API key"
             }

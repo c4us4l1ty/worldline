@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use rusqlite::OptionalExtension;
 use wl_core::crypto::aead::{self, Sealed};
 use wl_core::crypto::identity::Identity;
 use wl_core::hlc::HlcTimestamp;
@@ -132,6 +133,11 @@ pub fn sync_cycle<T: Transport>(
             break;
         }
     }
+    // Every drained op was acknowledged as relay-durable (accepted or
+    // duplicate): delete instead of accumulating `pushed = 1` rows
+    // forever on long-lived installs. Unconditional (idempotent), so a
+    // crash between mark and delete never leaves residue either.
+    repos.delete_pushed_outbox()?;
 
     // ---- Pull ----
     let (mut cursor_hlc, mut cursor_op) = current_cursor(repos)?;
@@ -153,11 +159,13 @@ pub fn sync_cycle<T: Transport>(
             }
             match apply_pulled_op(repos, identity, op) {
                 Ok(()) => applied += 1,
-                Err(e @ SyncError::Store(_)) => return Err(e),
+                Err(e) if is_fatal_store_error(&e) => return Err(e),
                 Err(_) => {
                     // Poison op (bad base64, truncated sealed, wrong
-                    // key/AAD, non-JSON payload, malformed HLC): it can
-                    // never apply, but aborting here would wedge the
+                    // key/AAD, non-JSON payload, malformed HLC) AND
+                    // constraint conflicts (a cross-row UNIQUE or FK clash
+                    // from a same-id/different-date row move): neither can
+                    // ever apply, but aborting here would wedge the
                     // cursor and brick every future pull on one crafted
                     // row. Watermark it as seen (quarantine) and advance
                     // past it — availability over a single op.
@@ -182,6 +190,13 @@ pub fn sync_cycle<T: Transport>(
     // so the single-directive invariant holds across devices too.
     if applied > 0 {
         let _ = repos.enforce_single_active(Some(identity));
+    }
+
+    // The relay paginates strictly after the cursor, so watermarks at or
+    // below it can never match a future pull: prune instead of growing
+    // `crdt_applied` forever.
+    if !cursor_hlc.is_empty() {
+        repos.prune_applied_below(&cursor_hlc, &cursor_op)?;
     }
 
     Ok(SyncStats {
@@ -381,14 +396,6 @@ pub fn save_cursor(repos: &Repos, cursor: &str, op_id: &str) -> Result<(), SyncE
     Ok(())
 }
 
-/// HLC receive event against the shell's real clock (persists the
-/// head). Previously this built a throwaway clock per call and never
-/// advanced anything — a causality no-op. Fixed to merge into
-/// `repos.hlc` like the pull path does.
-pub fn observe_remote(repos: &Repos, remote: &HlcTimestamp) -> HlcTimestamp {
-    repos.observe_remote_hlc(remote)
-}
-
 /// Decodes a JSON response body under a hard byte bound — a hostile
 /// relay answering with a multi-gigabyte body must fail closed instead
 /// of exhausting client memory.
@@ -454,5 +461,22 @@ fn validate_pull_response(
     Ok(())
 }
 
-/// `Option` extension used by [`current_cursor`].
-use rusqlite::OptionalExtension;
+/// `true` for store failures that must abort the cycle (I/O, locks,
+/// corruption, schema): retrying later may succeed. Constraint
+/// violations (UNIQUE/FK clashes from adversarial or cross-row row
+/// moves) are deterministic per op — retrying changes nothing — so
+/// they quarantine like any other poison op instead of wedging sync.
+fn is_fatal_store_error(e: &SyncError) -> bool {
+    match e {
+        SyncError::Store(wl_core::store::StoreError::Sqlite(db)) => !matches!(
+            db,
+            rusqlite::Error::SqliteFailure(err, _)
+                if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+                    || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+                    || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                    || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+        ),
+        SyncError::Store(_) => true,
+        _ => false,
+    }
+}

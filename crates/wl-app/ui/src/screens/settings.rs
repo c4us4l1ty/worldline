@@ -12,19 +12,23 @@ pub fn SettingsScreen() -> Element {
     let mut api_key = use_signal(String::new);
     let mut key_saved = use_signal(|| false);
     // Probe whether a key is already stored for the current provider.
-    // Reads `local` inside the effect so provider switches re-probe.
+    // Reads `local` inside the effect so provider switches re-probe;
+    // the in-flight guard drops stale responses from rapid switches.
     use_effect(move || {
         let p = local.read().ai_provider.clone().unwrap_or_default();
+        let still_current = local;
         let mut saved = key_saved;
         spawn(async move {
             if p.is_empty() {
                 saved.set(false);
                 return;
             }
-            let has: bool = invoke("has_api_key", serde_json::json!({ "provider": p }))
+            let has: bool = invoke("has_api_key", serde_json::json!({ "provider": p.clone() }))
                 .await
                 .unwrap_or(false);
-            saved.set(has);
+            if still_current.peek().ai_provider.clone().unwrap_or_default() == p {
+                saved.set(has);
+            }
         });
     });
     let theme_controller = use_context::<crate::theme::Theme>();
@@ -90,14 +94,43 @@ pub fn SettingsScreen() -> Element {
                 label { class: "wl-label", "Pin to top" }
                 button { class: "wl-btn-ghost",
                     onclick: move |_| {
-                        let mut v = local.read().clone();
-                        v.always_on_top = !v.always_on_top;
-                        local.set(v.clone());
-                        let pinned = v.always_on_top;
+                        let pinned = !local.read().always_on_top;
+                        // Optimistic display flip; the preference only
+                        // sticks when BOTH the window call and the persist
+                        // succeed — boot restores the persisted value, so
+                        // an unpersisted pin would silently unpin.
+                        // Unsaved form edits are left untouched: the save
+                        // payload flips only the pin on persisted state.
+                        {
+                            let mut cur = local;
+                            let mut back = cur.read().clone();
+                            back.always_on_top = pinned;
+                            cur.set(back);
+                        }
                         let ctx = ctx;
+                        let mut base = ctx.settings.read().clone();
+                        base.always_on_top = pinned;
                         spawn(async move {
-                            let _: Result<(), _> = invoke("set_always_on_top", serde_json::json!({ "pinned": pinned })).await;
-                            let _ = ctx;
+                            let win_ok: Result<serde_json::Value, String> = invoke(
+                                "set_always_on_top",
+                                serde_json::json!({ "pinned": pinned }),
+                            )
+                            .await;
+                            let save_ok: Result<serde_json::Value, String> = invoke(
+                                "settings_save",
+                                serde_json::json!({ "settings": base.clone() }),
+                            )
+                            .await;
+                            if win_ok.is_ok() && save_ok.is_ok() {
+                                let mut sig = ctx.settings;
+                                *sig.write() = base;
+                            } else {
+                                let mut cur = local;
+                                let mut back = cur.read().clone();
+                                back.always_on_top = !pinned;
+                                cur.set(back);
+                                flash(&ctx, "PIN FAILED");
+                            }
                         });
                     },
                     if s.always_on_top { "Pinned — always on top" } else { "Floating below other windows" }
@@ -117,6 +150,7 @@ pub fn SettingsScreen() -> Element {
                     option { value: "openai-compat", "OpenAI" }
                     option { value: "openrouter", "OpenRouter" }
                     option { value: "anthropic", "Anthropic" }
+                    option { value: "gemini-compat", "Gemini" }
                 }
             }
 
@@ -188,6 +222,33 @@ pub fn SettingsScreen() -> Element {
                     }
                     if *key_saved.read() {
                         span { class: "wl-hud-pill", "sealed" }
+                        button {
+                            class: "wl-btn-ghost",
+                            style: "color: var(--wl-accent-coral);",
+                            onclick: move |_| {
+                                let ctx = ctx;
+                                let provider = local
+                                    .read()
+                                    .ai_provider
+                                    .clone()
+                                    .unwrap_or_else(|| "openai-compat".into());
+                                spawn(async move {
+                                    match invoke::<bool>(
+                                        "delete_api_key",
+                                        serde_json::json!({ "provider": provider }),
+                                    )
+                                    .await
+                                    {
+                                        Ok(true) => {
+                                            key_saved.set(false);
+                                            flash(&ctx, "VAULT KEY REMOVED");
+                                        }
+                                        _ => flash(&ctx, "KEY NOT FOUND"),
+                                    }
+                                });
+                            },
+                            "Remove"
+                        }
                     }
                 }
             }

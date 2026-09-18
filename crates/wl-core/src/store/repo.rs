@@ -844,23 +844,6 @@ impl Repos {
         Ok(rows)
     }
 
-    /// LWW-guarded phase state write: only applies when `ts` is newer
-    /// than the row's current hlc. Returns `true` when written.
-    pub fn set_phase_state_lww(
-        &self,
-        directive_id: &str,
-        step: i64,
-        state: PhaseState,
-        ts: HlcTimestamp,
-    ) -> Result<bool, StoreError> {
-        let changed = self.conn.lock().unwrap().execute(
-            "UPDATE directive_phases SET state = ?3, hlc_timestamp = ?4
-             WHERE directive_id = ?1 AND step = ?2 AND hlc_timestamp < ?4",
-            params![directive_id, step, state.as_str(), ts.to_string()],
-        )?;
-        Ok(changed > 0)
-    }
-
     /// Count of completed directives for a milestone (velocity data).
     pub fn completed_count_for_milestone(&self, milestone_id: &str) -> Result<i64, StoreError> {
         self.conn
@@ -1234,7 +1217,8 @@ impl Repos {
     }
 
     /// Enqueue an encrypted CRDT op for a row mutation. AAD binds the
-    /// ciphertext to its routing header (table:record).
+    /// ciphertext to its routing header (table:record). The table must be
+    /// a known syncable table — unknown tables wedge peer merges.
     pub fn enqueue_outbox(
         &self,
         identity: &Identity,
@@ -1242,6 +1226,12 @@ impl Repos {
         record_id: &str,
         payload_json: &serde_json::Value,
     ) -> Result<String, StoreError> {
+        if crate::crdt::CrdtTable::from_str(table_name).is_none() {
+            return Err(StoreError::Invalid("unknown CRDT table".into()));
+        }
+        if record_id.is_empty() || record_id.len() > 128 {
+            return Err(StoreError::Invalid("bad CRDT record id".into()));
+        }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);

@@ -171,32 +171,6 @@ pub fn verify_signature(
     Ok(vk.verify(msg, &sig).is_ok())
 }
 
-/// Storage abstraction over where the mnemonic lives at runtime.
-///
-/// In production (feature `stronghold`) this is the hardware-backed
-/// Tauri Stronghold vault; in headless builds the caller supplies an
-/// in-memory or file-backed source. The vault never persists the raw
-/// phrase outside hardware-backed storage.
-pub enum IdentityVault {
-    /// Identity held only in process memory (tests / restored sessions).
-    InMemory(Box<Identity>),
-    /// Identity restored from the Stronghold vault by the native shell.
-    #[cfg(feature = "stronghold")]
-    Stronghold(Box<Identity>),
-}
-
-impl IdentityVault {
-    /// Deterministically re-derives the entire key material set from
-    /// the stored mnemonic.
-    pub fn unlock(&self) -> Result<&Identity, IdentityError> {
-        match self {
-            IdentityVault::InMemory(id) => Ok(id),
-            #[cfg(feature = "stronghold")]
-            IdentityVault::Stronghold(id) => Ok(id),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -486,3 +486,64 @@ async fn write_through_syncs_all_tables() {
     );
     assert!(settings_b.always_on_top);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poison_constraint_op_quarantines_without_wedging_sync() {
+    use wl_core::domain::CheckInOutcome;
+
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    let c1 = a
+        .upsert_check_in("2026-09-17", CheckInOutcome::Done, None, Some(&identity))
+        .unwrap();
+    let c2 = a
+        .upsert_check_in("2026-09-18", CheckInOutcome::Partial, None, Some(&identity))
+        .unwrap();
+    sync_cycle(&a, &identity, &transport, 100).unwrap();
+
+    // Craft a same-id/different-date row move with a newer HLC: the LWW
+    // id-guard engages, then the write hits UNIQUE(date). Deterministic
+    // failure — retrying changes nothing — so it must quarantine.
+    let ts = a.hlc.now(a.device_id());
+    assert!(ts > c1.hlc_timestamp);
+    let fields =
+        serde_json::json!({"date": c2.date, "outcome": "done", "note": null});
+    let aad = format!("check_ins:{}", c1.id);
+    let sealed = wl_core::crypto::aead::seal(
+        &identity,
+        &serde_json::to_vec(&fields).unwrap(),
+        aad.as_bytes(),
+    )
+    .unwrap();
+    let body = serde_json::to_value(wl_protocol::PushRequest {
+        ops: vec![wl_protocol::PushOp {
+            operation_id: "op-poison-row-move".into(),
+            hlc: ts.to_string(),
+            table: "check_ins".into(),
+            record_id: c1.id.clone(),
+            sealed_b64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                sealed.to_bytes(),
+            ),
+        }],
+    })
+    .unwrap();
+    let resp = transport.post("/sync/push", &body).unwrap();
+    let decoded: wl_protocol::PushResponse = serde_json::from_str(&resp).unwrap();
+    assert_eq!(decoded.accepted.len(), 1);
+
+    let s = sync_cycle(&a, &identity, &transport, 100).unwrap();
+    assert_eq!(s.quarantined, 1);
+    // (The quarantine watermark itself is pruned with the advanced
+    // cursor at cycle end — the relay paginates strictly after it, so
+    // the op can never resurface.)
+    // Loser rows untouched, winner rows intact.
+    assert_eq!(a.check_in_for_date("2026-09-17").unwrap().unwrap().id, c1.id);
+    assert_eq!(a.check_in_for_date("2026-09-18").unwrap().unwrap().id, c2.id);
+    // The poison op never wedges later cycles.
+    let s2 = sync_cycle(&a, &identity, &transport, 100).unwrap();
+    assert_eq!((s2.pulled, s2.quarantined, s2.applied), (0, 0, 0));
+}

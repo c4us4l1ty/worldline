@@ -36,8 +36,14 @@ pub fn MorningBriefScreen() -> Element {
                     briefing.set(Some(directives));
                     flash(&ctx, "BRIEFING COMPILED");
                 }
-                Err(_) => {
-                    flash(&ctx, "OFFLINE — MANUAL MODE");
+                Err(e) => {
+                    // Missing BYOK key is a configuration state, not a
+                    // network failure — say so instead of crying offline.
+                    if e.contains("no API key") {
+                        flash(&ctx, "NO API KEY — ADD ONE IN SETTINGS OR PLAN MANUALLY");
+                    } else {
+                        flash(&ctx, "OFFLINE — MANUAL MODE");
+                    }
                 }
             }
             busy.set(false);
@@ -50,6 +56,7 @@ pub fn MorningBriefScreen() -> Element {
         Ok(h) if h < 18 => "afternoon",
         _ => "evening",
     };
+    let brief_count = briefing.read().clone().unwrap_or_default().len().min(3);
 
     rsx! {
         div { class: "wl-scroll-region",
@@ -89,7 +96,7 @@ pub fn MorningBriefScreen() -> Element {
                         div { key: "{i}", style: "margin-bottom: 12px;",
                             div { class: "wl-directive-step-badge", "[0{i + 1}] Dispatched directive" }
                             p { class: "wl-directive-title", style: "font-size: 19px; margin-bottom: 4px;", "{d}" }
-                            p { class: "wl-body-muted", "Est: on canvas · Stackelberg order {i + 1}/3" }
+                            p { class: "wl-body-muted", "Est: on canvas · Stackelberg order {i + 1}/{brief_count}" }
                         }
                     }
                 }

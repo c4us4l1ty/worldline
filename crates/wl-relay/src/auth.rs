@@ -251,10 +251,12 @@ impl Default for AuthState {
 }
 
 fn now_secs() -> i64 {
+    // A broken host clock must degrade (fail-closed expiry checks),
+    // never panic the relay off the edge.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("clock before 1970")
-        .as_secs() as i64
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

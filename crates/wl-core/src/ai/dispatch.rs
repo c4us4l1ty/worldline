@@ -235,6 +235,10 @@ fn extract_json_block(s: &str) -> Option<&str> {
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_DIRECTIVES_PER_MILESTONE: usize = 32;
+/// Prompt-input budgets: fail fast BEFORE spending a BYOK call on a
+/// body the provider would truncate or bill absurdly.
+const MAX_AI_CONTEXT_CHARS: usize = 16 * 1024;
+const MAX_AI_CONSTRAINTS_CHARS: usize = 8 * 1024;
 
 fn validate_response_size(raw: &str) -> Result<(), DispatchError> {
     if raw.len() > MAX_RESPONSE_BYTES {
@@ -338,10 +342,10 @@ fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
     if d.title.trim().is_empty() {
         return Err(DispatchError::MissingField("directive.title"));
     }
-    if d.estimated_minutes <= 0 {
+    if d.estimated_minutes <= 0 || d.estimated_minutes > crate::domain::MAX_MINUTES {
         return Err(DispatchError::Invalid {
             field: "estimated_minutes",
-            why: "must be positive".into(),
+            why: format!("must be within 1–{} minutes", crate::domain::MAX_MINUTES),
         });
     }
     if !d.phases.is_empty() {
@@ -518,6 +522,34 @@ impl AiDispatcher {
         repos: &Repos,
         identity: Option<&Identity>,
     ) -> Result<(String, PlanResult), DispatchError> {
+        // Validate BEFORE the billable HTTP hop; persistence re-checks
+        // at the write boundary.
+        crate::domain::check_text("goal title", goal_title, crate::domain::MAX_TITLE_CHARS)
+            .map_err(|why| DispatchError::Invalid {
+                field: "goal_title",
+                why,
+            })?;
+        crate::domain::check_optional_text(
+            "goal description",
+            goal_desc,
+            crate::domain::MAX_DESCRIPTION_CHARS,
+        )
+        .map_err(|why| DispatchError::Invalid {
+            field: "goal_description",
+            why,
+        })?;
+        if let Some(t) = target_date {
+            crate::domain::check_date("target date", t).map_err(|why| DispatchError::Invalid {
+                field: "target_date",
+                why,
+            })?;
+        }
+        if context.chars().count() > MAX_AI_CONTEXT_CHARS {
+            return Err(DispatchError::Invalid {
+                field: "context",
+                why: format!("context exceeds {MAX_AI_CONTEXT_CHARS} characters"),
+            });
+        }
         let (url, headers, body) = provider.request(
             &super::prompt::tier1_system(),
             &super::prompt::tier1_user(goal_title, goal_desc, target_date, context),
@@ -551,6 +583,16 @@ impl AiDispatcher {
         repos: &Repos,
         identity: Option<&Identity>,
     ) -> Result<BriefingResult, DispatchError> {
+        crate::domain::check_date("today", today).map_err(|why| DispatchError::Invalid {
+            field: "today",
+            why,
+        })?;
+        if constraints.chars().count() > MAX_AI_CONSTRAINTS_CHARS {
+            return Err(DispatchError::Invalid {
+                field: "constraints",
+                why: format!("constraints exceed {MAX_AI_CONSTRAINTS_CHARS} characters"),
+            });
+        }
         let user_prompt = super::prompt::tier2_user(repos, today, constraints, velocity_json)?;
         let (url, headers, body) = provider.request(&super::prompt::tier2_system(), &user_prompt);
         let raw = execute(&url, &headers, &body).map_err(DispatchError::BadJson)?;

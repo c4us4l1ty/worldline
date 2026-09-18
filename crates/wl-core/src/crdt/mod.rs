@@ -80,8 +80,12 @@ pub struct TableState {
     pub rows: HashMap<String, serde_json::Value>,
     /// Latest tombstone timestamp per record (delete memory).
     pub tombstones: HashMap<String, HlcTimestamp>,
-    /// Latest op HLC per record (arbitration bookkeeping).
-    pub last_op: HashMap<String, (HlcTimestamp, u16)>,
+    /// Latest op arbitration key per record: (HLC, device, operation id).
+    /// The operation-id tertiary is load-bearing for totality: two ops
+    /// with identical full HLCs (forked data dirs sharing a device id
+    /// and clock head) must still arbitrate identically on every
+    /// replica — first-delivery-wins would fork permanently.
+    pub last_op: HashMap<String, (HlcTimestamp, u16, String)>,
 }
 
 impl TableState {
@@ -102,13 +106,21 @@ impl TableState {
         };
         let prior = self.last_op.get(&op.record_id);
         let accept = match prior {
-            Some(&(prev_ts, prev_dev)) => ts > prev_ts || (ts == prev_ts && op.device > prev_dev),
+            Some((prev_ts, prev_dev, prev_op)) => {
+                ts > *prev_ts
+                    || (ts == *prev_ts
+                        && (op.device > *prev_dev
+                            || (op.device == *prev_dev && op.operation_id > *prev_op)))
+            }
             None => true,
         };
         if !accept {
             return false;
         }
-        self.last_op.insert(op.record_id.clone(), (ts, op.device));
+        self.last_op.insert(
+            op.record_id.clone(),
+            (ts, op.device, op.operation_id.clone()),
+        );
         if op.tombstone {
             self.tombstones.insert(op.record_id.clone(), ts);
             self.rows.remove(&op.record_id);
@@ -402,5 +414,26 @@ mod tests {
         let b = serde_json::json!({"a": {"y": 2, "z": 1}, "b": 1});
         assert_eq!(canonical_json(&a), canonical_json(&b));
         assert!(canonical_json(&a).starts_with("{\"a\":"));
+    }
+
+    #[test]
+    fn full_hlc_tie_breaks_on_operation_id_deterministically() {
+        // Forked replicas (same device id, same clock head) can stamp
+        // identical full HLCs on different content. Arbitration must
+        // still be total: greater operation id wins, on every replica,
+        // in every delivery order.
+        let a = op("op-aaa", "goals", "g1", "100.5.1", 1, serde_json::json!({"v": "a"}));
+        let b = op("op-bbb", "goals", "g1", "100.5.1", 1, serde_json::json!({"v": "b"}));
+        let mut s1 = TableState::new();
+        let mut s2 = TableState::new();
+        assert!(s1.apply(&a));
+        assert!(s1.apply(&b));
+        assert!(s2.apply(&b));
+        assert!(!s2.apply(&a));
+        assert_eq!(s1.rows["g1"]["v"], "b");
+        assert_eq!(s2.rows["g1"]["v"], "b");
+        assert_eq!(s1.rows, s2.rows);
+        // Replaying the winner is a no-op.
+        assert!(!s1.apply(&b));
     }
 }

@@ -346,3 +346,15 @@ fn outbox_write_through_on_domain_writes() {
     // Fully offline flow: nothing pushed, pending stays durable.
     assert_eq!(r.pending_outbox(100).unwrap().len(), 1);
 }
+
+#[test]
+fn engine_rejects_malformed_dates_before_any_write() {
+    let r = setup_full();
+    let e = engine(&r);
+    assert!(e.check_in("09/18/2026", CheckInOutcome::Done, None).is_err());
+    assert!(e.check_in("2026-02-30", CheckInOutcome::Done, None).is_err());
+    assert!(r.check_in_for_date("09/18/2026").unwrap().is_none());
+    assert!(e
+        .bail_out("not-a-date", BailoutReason::EnergyDepletion, None)
+        .is_err());
+}

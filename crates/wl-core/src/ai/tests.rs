@@ -316,3 +316,60 @@ fn provider_debug_redacts_api_key() {
     assert!(!dbg.contains("sk-live-secret"), "key leaked: {dbg}");
     assert!(dbg.contains("[redacted]"));
 }
+
+#[test]
+fn facades_reject_bad_input_before_any_http_call() {
+    let r = repos();
+    let provider = ProviderAdapter::Anthropic {
+        api_key: Zeroizing::new("k".into()),
+        model: "m".into(),
+    };
+    let no_http = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+        panic!("HTTP must not be attempted for invalid input")
+    };
+    // master_plan: blank title, bad date, over-budget context.
+    assert!(AiDispatcher::master_plan(&provider, "  ", None, None, "c", no_http, &r, None).is_err());
+    assert!(AiDispatcher::master_plan(
+        &provider,
+        "Goal",
+        None,
+        Some("next Friday"),
+        "c",
+        no_http,
+        &r,
+        None
+    )
+    .is_err());
+    assert!(AiDispatcher::master_plan(
+        &provider,
+        "Goal",
+        None,
+        None,
+        &"c".repeat(16 * 1024 + 1),
+        no_http,
+        &r,
+        None
+    )
+    .is_err());
+    // morning_briefing: bad date, over-budget constraints.
+    assert!(AiDispatcher::morning_briefing(
+        &provider,
+        "yesterday",
+        "c",
+        "{}",
+        no_http,
+        &r,
+        None
+    )
+    .is_err());
+    assert!(AiDispatcher::morning_briefing(
+        &provider,
+        "2026-09-18",
+        &"c".repeat(8 * 1024 + 1),
+        "{}",
+        no_http,
+        &r,
+        None
+    )
+    .is_err());
+}

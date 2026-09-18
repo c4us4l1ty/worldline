@@ -13,4 +13,4 @@ pub mod hlc;
 pub mod net;
 pub mod store;
 
-pub use crypto::identity::{Identity, IdentityVault};
+pub use crypto::identity::Identity;

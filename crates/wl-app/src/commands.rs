@@ -223,8 +223,13 @@ pub(crate) async fn set_api_key(
     key: String,
 ) -> ShellResult<bool> {
     let key = Zeroizing::new(key);
+    // Real provider keys are ~100–200 chars; anything past 8 KiB is a
+    // paste accident that would bloat the encrypted vault snapshot.
     if key.trim().is_empty() {
         return Err(ShellError::Invalid("empty API key".into()));
+    }
+    if key.trim().chars().count() > 8192 {
+        return Err(ShellError::Invalid("API key exceeds 8192 characters".into()));
     }
     state
         .vault

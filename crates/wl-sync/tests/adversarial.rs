@@ -301,41 +301,34 @@ async fn defected_outbox_never_drains_on_idempotent_repush() {
     .unwrap();
 
     // Simulate: push succeeded server-side but the response was lost
-    // (op already in relay). Do this by pushing once with a transport
-    // that drops the response mid-cycle, then re-syncing normally.
-    struct DroppingTransport<'a> {
-        inner: &'a AxumTransport,
-    }
-    impl Transport for DroppingTransport<'_> {
-        fn post(&self, path: &str, _body: &serde_json::Value) -> Result<String, String> {
-            if path == "/sync/push" {
-                // Push lands on the relay, response "lost".
-                let _ = self
-                    .inner
-                    .post(path, &serde_json::json!({"ops": []}))
-                    .map_err(|e| e.to_string());
-                return Err("connection reset".into());
-            }
-            self.inner.post(path, _body)
-        }
-    }
-    // First: push the real op via the real transport so the relay has it.
-    let real_push = serde_json::json!({});
-    let _ = real_push;
+    // (op already in relay, client still shows it pending). Push the
+    // pending op's bytes directly, bypassing the outbox state machine.
     {
-        // Push with a transport that succeeds, then reset the pushed
-        // flag locally to model the lost response.
-        let s = sync_cycle(&a, &identity, &transport, 100).unwrap();
-        assert_eq!(s.pushed, 1);
-        a.conn
-            .lock()
-            .unwrap()
-            .execute("UPDATE crdt_outbox SET pushed=0", [])
-            .unwrap();
+        let pending = a.pending_outbox(100).unwrap();
+        assert_eq!(pending.len(), 1);
+        let o = &pending[0];
+        let body = serde_json::to_value(wl_protocol::PushRequest {
+            ops: vec![wl_protocol::PushOp {
+                operation_id: o.operation_id.clone(),
+                hlc: o.hlc_timestamp.to_string(),
+                table: o.table_name.clone(),
+                record_id: o.record_id.clone(),
+                sealed_b64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &o.encrypted_payload,
+                ),
+            }],
+        })
+        .unwrap();
+        let resp = transport.post("/sync/push", &body).unwrap();
+        let decoded: wl_protocol::PushResponse = serde_json::from_str(&resp).unwrap();
+        assert_eq!(decoded.accepted.len(), 1);
+        // Local outbox untouched: still pending.
+        assert_eq!(a.pending_outbox(100).unwrap().len(), 1);
     }
-    let _ = DroppingTransport { inner: &transport };
 
-    // Next cycle: relay reports the op as a duplicate, which drains it.
+    // Next cycle: relay reports the op as a duplicate, which drains it
+    // (marked pushed, then deleted — relay-durable rows are not kept).
     let s = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!(
         s.pushed, 1,
@@ -347,6 +340,14 @@ async fn defected_outbox_never_drains_on_idempotent_repush() {
         "outbox must drain on idempotent re-push, got {} pending",
         pending.len()
     );
+    // Relay-durable rows are deleted, not accumulated as pushed=1.
+    let total: i64 = a
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM crdt_outbox", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total, 0);
     // And it stays drained on the NEXT cycle too.
     let s2 = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!(s2.pushed, 0);

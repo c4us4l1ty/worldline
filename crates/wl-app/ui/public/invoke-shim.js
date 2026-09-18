@@ -56,9 +56,19 @@
       return Promise.resolve(mockDb.identity);
     },
     identity_verify_backup: function (args) {
+      // Positional like the shell (identity_verify_backup compares each
+      // word against its challenge index — membership is not enough).
       var words = args.words || [];
-      var phrase = (mockDb.identity && mockDb.identity.phrase) || '';
-      return Promise.resolve(words.every(function (w) { return phrase.indexOf(w) !== -1; }));
+      var indices = args.indices || [];
+      var phrase = ((mockDb.identity && mockDb.identity.phrase) || '').split(' ');
+      if (phrase.length !== 12 || indices.length !== words.length || indices.length === 0) {
+        return Promise.resolve(false);
+      }
+      var ok = indices.every(function (idx, i) {
+        var w = words[i] || '';
+        return phrase[idx] !== undefined && phrase[idx].toLowerCase() === w.trim().toLowerCase();
+      });
+      return Promise.resolve(ok);
     },
     current_directive: function () {
       mockDb.directive = mockDb.directive || {
@@ -138,17 +148,4 @@
     }
     return Promise.reject('unknown command: ' + cmd);
   };
-
-  // hud-tick event source: native event or web interval.
-  window.wlOnHudTick = function (cb) {
-    if (window.__TAURI_INTERNALS__) {
-      try {
-        window.__TAURI_EVENT__.listen('hud-tick', cb);
-        return;
-      } catch (e) { /* fallthrough */ }
-    }
-    setInterval(cb, 1000);
-  };
-
-  window.wlIsNative = !!native();
 })();
