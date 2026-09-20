@@ -5,8 +5,17 @@
 *This repository is strictly proprietary. You may 
 NOT use, modify, sub-license, or redistribute this code for any purpose without permission.*
 
-# Worldline
-
+<div align="center">
+<pre>
+ ██╗    ██╗ ██████╗ ██████╗ ██╗     ██████╗ ██╗     ██╗███╗   ██╗███████╗
+██║    ██║██╔═══██╗██╔══██╗██║     ██╔══██╗██║     ██║████╗  ██║██╔════╝
+██║ █╗ ██║██║   ██║██████╔╝██║     ██║  ██║██║     ██║██╔██╗ ██║█████╗  
+██║███╗██║██║   ██║██╔══██╗██║     ██║  ██║██║     ██║██║╚██╗██║██╔══╝  
+╚███╔███╔╝╚██████╔╝██║  ██║███████╗██████╔╝███████╗██║██║ ╚████║███████╗
+ ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝╚═╝╚═╝  ╚═══╝╚══════╝
+       BY C4US4L1TY                                                                 
+</pre>
+</div>
 A local-first, zero-knowledge execution terminal. The system plans (Stackelberg
 leader); you execute one non-negotiable directive at a time (follower). No
 emails, no accounts, no lists — a 12-word BIP-39 mnemonic is the only identity.
