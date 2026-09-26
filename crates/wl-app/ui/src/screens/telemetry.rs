@@ -55,8 +55,10 @@ pub fn TelemetryDrawer() -> Element {
                 }
 
                 div { class: "wl-field",
-                    label { class: "wl-label", "Hardware keychain (Stronghold)" }
-                    p { class: "wl-body-muted", "Status: enclave locked · Argon2id · 128-bit salt" }
+                    label { class: "wl-label", "Local vault (Stronghold)" }
+                    p { class: "wl-body-muted", "Status: unlocked in-process · XChaCha20-Poly1305 snapshot" }
+                    p { class: "wl-body-muted wl-mono", "Key: 32-byte CSPRNG secret · 0600 file · KDF work factor 0" }
+                    p { class: "wl-seed-sub", "A local encrypted file in your data dir — the OS keychain is not wired up yet." }
                     p { class: "wl-body-muted", "Provider: {provider_label}" }
                 }
 

@@ -97,7 +97,7 @@ pub fn ByokSetupScreen() -> Element {
                     oninput: move |e| api_key.set(e.value()),
                 }
                 p { class: "wl-seed-sub", style: "margin-top: 6px;",
-                    "Injected directly into the Stronghold vault. Never written to SQLite, the DOM, or the relay."
+                    "Sealed into the local Stronghold vault, then cleared from this field. Never written to SQLite, never sent to the relay."
                 }
                 div { style: "display: flex; gap: 8px; margin-top: 8px; align-items: center;",
                     button {

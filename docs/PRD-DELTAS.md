@@ -398,3 +398,32 @@ Locked decisions from the planning session are marked [approved].
     assets reachable from `index.html` (js directly, wasm via the kept
     js); public assets, fonts, and the shim are never touched.
 
+## Audit pass 2026-09-26 (verification-only; no behavior change)
+
+77. **Two user-facing security claims were false and are now corrected** —
+    a doc-truth audit against the dependency source found that the app
+    asserted protections it does not have. No behavior changed; only copy
+    and doc comments.
+    - **"Keys never touch the DOM"** (`settings.rs`, `byok.rs`) was
+      untrue: the key is bound into an `<input value>`, and a webview
+      cannot receive typed input any other way. A user-typed secret
+      necessarily transits the DOM. The claim is replaced with the
+      guarantee that actually holds — sealed into the vault, cleared
+      from the field after save, never written to SQLite, never sent to
+      the relay. `AGENTS.md`'s equivalent binding rule carries the same
+      impossible premise and is left for an owner decision
+      (`Plan/Plan.md` AUDIT-4).
+    - **"Hardware keychain (Stronghold) · enclave locked · Argon2id ·
+      128-bit salt"** (`telemetry.rs`) was false on all three counts.
+      Verified against `iota_stronghold-2.1.0`: the snapshot cipher is
+      **XChaCha20-Poly1305** (`src/internal/provider.rs:7`); there is
+      **no Argon2id anywhere in the dependency tree**; the snapshot KDF
+      work factor is deliberately **0** (see #20 — the key is a 32-byte
+      CSPRNG secret, not a password); and `Vault::open` constructs
+      Stronghold with the key and **never calls `lock()`**, so "enclave
+      locked" was false too. The vault is a local encrypted file at
+      `0600` — not hardware-backed, not an OS keychain (#19 / SHELL-6).
+      The telemetry drawer now states the real properties and discloses
+      the OS-keychain gap in-product rather than implying protection
+      that does not exist. `vault.rs`'s module header carried the same
+      two errors and was corrected to match.

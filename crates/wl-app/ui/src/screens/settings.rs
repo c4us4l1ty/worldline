@@ -308,10 +308,12 @@ pub fn SettingsScreen() -> Element {
                 label { class: "wl-label", "API key (stored in vault only)" }
                 input { class: "wl-input", r#type: "password",
                     placeholder: "Never synced, never in SQLite",
+                    autocomplete: "off",
+                    spellcheck: "false",
                     value: "{api_key.read().clone()}",
                     oninput: move |e| api_key.set(e.value()) }
                 p { class: "wl-seed-sub", style: "margin-top: 6px;",
-                    "Keys pass directly into the hardware-backed vault. They never touch the DOM, the database, or the relay."
+                    "Sealed into the local Stronghold vault, then cleared from this field. Never written to SQLite, never sent to the relay."
                 }
                 div { style: "display: flex; gap: 8px; margin-top: 8px; align-items: center;",
                     button {

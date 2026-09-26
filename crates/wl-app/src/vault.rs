@@ -1,12 +1,18 @@
-//! Hardware-backed secret vault (Items 2+3): the Stronghold snapshot
-//! holding the BIP-39 mnemonic and BYOK provider API keys.
+//! Local secret vault (Items 2+3): the Stronghold snapshot holding the
+//! BIP-39 mnemonic and BYOK provider API keys.
 //!
-//! Threat model: the snapshot file is ChaCha-encrypted with a 32-byte
-//! device-local key stored at `0600` in the app data dir. Secrets never
-//! touch SQLite, the DOM, or the relay. Migrating the vault key into
-//! the OS keychain (Keychain/Keystore/Secret Service) is tracked future
-//! work — the `Vault` API is already shaped for it (`open` is the only
-//! place that resolves key material).
+//! Threat model: the snapshot file is XChaCha20-Poly1305-encrypted with a
+//! 32-byte device-local key stored at `0600` in the app data dir, and the
+//! snapshot KDF work factor is deliberately 0 (the key is a CSPRNG
+//! secret, not a password — see PRD-DELTAS #20). This is a local
+//! encrypted file, NOT an OS keychain and NOT hardware-backed. What is
+//! guaranteed: secrets never reach SQLite and never reach the relay.
+//! They do necessarily pass through the webview DOM, because the user
+//! types them there, and the mnemonic is displayed once by design.
+//! Migrating the vault key into the OS keychain
+//! (Keychain/Keystore/Secret Service) is tracked future work (SHELL-6) —
+//! the `Vault` API is already shaped for it (`open` is the only place
+//! that resolves key material).
 //!
 //! Record layout inside the `worldline` Stronghold client store:
 //! * `mnemonic` — the 12-word phrase (UTF-8).
