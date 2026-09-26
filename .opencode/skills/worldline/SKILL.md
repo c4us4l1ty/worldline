@@ -194,53 +194,60 @@ rounded:
 
 ## 4. UI Component Architecture
 
-### A. Ambient Status HUD
-Sits fixed at the top of the 9:16 viewport. Displays the active milestone hierarchy, countdown timer, and local HLC synchronization pulse.
+### A. Floating Controls
+Overlays the canvas instead of sitting in a bar above it. A full-width header strip fought the core premise — ONE directive, no chrome — and squeezed the empty state into a letterbox, so the bar was removed (2026-09-26). The menu is a floating circular control (top-left) and the timer a floating pill (top-right), both raised off the surface with a soft shadow.
 
 ```html
-<header class="wl-hud">
-  <div class="wl-hud-meta">
-    <span class="wl-hud-pill">Milestone 02/05</span>
-    <span class="wl-hud-status"><span class="wl-pulse-dot"></span>CRDT SYNCED</span>
+<div class="wl-float-layer">
+  <button class="wl-float-btn wl-float-menu" aria-label="Open navigation">☰</button>
+  <div class="wl-float-right">
+    <button class="wl-float-btn wl-float-sync" aria-label="Sync now">⇅</button>
+    <button class="wl-float-timer" aria-label="Session timer, opens system telemetry">24:58</button>
   </div>
-  <div class="wl-hud-timer">24:58</div>
-</header>
+</div>
 ```
 
 ```css
-.wl-hud {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--wl-border-subtle);
+/* Transparent to input: the layer spans the width but must not eat
+   clicks meant for the directive card beneath it. */
+.wl-float-layer {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 14px 16px 0;
+  pointer-events: none;
 }
-.wl-hud-meta { display: flex; align-items: center; gap: 8px; }
-.wl-hud-pill {
-  font-family: var(--font-mono-telemetry);
-  font-size: 11px; color: var(--wl-text-muted);
-  background-color: var(--wl-surface-card);
-  padding: 3px 8px; border-radius: var(--wl-radius-pill);
-  letter-spacing: 0.05em; text-transform: uppercase;
-}
-.wl-hud-status {
-  font-family: var(--font-mono-telemetry);
-  font-size: 10px; color: var(--wl-text-muted);
-  display: inline-flex; align-items: center; gap: 5px;
-}
-.wl-pulse-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background-color: #63AE7B; /* Calm muted emerald */
-}
-.wl-hud-timer {
-  font-family: var(--font-mono-telemetry);
-  font-size: 15px; font-weight: 500;
-  color: var(--wl-text-primary);
-  background: var(--wl-surface-card);
-  padding: 4px 10px; border-radius: var(--wl-radius-pill);
+.wl-float-right { display: flex; align-items: center; gap: 8px; pointer-events: none; }
+.wl-float-btn {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 50%;
   border: 1px solid var(--wl-border-subtle);
+  background: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+  font-size: 15px; line-height: 1; cursor: pointer;
+  /* The raised look: elevated surface + soft drop shadow, so it reads
+     as sitting above the content rather than embedded in it. */
+  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
 }
+.wl-float-timer {
+  pointer-events: auto;
+  font-family: var(--font-mono-telemetry);
+  font-size: 14px; font-weight: 500;
+  color: var(--wl-text-primary);
+  background: var(--wl-surface-elevated);
+  padding: 8px 12px; border-radius: var(--wl-radius-pill);
+  border: 1px solid var(--wl-border-subtle);
+  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums; /* prevent countdown jitter */
+}
+.wl-float-timer[data-pulsing="true"] { border-color: rgba(226, 109, 82, 0.45); }
 ```
+
+Two rules this section now encodes:
+
+- **The timer stays on the canvas.** It is the coral beacon and the only live-updating element; a focus timer you cannot see is not a timer. Milestone, sync status and the Evening audit nudge moved to the telemetry drawer (`Ctrl+,`), which already rendered sync stats and an always-visible Evening audit button — so nothing became unreachable.
+- **`.wl-hud` survives only as a generic inline status row** used by `byok.rs`. Its former `border-bottom` + `padding-bottom` (what made it read as a full-width bar) must **not** be restored.
 
 ### B. The Stackelberg Single Directive Card
 The focal heart of the application. Presents only one directive.

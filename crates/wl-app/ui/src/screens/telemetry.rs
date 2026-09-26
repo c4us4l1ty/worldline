@@ -23,6 +23,15 @@ pub fn TelemetryDrawer() -> Element {
     let s = ctx.settings.read().clone();
     let sync = ctx.sync_status.read().clone();
     let v = ctx.velocity.read().clone();
+    // Milestone moved here from the canvas header bar (see canvas.rs):
+    // the bar is gone, so the drawer's "Current line" block is the one
+    // place that reports which milestone the line is currently on.
+    let milestone_label = ctx
+        .directive
+        .read()
+        .as_ref()
+        .and_then(|d| d.milestone_title.clone())
+        .unwrap_or_else(|| "No milestone".to_string());
     let provider_label = s
         .ai_provider
         .clone()
@@ -63,9 +72,15 @@ pub fn TelemetryDrawer() -> Element {
                 }
 
                 div { class: "wl-field",
+                    label { class: "wl-label", "Current line" }
+                    p { class: "wl-body-muted wl-mono", "Milestone: {milestone_label}" }
+                    p { class: "wl-body-muted wl-mono", "Sync status: {sync}" }
+                }
+
+                div { class: "wl-field",
                     label { class: "wl-label", "CRDT synchronization runtime" }
                     p { class: "wl-body-muted wl-mono", "Hybrid Logical Clock: — (no shell command)" }
-                    p { class: "wl-body-muted wl-mono", "Relay state: {sync} · {relay_label}" }
+                    p { class: "wl-body-muted wl-mono", "Relay: {relay_label}" }
                     p { class: "wl-body-muted wl-mono", "SQLite WAL size: — (no shell command)" }
                     p { class: "wl-body-muted wl-mono", "Velocity: {v.milestones_remaining} left · {v.days_remaining}d · target {v.target_per_day:.2}/day" }
                     if let Some(last) = last_sync.read().clone() {

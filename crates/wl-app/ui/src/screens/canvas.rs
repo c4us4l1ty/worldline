@@ -6,8 +6,8 @@
 use dioxus::prelude::*;
 
 use crate::app::{
-    elapsed_secs, flash, fmt_mmss, invoke, record_sync, set_directive, sync_label, AppCtx,
-    DirectiveView, SyncStats, VelocityView,
+    elapsed_secs, flash, fmt_mmss, invoke, record_sync, set_directive, AppCtx, DirectiveView,
+    SyncStats, VelocityView,
 };
 
 pub fn CanvasScreen() -> Element {
@@ -35,12 +35,6 @@ pub fn CanvasScreen() -> Element {
     let d = ctx.directive.read().clone();
     let unavailable = d.is_none() || *ctx.directive_busy.read();
     let escaping = *ctx.escape_open.read();
-    let milestone_label = d
-        .as_ref()
-        .and_then(|x| x.milestone_title.clone())
-        .unwrap_or_else(|| "No milestone".to_string());
-    let hour = chrono::Local::now().format("%H").to_string();
-    let evening = hour.parse::<u32>().map(|h| h >= 19).unwrap_or(false);
 
     rsx! {
         div {
@@ -67,37 +61,36 @@ pub fn CanvasScreen() -> Element {
                 }
             },
             style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
-        // HUD (skill §4.A)
-        header { class: "wl-hud",
-            div { class: "wl-hud-meta",
-                button {
-                    class: "wl-hud-pill",
-                    style: "border: none; cursor: pointer;",
-                    aria_label: "Open navigation",
-                    title: "Navigation",
-                    onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } },
-                    "☰"
-                }
-                if evening {
-                    button {
-                        class: "wl-hud-pill",
-                        style: "border: none; cursor: pointer;",
-                        onclick: move |_| { { let mut s = ctx.screen; *s.write() = crate::app::Screen::EveningCheckIn; } },
-                        "Evening audit"
-                    }
-                }
-                span { class: "wl-hud-pill", "{milestone_label}" }
+        // Floating controls (replaces the former full-width HUD bar).
+        //
+        // The header used to be a solid strip spanning the full width with
+        // a `border-bottom`, carrying six elements: the menu, an Evening
+        // audit nudge, the milestone label, sync status, a sync-now button
+        // and the timer. That bar dominated a canvas whose entire premise is
+        // ONE directive and no chrome, and it squeezed the empty state into
+        // a letterbox. The menu is now a floating circular control
+        // (top-left) and the timer a floating pill (top-right), both
+        // overlaying the content the way the reference design does.
+        //
+        // Milestone, sync status, sync-now and Evening audit moved to the
+        // telemetry drawer (Ctrl+,), which already rendered sync stats and
+        // an always-visible Evening audit button — so nothing became
+        // unreachable. The timer deliberately STAYS on the canvas: it is the
+        // coral beacon and the only live-updating element, and a focus timer
+        // you cannot see is not a timer.
+        div { class: "wl-float-layer",
+            // The layer spans the full width but must stay transparent to
+            // input, so `pointer-events` is re-enabled on the controls.
+            button {
+                class: "wl-float-btn wl-float-menu",
+                aria_label: "Open navigation",
+                title: "Navigation",
+                onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } },
+                "☰"
             }
-            div { style: "display: flex; gap: 8px; align-items: center;",
-                span { class: "wl-hud-status",
-                    span { class: "wl-pulse-dot" }
-                    "{sync_label(&ctx)}"
-                }
+            div { class: "wl-float-right",
                 button {
-                    // MVP-4: on-demand sync reachable from the canvas
-                    // (previously settings + telemetry only).
-                    class: "wl-hud-pill",
-                    style: "border: none; cursor: pointer;",
+                    class: "wl-float-btn wl-float-sync",
                     aria_label: "Sync now",
                     title: "Sync now",
                     disabled: *ctx.directive_busy.read(),
@@ -120,9 +113,9 @@ pub fn CanvasScreen() -> Element {
                     "⇅"
                 }
                 button {
-                    class: "wl-hud-timer",
+                    class: "wl-float-timer",
+                    aria_label: "Session timer, opens system telemetry",
                     title: "System telemetry (Ctrl+,)",
-                    style: "border: 1px solid var(--wl-border-subtle); cursor: pointer; font-family: var(--font-mono);",
                     onclick: move |_| { { let mut s = ctx.telemetry_open; *s.write() = true; } },
                     if let Some(session) = ctx.timer_session.read().clone() {
                         TimerDisplay { key: "{session.started_ms}", started_ms: session.started_ms }

@@ -148,17 +148,103 @@ body {
 }
 
 /* ==========================================================================
-   A. Ambient Status HUD (skill §4.A)
+   A. Floating controls (replaces the former full-width HUD bar)
    ========================================================================== */
+/* The old `.wl-hud` was a solid, full-width strip with a
+   `border-bottom`. It is gone: the menu is now a floating circular
+   control and the timer a floating pill, both overlaying the canvas the
+   way the reference design (Plan/3.png) does. The bar dominated a
+   surface whose whole premise is ONE directive and no chrome.
+
+   The layer spans the viewport but must not eat clicks meant for the
+   directive card underneath, so it is `pointer-events: none` and the
+   controls opt back in. */
+.wl-float-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Sits above the card, below the drawers (which are z-index 1000+). */
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 14px 16px 0;
+  pointer-events: none;
+}
+.wl-float-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+/* Circular floating control. The raised look comes from an elevated
+   surface plus a soft drop shadow, so it reads as sitting above the
+   content rather than embedded in it. */
+.wl-float-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--wl-border-subtle);
+  background: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
+  transition: transform var(--duration-fast) var(--ease-tactile),
+    background-color var(--duration-fast) var(--ease-tactile);
+}
+.wl-float-btn:hover:not(:disabled) {
+  background: var(--wl-surface-card);
+  transform: translateY(-1px);
+}
+.wl-float-btn:active:not(:disabled) { transform: translateY(0); }
+.wl-float-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.wl-float-menu { font-size: 16px; }
+
+/* Timer stays on the canvas: it is the coral beacon and the only
+   live-updating element, so it must remain visible while working. */
+.wl-float-timer {
+  pointer-events: auto;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--wl-text-primary);
+  background: var(--wl-surface-elevated);
+  padding: 8px 12px;
+  border-radius: var(--wl-radius-pill);
+  border: 1px solid var(--wl-border-subtle);
+  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums; /* prevent countdown jitter */
+}
+.wl-float-timer:hover { background: var(--wl-surface-card); }
+.wl-float-timer[data-pulsing="true"] {
+  border-color: rgba(226, 109, 82, 0.45);
+}
+
+/* Milestone, sync status and the Evening audit nudge moved to the
+   telemetry drawer (Ctrl+,), which already rendered sync stats and an
+   always-visible Evening audit button — so none of them became
+   unreachable. */
+
+/* `.wl-hud` is retained ONLY as a generic inline status row: the canvas
+   bar is gone, but `byok.rs` still uses this as a small two-child flex
+   row. The former `border-bottom` + `padding-bottom` (what made it read
+   as a full-width bar) is deliberately NOT restored, since that chrome
+   is exactly what the canvas dropped. */
 .wl-hud {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--wl-border-subtle);
+  gap: 10px;
   flex-shrink: 0;
 }
-.wl-hud-meta { display: flex; align-items: center; gap: 8px; }
 .wl-hud-pill {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -184,20 +270,9 @@ body {
   border-radius: 50%;
   background-color: var(--wl-sync-green);
 }
-.wl-hud-timer {
-  font-family: var(--font-mono);
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--wl-text-primary);
-  background: var(--wl-surface-card);
-  padding: 4px 10px;
-  border-radius: var(--wl-radius-pill);
-  border: 1px solid var(--wl-border-subtle);
-  font-variant-numeric: tabular-nums; /* prevent countdown jitter */
-}
-.wl-hud-timer[data-pulsing="true"] {
-  border-color: rgba(226, 109, 82, 0.45);
-}
+/* `.wl-hud-timer` was the in-bar timer; it is superseded by
+   `.wl-float-timer` above and has no rsx users left. Deleted rather
+   than left as dead CSS (UI-5 tracks dead-rule removal). */
 
 /* ==========================================================================
    B. Stackelberg Single Directive Card (skill §4.B)
@@ -207,7 +282,11 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 12px 0;
+  /* Top padding reserves the band the floating controls occupy (14px
+     offset + 34px control + breathing room). Without it the centred
+     card would sit under the menu button in the empty state, which is
+     the tallest state. */
+  padding: 62px 0 12px;
   min-height: 0;
 }
 .wl-directive-card {

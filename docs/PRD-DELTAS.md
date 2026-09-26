@@ -536,3 +536,34 @@ Locked decisions from the planning session are marked [approved].
     as a size gate. New `scripts/check-dist-size.sh` fails the release
     build when the wasm payload exceeds 1 MiB (current: 840 KB, 80% of
     budget) and is wired into `build-ui.sh`. Verified in both directions.
+
+## Canvas chrome pass (2026-09-26 — user-directed)
+
+91. **The canvas header bar is gone; controls float over the canvas.**
+    A full-width HUD strip (`<header class="wl-hud">`) sat above the
+    canvas carrying six elements: menu, an Evening audit nudge, the
+    milestone label, sync status, a sync-now button, and the timer. It
+    fought the product's own premise — one directive, no chrome — and
+    squeezed the empty state into a letterbox. Removed per `Plan/2.png`
+    → `Plan/3.png`; the menu is now a floating circular control with a
+    soft drop shadow, matching the reference.
+
+    **The timer deliberately stayed on the canvas.** It is the coral
+    beacon and the only live-updating element; a focus timer you cannot
+    see is not a timer. Milestone label, sync status and the Evening
+    audit nudge moved to the telemetry drawer (`Ctrl+,`), which already
+    rendered sync stats and an always-visible Evening audit button — so
+    nothing became unreachable and B-006's guarantee still holds. Sync
+    status now has its own "Current line" block in that drawer.
+
+    Implementation notes worth keeping: the layer is `pointer-events:
+    none` with the controls opting back in, so it cannot intercept clicks
+    meant for the directive card beneath it; `.wl-directive-container`
+    gained `padding-top: 62px` to reserve the controls' band; `.wl-hud`
+    is retained only as a generic inline row for `byok.rs`, and its
+    former `border-bottom` must not be restored. The dead `.wl-hud-timer`
+    and `.wl-hud-meta` rules were deleted rather than left behind.
+
+    `.opencode/skills/worldline/SKILL.md` §4.A was rewritten to match —
+    it is a binding doc, and leaving it specifying the old `<header>`
+    would have invited the next agent to undo this.
