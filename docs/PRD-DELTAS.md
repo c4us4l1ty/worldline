@@ -635,3 +635,139 @@ Locked decisions from the planning session are marked [approved].
       `.wl-chip`; the redundant "Pin to top" label became "Window"; the
       `(YYYY-MM-DD)` hint was dropped from the date field because
       `type="date"` already renders that format.
+
+## Settings & goal-create redesign + hotkey removal (2026-09-27 — user-directed)
+
+94. **Page titles are centred; the back affordance floats.**
+    The previous pass gave both pages a back button as the FIRST FLEX
+    CHILD of `.wl-page-head`, which pushed the title permanently right of
+    the viewport axis — no `justify-content` could centre the text
+    without also centring the button. The button is now
+    `position: absolute` over the header's left gutter, and the header
+    carries symmetric `40px` side padding so the title sits on the true
+    centre axis while the control keeps its reserved space.
+    `.wl-page-title` dropped 26px → 24px because the centred column is
+    40px narrower per side and "State the objective" is the longest
+    title; verified rendering on one line at 420px.
+
+95. **The theme selector is a switch, and the window pin stopped
+    pretending to be a button.**
+    The theme was a `<select>` listing two options; the pin was a
+    full-width button whose label described the state it would put you
+    in. Both are boolean device preferences, so both are now
+    `.wl-switch[role=switch]` with `aria-checked` and a sliding knob.
+    This is why the pin changed too: leaving one as a
+    label-bearing button beside a real switch would have read as an
+    inconsistency, not a hierarchy.
+
+    **The switches apply AND persist immediately; the text fields still
+    wait for "Save settings".** A theme toggle that only took effect on
+    Save is a broken control — you cannot evaluate a theme you are not
+    allowed to see. This is the one deliberate two-path persistence
+    model on the page, and it also closes the previously-open defect
+    where the theme applied on change but diverged from the store if
+    the user abandoned the page.
+
+    **The switch state colours are absolute, not theme-derived.** A
+    switch encodes "which theme is selected", not "what is currently
+    rendered", so flipping its tokens with `data-theme` would invert the
+    whole control the instant it took effect. Verified both switch
+    states render with usable contrast in BOTH themes.
+
+96. **A persistence bug the switch model would have introduced, caught
+    before it shipped.** `settings_save` writes EVERY field from the
+    page's local draft. The switches therefore persist from
+    `ctx.settings` — the last shell-confirmed state — with their own one
+    field flipped, never from the draft. Reading the draft would have
+    meant that flipping the theme silently committed whatever the user
+    had half-typed into an unrelated field (a relay URL, a model id).
+    Extracted as the pure `switch_payload(shell, draft, field)` and
+    pinned by `switch_persists_from_shell_state_not_the_local_draft`;
+    the unused `draft` parameter is deliberate, so a future edit that
+    starts reading it has to change the signature.
+
+97. **Settings re-reads the shell on mount.** The draft was a mount-time
+    snapshot of `ctx.settings` that never re-invoked `settings_get`, so
+    the page could display values the store no longer held — and "Save
+    settings" would then write those stale values back over newer ones.
+    It now re-reads on mount. The trade is explicit: unsaved edits are
+    discarded when you navigate away and back, which is the honest
+    behaviour for a settings page and strictly better than silently
+    resurrecting a snapshot.
+
+98. **The sync control moved from the canvas to Settings.** It was a
+    34px circle opposite the menu that reported nothing until tapped.
+    Sync is a settings concern, not a canvas one, so it is now a
+    full-width row in the Sync section with the last cycle's result
+    beneath it — a place where it can show what it DID, not only offer
+    to do something. Canvas chrome is now menu-only, which is what the
+    single-directive premise wants. Nothing became unreachable: sync
+    status and the Evening audit were already in the Ctrl+, telemetry
+    drawer. **Consequence: the canvas has no sync affordance at all.**
+
+99. **Icons are inline SVG, not font glyphs.** `☰` and `⚙` were replaced
+    with `path` geometry in a new `icons.rs`; `←` became a chevron for
+    consistency. This is not cosmetic — a glyph's weight, spacing, and
+    (on many Linux desktops) its colour are chosen by the font stack,
+    which is where the drawer's settings-icon colour and size drift came
+    from. Every icon strokes with `currentColor`, so it inherits the
+    active theme tokens and the button's own `colour` for free.
+    Sizing is CSS-only (`.wl-icon` + a per-icon modifier) so a new icon
+    cannot arrive at an arbitrary size, and the whole set is
+    `aria-hidden` because each sits inside a control that already
+    carries the real `aria-label`.
+
+    **The create-goal `✚` was deliberately left as a glyph**: a plus is
+    unambiguous at 20px and never suffered the rendering drift. Only the
+    two that did were replaced.
+
+    The moon/sun knob icons are on a 24-unit grid rather than a
+    hand-rolled 16-unit crescent. The 16-unit version was geometrically
+    correct but at a 12px render box its terminator and outer arc
+    collapsed into an unreadable blob — verified by rendering and
+    zooming, not by reading the path.
+
+100. **The global summon hotkey was removed as a feature.** Deleted:
+    `tauri-plugin-global-shortcut` (dependency + plugin registration),
+    `crates/wl-app/src/hotkey.rs`, the `toggle_window_visibility`
+    command (which existed only to serve it), the `AppSettings.hotkey`
+    field in `wl-core`, its write-boundary validation, the `settings()`
+    SELECT column, the `settings_json` CRDT payload key, the
+    `wl-sync` pull-apply column, the UI field, the telemetry line, and
+    both browser-shim mocks. The B-007 hotkey-validation fix went with
+    it.
+
+    **No DB migration.** `app_settings.hotkey` is
+    `NOT NULL DEFAULT 'alt+space'`, so once the column left the INSERT
+    statement SQLite supplies the default. Dropping a column on a
+    CRDT-synced singleton costs a migration and buys nothing — no reader
+    ever asks for it. The column is now orphaned by design, and both
+    `repo.rs` and `wl-sync/sync.rs` say so at the statement.
+
+    **Sync stays compatible in both directions.** A new peer's payload
+    has no `hotkey` key; an OLD peer's payload that still carries one is
+    ignored rather than rejected. The `app_settings` upsert simply
+    stopped reading it.
+
+    **Consequence: there is no global summon.** The window is reachable
+    through the taskbar (`skipTaskbar: false`); there is no tray icon.
+
+101. **Two latent CSS bugs fixed in passing.** `.wl-float-btn`
+    transitioned on `var(--duration-fast)`, a token defined nowhere in
+    the stylesheet — the declaration was invalid, so the floating
+    controls' hover/active animation silently collapsed to `0s` and they
+    snapped instead of easing. And `.wl-switch-knob` needed
+    `overflow: hidden`, not defensively but because the crescent moon
+    was being shaved by the knob's own `border-radius` into a blob.
+
+102. **Two design-token drifts corrected.** The nav drawer's app name
+    was `--wl-text-primary` where the spec says cream `#DAD5C7` (a linen
+    wordmark read as body text rather than a logotype), and the settings
+    pill was `--wl-surface-elevated` where the spec says
+    `--wl-surface-card` — which would have made the button invisible
+    against the drawer it sits on, so it was moved to
+    `--wl-surface-high` (one step above the sheet) rather than obeyed.
+
+103. **Test counts.** 13 UI tests (was 10): three added for the switch
+    payload rule, the flip direction, and theme-toggle symmetry from an
+    unrecognised starting value. Workspace 187, shell 17.

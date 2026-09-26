@@ -195,16 +195,21 @@ rounded:
 ## 4. UI Component Architecture
 
 ### A. Floating Controls
-Overlays the canvas instead of sitting in a bar above it. A full-width header strip fought the core premise — ONE directive, no chrome — and squeezed the empty state into a letterbox, so the bar was removed (2026-09-26). The menu is a floating circular control (top-left); the sync control floats opposite it (top-right). Both are raised off the surface with a soft shadow.
+Overlays the canvas instead of sitting in a bar above it. A full-width header strip fought the core premise — ONE directive, no chrome — and squeezed the empty state into a letterbox, so the bar was removed (2026-09-26). The menu is a floating circular control (top-left), raised off the surface with a soft shadow.
+
+**The canvas has exactly one floating control.** The sync control that used to float opposite the menu (2026-09-27) was a 34px circle that reported nothing until tapped; sync is a *settings* concern, not a canvas one, so it moved to the Sync section of Settings as a full-width row that also shows what the last cycle did. Nothing became unreachable — sync status and the Evening audit were already in the `Ctrl+,` telemetry drawer.
 
 ```html
 <div class="wl-float-layer">
-  <button class="wl-float-btn wl-float-menu" aria-label="Open navigation">☰</button>
-  <div class="wl-float-right">
-    <button class="wl-float-btn wl-float-sync" aria-label="Sync now">⇅</button>
-  </div>
+  <button class="wl-float-btn wl-float-menu" aria-label="Open navigation">
+    <svg class="wl-icon-menu wl-icon" view_box="0 0 18 18" fill="none"
+         stroke="currentColor" stroke_width="1.6" stroke_linecap="round"
+         aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
+  </button>
 </div>
 ```
+
+**Icons are inline SVG, never font glyphs.** A glyph's weight, spacing, and (on many Linux desktops) its colour are chosen by the font stack — which is exactly where the drawer's settings-icon colour and size drift came from. Every icon strokes with `currentColor` so it inherits the theme tokens for free, is sized by CSS only (`.wl-icon` + a per-icon modifier, never a `width`/`height` attribute), and is `aria-hidden` because the control around it already carries the real `aria-label`. The `✚` create-goal glyph is the one deliberate exception: a plus is unambiguous at 20px and never suffered the drift.
 
 ```css
 /* Transparent to input: the layer spans the width but must not eat
@@ -215,7 +220,6 @@ Overlays the canvas instead of sitting in a bar above it. A full-width header st
   padding: 14px 16px 0;
   pointer-events: none;
 }
-.wl-float-right { display: flex; align-items: center; gap: 8px; pointer-events: none; }
 .wl-float-btn {
   pointer-events: auto;
   display: inline-flex; align-items: center; justify-content: center;
@@ -227,13 +231,54 @@ Overlays the canvas instead of sitting in a bar above it. A full-width header st
   /* The raised look: elevated surface + soft drop shadow, so it reads
      as sitting above the content rather than embedded in it. */
   box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
+  /* Must name a token that EXISTS (`--duration-instant`). This once read
+     `var(--duration-fast)`, which is defined nowhere — the declaration
+     was invalid, so the transition silently collapsed to 0s. */
+  transition: transform var(--duration-instant) var(--ease-tactile),
+              background-color var(--duration-instant) var(--ease-tactile);
 }
+.wl-float-btn svg { display: block; }
 ```
 
 Two rules this section now encodes:
 
 - **There is no session timer.** The `MM:SS` readout, its 1 Hz ticker, and the whole `TimerSession` state were removed 2026-09-26. The canvas shows no elapsed time at all; work is bounded by the directive, not by a clock. `elapsed_secs` survives only for sync freshness (`SYNCED · 42s ago`) in the telemetry drawer, which is not timer-shaped — do not reintroduce a timer from it.
 - **`.wl-hud` survives only as a generic inline status row** used by `byok.rs`. Its former `border-bottom` + `padding-bottom` (what made it read as a full-width bar) must **not** be restored.
+
+### A2. Centred Page Header (secondary screens)
+Goal creation and Settings open with the same fixed header: a **centred** title with a floating back chevron in the left gutter. The header sits outside the scroll region with `flex-shrink: 0`, so on a long page the way back never scrolls out of reach.
+
+**The back button must be `position: absolute`, never a flex child.** As a 34px flex sibling it pushes the title permanently right of the viewport axis, and no `justify-content` value fixes that without also centring the button. Symmetric side padding is what keeps the centred text on-axis while reserving the button's space.
+
+```html
+<div class="wl-page-head">
+  <button class="wl-back" aria-label="Back to the line">
+    <svg class="wl-icon-back wl-icon" view_box="0 0 18 18" fill="none"
+         stroke="currentColor" stroke_width="1.6" stroke_linecap="round"
+         stroke_linejoin="round" aria-hidden="true">
+      <path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+  </button>
+  <div>
+    <h1 class="wl-page-title">Settings</h1>
+    <p class="wl-page-sub">Secrets stay in the local vault.</p>
+  </div>
+</div>
+```
+
+```css
+.wl-page-head {
+  position: relative; display: flex; justify-content: center;
+  text-align: center; flex-shrink: 0;
+  /* 40px gutter: the 34px control plus 6px clearance, mirrored so the
+     centred title stays on the viewport axis. */
+  padding: 2px 40px 16px;
+}
+.wl-back { position: absolute; left: 0; top: 2px; /* …circular control… */ }
+.wl-page-title { font-family: var(--font-serif); font-size: 24px; }
+.wl-page-sub { margin: 6px auto 0; max-width: 30ch; }
+```
+
+`--font-serif` titles are **24px, not 26px**: the centred column is 40px narrower per side, and "State the objective" is the longest title in the app.
 
 ### B. The Stackelberg Single Directive Card
 The focal heart of the application. Presents only one directive.
@@ -404,12 +449,16 @@ Tactile 12-word recovery display during cryptographic account initialization.
 - **Emphasize Primary CTA Contrast:** The execution button (`.wl-btn-primary`) must always be rendered in warm cream `#DAD5C7` to act as an unequivocal behavioral magnet.
 - **Render Telemetry in Monospace:** All durations, HLC sequence stamps, and sync counts must use `var(--font-mono-telemetry)` to prevent tabular jitter. (Countdowns no longer exist — the session timer was removed 2026-09-26 — but the rule stands for whatever numeric readout comes next.)
 - **Require Confirmation on Escape Hatch:** The bailout button (`.wl-btn-escape`) must open a modal requiring the user to categorize the stall (`Blocked`, `Scope`, `Energy`) before unmounting the directive.
+- **Use switches for boolean preferences.** Theme and window pin are `.wl-switch[role=switch]` with `aria-checked`, not a `<select>` and not a label-bearing button. They apply **and persist immediately** — a theme toggle that only takes effect on Save is a broken control, because you cannot evaluate a theme you are not allowed to see. Text fields still wait for the page's Save button; that two-path model is deliberate.
+- **A switch persists from shell-confirmed state, never from the local draft.** `settings_save` writes every field, so persisting the draft would silently commit whatever the user had half-typed into an unrelated field.
+- **Switch state colours are absolute, not theme-derived.** The switch encodes "which theme is selected", not "what is currently rendered"; flipping its tokens with `data-theme` would invert the control the instant it took effect.
 
 ### Don't:
 - **Never display a scrollable list of future tasks:** The home screen must never show what's coming up this afternoon or tomorrow.
 - **Never use streaks or red failure states:** Missing a directive is a velocity adjustment event, never an alarm. Avoid punitive UI red `#FF0000`.
-- **Never use pure white (`#FFF`) or deep black (`#000`):** Use the specified slate canvas (`#131312`) and muted text tones (`#E5E2E0` / `#CAC6BC`).
-- **No decorative background illustrations or icons:** Maintain tactile, terminal-level discipline. Avoid extraneous emojis and marketing illustrations.
+- **Never use pure white (`#FFF`) or deep black (`#000`):** Use the specified slate canvas (`#131312`) and muted text tones (`#E5E2E0` / `#CAC6BC`). This holds for switch knobs and tracks too.
+- **No decorative background illustrations or icons:** Maintain tactile, terminal-level discipline. Avoid extraneous emojis and marketing illustrations. UI icons are functional inline SVG (see §4.A); emoji are not UI iconography.
+- **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately; the canvas keeps exactly one floating control.
 
 ---
 
@@ -421,8 +470,9 @@ Tactile 12-word recovery display during cryptographic account initialization.
 ---
 
 ## 7. Quick Start Checklist
-1. Bind `:root` tokens: Canvas `#131312`, Card `#1C1C1B`, CTA `#DAD5C7`, Accent Coral `#E26D52`.
+1. Bind `:root` tokens: Canvas `#131312`, Card `#20201F`, CTA `#DAD5C7`, Accent Coral `#E26D52`. (The card token is `#20201F`; an older revision of this file said `#1C1C1B` while contradicting itself two sections earlier.)
 2. Restrict root viewport bounds to `420px × 747px` fixed portrait mode.
-3. Wire typography: `Doppio One` for morning greetings, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry and timers.
-4. Render exactly **one** primary directive card (`.wl-directive-card`).
+3. Wire typography: `Doppio One` for morning greetings and page titles, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry.
+4. Render exactly **one** primary directive card (`.wl-directive-card`) under exactly **one** floating control (the menu).
 5. Wire keyboard shortcuts: `⌘+Enter` triggers completion; `Escape` triggers the frictionful bailout drawer.
+6. Secondary pages centre their title over an absolutely-positioned back chevron; boolean preferences are switches that persist immediately.

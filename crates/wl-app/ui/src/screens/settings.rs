@@ -25,6 +25,52 @@ use crate::app::{
 };
 use crate::icons::{IconBack, IconMoon, IconSun};
 
+/// Builds the payload an appearance switch persists.
+///
+/// Both switches (`theme`, `always_on_top`) write IMMEDIATELY, because a
+/// theme you cannot preview is not a control. That makes the source of
+/// the payload load-bearing: `shell` is the last state the shell
+/// confirmed, `draft` is whatever the user has half-typed into the text
+/// fields. Persisting the draft would silently commit an unrelated
+/// in-progress edit — flipping the theme would save a half-typed relay
+/// URL. So a switch always sends `shell` with its own one field flipped,
+/// and the draft keeps its unsaved text untouched.
+///
+/// Extracted as a pure function so the rule is testable without a
+/// browser; see `switch_persists_from_shell_state_not_the_local_draft`.
+pub fn switch_payload(
+    shell: &AppSettingsView,
+    draft: &AppSettingsView,
+    field: SwitchField,
+) -> AppSettingsView {
+    let mut base = shell.clone();
+    match field {
+        SwitchField::Theme => {
+            // Toggles rather than sets, so the caller cannot pass the
+            // value it already had and get a silent no-op.
+            let next = if base.theme == "light" {
+                "dark"
+            } else {
+                "light"
+            };
+            base.theme = next.to_string();
+        }
+        SwitchField::AlwaysOnTop => base.always_on_top = !shell.always_on_top,
+    }
+    // `draft` is deliberately unread: it exists in the signature so the
+    // intent is checkable at the call site, and so a future edit that
+    // starts reading it has to change this signature too.
+    let _ = draft;
+    base
+}
+
+/// Which preference an appearance switch owns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SwitchField {
+    Theme,
+    AlwaysOnTop,
+}
+
 pub fn SettingsScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut local = use_signal(|| ctx.settings.read().clone());
@@ -269,6 +315,8 @@ pub fn SettingsScreen() -> Element {
                         },
                         onclick: move |_| {
                             let mut ctx = ctx;
+                            // The draft carries the new theme for display;
+                            // the payload is built from the shell state.
                             let next = if dark { "light" } else { "dark" };
                             theme_controller.set(next.to_string());
                             {
@@ -276,13 +324,11 @@ pub fn SettingsScreen() -> Element {
                                 v.theme = next.to_string();
                                 local.set(v);
                             }
-                            // Persist from the shell-confirmed state, not
-                            // the draft — see the module note. The draft
-                            // already carries the new theme above, so
-                            // reading it here would commit whatever else
-                            // the user had half-typed.
-                            let mut base = ctx.settings.read().clone();
-                            base.theme = next.to_string();
+                            let base = switch_payload(
+                                &ctx.settings.read(),
+                                &local.peek(),
+                                SwitchField::Theme,
+                            );
                             spawn(async move {
                                 match invoke::<serde_json::Value>(
                                     "settings_save",
@@ -327,9 +373,12 @@ pub fn SettingsScreen() -> Element {
                                 cur.set(back);
                             }
                             // Persist from the shell-confirmed state, not
-                            // the draft — see the module note.
-                            let mut base = ctx.settings.read().clone();
-                            base.always_on_top = pinned;
+                            // the draft — see `switch_payload`.
+                            let base = switch_payload(
+                                &ctx.settings.read(),
+                                &local.peek(),
+                                SwitchField::AlwaysOnTop,
+                            );
                             spawn(async move {
                                 let win_ok: Result<serde_json::Value, String> = invoke(
                                     "set_always_on_top",
@@ -587,5 +636,96 @@ pub fn SettingsScreen() -> Element {
             }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell() -> AppSettingsView {
+        AppSettingsView {
+            theme: "dark".into(),
+            always_on_top: false,
+            ai_provider: Some("openrouter".into()),
+            tier1_model: Some("confirmed-architect".into()),
+            tier2_model: Some("confirmed-dispatcher".into()),
+            relay_url: Some("http://127.0.0.1:8080".into()),
+        }
+    }
+
+    /// The load-bearing rule of the appearance switches. They persist on
+    /// click, so if they ever read the draft instead of the shell state,
+    /// flipping the theme silently commits whatever else the user had
+    /// half-typed. Nothing about the UI stops that from regressing —
+    /// it looks correct and is silent — so it is pinned here.
+    #[test]
+    fn switch_persists_from_shell_state_not_the_local_draft() {
+        // A draft with unsaved edits in three unrelated fields.
+        let draft = AppSettingsView {
+            theme: "dark".into(),
+            always_on_top: false,
+            ai_provider: Some("qwen".into()),
+            tier1_model: Some("half-typed-ar".into()),
+            tier2_model: None,
+            relay_url: Some("http://192.168.1.5:9999".into()),
+        };
+
+        let out = switch_payload(&shell(), &draft, SwitchField::Theme);
+
+        // The switch's own field flipped...
+        assert_eq!(out.theme, "light");
+        // ...and every other field is the shell-confirmed value, NOT the
+        // draft. This is the assertion that would fail on a regression.
+        assert_eq!(out.ai_provider.as_deref(), Some("openrouter"));
+        assert_eq!(out.tier1_model.as_deref(), Some("confirmed-architect"));
+        assert_eq!(out.tier2_model.as_deref(), Some("confirmed-dispatcher"));
+        assert_eq!(out.relay_url.as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
+    /// The same rule for the pin switch, plus the flip direction.
+    #[test]
+    fn switch_payload_flips_only_its_own_field() {
+        let shell = shell();
+        let out = switch_payload(&shell, &shell, SwitchField::AlwaysOnTop);
+        assert!(out.always_on_top);
+        assert_eq!(out.theme, shell.theme);
+        assert_eq!(out.relay_url, shell.relay_url);
+
+        // Toggles back off from a pinned shell state.
+        let pinned = AppSettingsView {
+            always_on_top: true,
+            ..shell.clone()
+        };
+        let out = switch_payload(&pinned, &pinned, SwitchField::AlwaysOnTop);
+        assert!(!out.always_on_top);
+    }
+
+    /// Theme toggling must flip in both directions from any starting
+    /// value, including an unrecognised one — otherwise a switch
+    /// reading a corrupt `theme` row could get stuck on a value that is
+    /// neither theme.
+    #[test]
+    fn theme_switch_toggles_from_any_starting_value() {
+        // Anything that is not exactly "light" is treated as dark (the
+        // same normalization the shell and `Theme::set` apply), so it must
+        // toggle to light…
+        for start in ["dark", "Dark", "", "neon", "LIGHT"] {
+            let s = AppSettingsView {
+                theme: start.into(),
+                ..shell()
+            };
+            let out = switch_payload(&s, &s, SwitchField::Theme);
+            assert_eq!(out.theme, "light", "start {start:?} must toggle to light");
+            // …and toggling back must land on dark.
+            let back = switch_payload(&out, &out, SwitchField::Theme);
+            assert_eq!(back.theme, "dark", "toggling back must land on dark");
+        }
+        // "light" is the one start that toggles the other way.
+        let lit = AppSettingsView {
+            theme: "light".into(),
+            ..shell()
+        };
+        assert_eq!(switch_payload(&lit, &lit, SwitchField::Theme).theme, "dark");
     }
 }

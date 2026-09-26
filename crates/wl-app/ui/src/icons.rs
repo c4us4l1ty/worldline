@@ -98,32 +98,40 @@ pub fn IconBack() -> Element {
 }
 
 /// Moon — drawn in the theme switch knob when the knob is in the "light
-/// theme selected" position. Filled rather than stroked: at 11px a
-/// crescent's thin inner limb disappears, but a solid one still reads.
+/// theme selected" position.
+///
+/// The geometry is Feather's `moon` (ISC-licensed, the same provenance as
+/// the other Feather-derived metrics in this file's lineage) on a 24-unit
+/// grid rather than a hand-rolled 16-unit crescent. The hand-rolled one
+/// was *correct* but at a 12px render box its inner limb and its outer
+/// arc collapsed into an unreadable blob — the terminator needs more
+/// grid than 16 units leaves it once it is scaled down.
 #[component]
 pub fn IconMoon() -> Element {
     rsx! {
         svg {
             class: "wl-icon-moon wl-icon",
-            view_box: "0 0 16 16",
+            view_box: "0 0 24 24",
             fill: "currentColor",
             stroke: "none",
             "aria-hidden": "true",
-            path { d: "M13.5 10.5A6 6 0 0 1 6.5 3.5a6.2 6.2 0 1 0 7 7Z" }
+            path { d: "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" }
         }
     }
 }
 
-/// Sun — the theme switch knob's other state: a ring plus eight rays
-/// spanning r = 5.0…6.6, clear of the r = 3.2 ring.
+/// Sun — the theme switch knob's other state. A stroked ring plus eight
+/// rays, on the same 24-unit grid as the moon so the two are optically
+/// the same weight at the same box.
 #[component]
 pub fn IconSun() -> Element {
     frame(
         "wl-icon-sun",
-        "0 0 16 16",
+        "0 0 24 24",
         rsx! {
-            path { d: "M8 4.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 1 0 0-6.4Z" }
-            path { d: "M8 1.4v1.6M8 13v1.6M1.4 8h1.6M13 8h1.6M3.35 3.35l1.13 1.13M11.52 11.52l1.13 1.13M12.65 3.35l-1.13 1.13M4.48 11.52l-1.13 1.13" }
+            // Ring, r = 5, drawn as two half-arcs.
+            path { d: "M12 7a5 5 0 1 0 0 10 5 5 0 1 0 0-10Z" }
+            path { d: "M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" }
         },
     )
 }

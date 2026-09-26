@@ -55,7 +55,7 @@ goal creation works with no API key at all.
 
 ### Core, relay, sync (any machine)
 ```bash
-cargo test --workspace        # 164 tests: crypto vectors, HLC, CRDT convergence,
+cargo test --workspace        # 187 tests: crypto vectors, HLC, CRDT convergence,
                               # engine invariants, relay auth/pull, two-device sync
 cargo run -p wl-relay         # blind relay on 127.0.0.1:8080 (SQLite backend)
 ```
@@ -64,7 +64,7 @@ cargo run -p wl-relay         # blind relay on 127.0.0.1:8080 (SQLite backend)
 ```bash
 bash scripts/setup-linux.sh   # sudo apt webkit/gtk headers + cargo install tauri-cli, dioxus-cli
 cd crates/wl-app
-cargo tauri dev               # 420×747 window, Alt+Space summon, dark graphite theme
+cargo tauri dev               # 420×747 window, dark graphite theme (summon from the taskbar)
 cargo tauri build             # bundle .deb/.AppImage
 ```
 
@@ -108,11 +108,16 @@ Rust/Dioxus compiled to wasm). All commands above are cargo/tauri/dx.
 ## Design system
 
 UI follows `.opencode/skills/worldline/SKILL.md`: matte graphite `#131312`
-canvas, `#20201F` directive card, cream `#DAD5C7` CTA, coral `#E26D52` timer
-beacon, DM Sans / Doppio One / SF Mono typography, zero-guilt velocity
-treatment. Exactly one directive is rendered at any moment. ⌘+Enter completes;
-Escape opens the frictionful bailout modal (categorize: blocked / scope /
-energy). No streaks, no backlog views, no alarm red.
+canvas, `#20201F` directive card, cream `#DAD5C7` CTA, coral `#E26D52`
+beacon (the active step badge and the create-goal button — the session timer
+that used to be its headline use was removed 2026-09-26), DM Sans / Doppio
+One / ui-monospace typography, zero-guilt velocity treatment. Exactly one
+directive is rendered at any moment, over a single floating menu control.
+⌘+Enter completes; Escape opens the frictionful bailout modal (categorize:
+blocked / scope / energy). No streaks, no backlog views, no alarm red.
+Secondary pages (Settings, goal creation) centre their title over a
+floating back chevron; appearance preferences are switches, and sync lives
+in Settings rather than on the canvas.
 
 ## Environment
 
@@ -125,9 +130,9 @@ energy). No streaks, no backlog views, no alarm red.
 
 | Scope              | Command                                            | Status |
 |--------------------|----------------------------------------------------|--------|
-| Core/relay/sync    | `cargo test --workspace`                            | 164 pass |
+| Core/relay/sync    | `cargo test --workspace`                            | 187 pass |
 | Lints              | `cargo clippy --workspace --all-targets`           | clean  |
 | Formatting         | `cargo fmt --all -- --check`                        | clean  |
-| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 11 pass, clean |
+| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 13 pass, clean |
 | Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 17 pass, clean (live-relay handshake + vault round-trip tests) |
 | Desktop bundle     | `cd crates/wl-app && cargo tauri build` (after setup script) | by user |

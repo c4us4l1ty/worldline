@@ -433,15 +433,6 @@ body {
   align-items: center;
 }
 
-/* The pin switch has no glyph in its knob (a sun/moon would be a lie), so
-   it gets a plain pip that reads as "a position, not an icon". */
-.wl-switch-pip {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
 /* ==========================================================================
    H. Appearance switches (theme, window pin)
    ========================================================================== */
@@ -497,6 +488,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* `overflow: hidden` is load-bearing, not defensive: the moon is a
+     crescent that reaches its viewBox edge, and at 12px its tip was
+     clipped by the knob's own border-radius into an unreadable blob. */
+  overflow: hidden;
   background: var(--wl-switch-off-knob);
   color: var(--wl-switch-off-icon);
   transition: transform var(--duration-settle) var(--ease-tactile),
@@ -516,6 +511,21 @@ body {
 }
 .wl-switch:hover .wl-switch-track { border-color: var(--wl-border-strong); }
 .wl-switch svg { display: block; }
+
+/* The pin switch carries no glyph — a sun or moon there would be a lie
+   about what it controls — so its knob gets a plain pip. It needs its
+   own colour pair: inheriting the theme knob's tokens made an OFF pin
+   switch render a dark pip on a light knob, which read as inverted. */
+.wl-switch-pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--wl-switch-off-icon);
+  transition: background-color var(--duration-settle) var(--ease-tactile);
+}
+.wl-switch[aria-checked="true"] .wl-switch-pip {
+  background: var(--wl-switch-on-icon);
+}
 
 /* Compact state readout (identity status, sync freshness). */
 .wl-status {
@@ -1154,10 +1164,10 @@ body {
 .wl-icon-menu { width: 18px; height: 18px; }
 .wl-icon-settings { width: 20px; height: 20px; }
 .wl-icon-back { width: 18px; height: 18px; }
-.wl-icon-moon, .wl-icon-sun { width: 11px; height: 11px; }
-/* The moon is a filled silhouette, so it wants slightly more presence
-   than the sun's hairline strokes at the same box. */
-.wl-icon-moon { width: 12px; height: 12px; }
+/* Sized to sit inside the 20px switch knob with clearance on every side.
+   These are on a 24-unit grid, so the crescent's terminator survives the
+   downscale — the earlier 16-unit hand-rolled version did not. */
+.wl-icon-moon, .wl-icon-sun { width: 13px; height: 13px; }
 
 /* Font faces: bundled OFL assets, no CDN (local-first, skill §6) */
 @font-face {

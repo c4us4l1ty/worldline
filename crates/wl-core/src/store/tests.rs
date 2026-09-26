@@ -768,7 +768,10 @@ fn settings_reject_unknown_theme_provider_and_oversized_text() {
     // CORE-7(a): a replicated settings row can carry a relay URL, so the
     // SSRF policy has to hold on this write path and not only in the shell.
     assert!(r
-        .save_settings(&case(&|s| s.relay_url = Some("file:///etc/passwd".into())), None)
+        .save_settings(
+            &case(&|s| s.relay_url = Some("file:///etc/passwd".into())),
+            None
+        )
         .is_err());
     // A valid save still round-trips.
     r.save_settings(&case(&|s| s.theme = "light".into()), None)
