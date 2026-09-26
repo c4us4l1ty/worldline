@@ -141,12 +141,13 @@ pub fn GoalCreateScreen() -> Element {
                     crate::icons::IconBack {}
                 }
                 div {
-                    h1 { class: "wl-page-title",
-                        "State the " span { class: "wl-italic-accent", "objective" }
-                    }
-                    p { class: "wl-page-sub",
-                        "The architect builds the milestone hierarchy. You execute one directive at a time."
-                    }
+                    // Plain serif title, same as every other page. It
+                    // used to accent "objective" in coral italic, which
+                    // made this one heading read as a different kind of
+                    // object from the rest of the app — and put the
+                    // beacon accent on a decorative word rather than on
+                    // something live.
+                    h1 { class: "wl-page-title", "State the Objective" }
                 }
             }
 

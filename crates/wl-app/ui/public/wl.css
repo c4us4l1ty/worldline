@@ -337,7 +337,7 @@ body {
 .wl-page-title {
   font-family: var(--font-serif);
   /* 24px, down from 26px: the centred column is 40px narrower per side,
-     and "State the objective" (the longest title) needs the headroom to
+     and "State the Objective" (the longest title) needs the headroom to
      stay on one line. */
   font-size: 24px;
   font-weight: 400;
@@ -346,13 +346,10 @@ body {
   color: var(--wl-text-primary);
   margin: 0;
 }
-.wl-page-sub {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--wl-text-muted);
-  margin: 6px auto 0;
-  max-width: 30ch;
-}
+/* `.wl-page-sub` was removed with the page sub-headings it styled
+   (2026-09-27). Both page titles are now a single line with nothing
+   beneath them; a deck under a two-word heading was restating the
+   heading rather than adding anything. */
 
 /* A group of related fields. Replaces the flat, undifferentiated column
    of inputs these pages used to be. */

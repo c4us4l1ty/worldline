@@ -165,9 +165,6 @@ pub fn SettingsScreen() -> Element {
                 }
                 div {
                     h1 { class: "wl-page-title", "Settings" }
-                    p { class: "wl-page-sub",
-                        "Secrets stay in the local vault. This screen only points the app at them."
-                    }
                 }
             }
 
