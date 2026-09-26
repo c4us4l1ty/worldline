@@ -111,11 +111,18 @@
     velocity: function () { return Promise.resolve(mockDb.velocity); },
     settings_get: function () {
       return Promise.resolve({
-        theme: 'dark', hotkey: 'alt+space', always_on_top: false,
+        theme: mockDb.theme || 'dark', always_on_top: false,
         ai_provider: null, tier1_model: null, tier2_model: null, relay_url: null,
       });
     },
-    settings_save: function (args) { return Promise.resolve(null); },
+    // The theme switch now applies AND persists on click, so the mock has
+    // to remember it — otherwise flipping the switch in `dx serve` reverts
+    // on the next remount and the control looks broken.
+    settings_save: function (args) {
+      var s = (args && args.settings) || args;
+      if (s && s.theme) { mockDb.theme = s.theme; }
+      return Promise.resolve(null);
+    },
     create_goal: function (args) {
       mockDb.goal = args;
       // Mirror the shell's B-002 auto-seed: a manual goal arrives with
@@ -156,7 +163,6 @@
       return Promise.resolve({ titles: titles, created_ids: ['dir-brief-1', 'dir-brief-2'] });
     },
     set_always_on_top: function (args) { return Promise.resolve(null); },
-    toggle_window_visibility: function () { return Promise.resolve(null); },
     identity_restore: function (args) { return Promise.resolve('restored-' + (args.phrase || '').length); },
   };
 

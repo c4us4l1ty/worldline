@@ -652,7 +652,6 @@ pub(crate) async fn settings_get(
 
 #[tauri::command]
 pub(crate) async fn settings_save(
-    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<AppState>>,
     settings: AppSettings,
 ) -> ShellResult<()> {
@@ -664,20 +663,12 @@ pub(crate) async fn settings_save(
             wl_core::net::validate_relay_url(url).map_err(ShellError::Invalid)?;
         }
     }
-    let hotkey_changed = state
-        .repos
-        .settings()
-        .map(|cur| cur.hotkey != settings.hotkey)
-        .unwrap_or(true);
     state.with_identity_opt(|identity| {
         state
             .repos
             .save_settings(&settings, identity)
             .map_err(ShellError::from)
     })?;
-    if hotkey_changed {
-        crate::hotkey::register_summon_hotkey(&app, &settings.hotkey);
-    }
     // Keep the live session coherent: a changed relay URL invalidates
     // any cached token (it belongs to a different server/account view).
     let mut url = state.relay_url.lock_recover();
@@ -1060,12 +1051,6 @@ pub(crate) async fn set_always_on_top(app: tauri::AppHandle, pinned: bool) -> Sh
         win.set_always_on_top(pinned)
             .map_err(|e| ShellError::Io(e.to_string()))?;
     }
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn toggle_window_visibility(app: tauri::AppHandle) -> ShellResult<()> {
-    crate::hotkey::toggle_window_visibility(&app);
     Ok(())
 }
 

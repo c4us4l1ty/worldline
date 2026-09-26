@@ -95,7 +95,7 @@ pub fn TelemetryDrawer() -> Element {
                 div { class: "wl-field",
                     label { class: "wl-label", "Desktop viewport runtime" }
                     p { class: "wl-body-muted wl-mono", "Window geometry: 420px × 747px (9:16 fixed)" }
-                    p { class: "wl-body-muted wl-mono", "Pin to top: {pin_label} · Summon: {s.hotkey}" }
+                    p { class: "wl-body-muted wl-mono", "Pin to top: {pin_label}" }
                     button {
                         class: "wl-btn-ghost",
                         disabled: *busy.read(),

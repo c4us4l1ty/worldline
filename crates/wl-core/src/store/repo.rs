@@ -1385,18 +1385,17 @@ impl Repos {
     pub fn settings(&self) -> Result<AppSettings, StoreError> {
         self.lock_conn()
             .query_row(
-                "SELECT theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url
+                "SELECT theme, always_on_top, ai_provider, tier1_model, tier2_model, relay_url
                  FROM app_settings WHERE id = 1",
                 [],
                 |r| {
                     Ok(AppSettings {
                         theme: r.get(0)?,
-                        hotkey: r.get(1)?,
-                        always_on_top: r.get::<_, i64>(2)? != 0,
-                        ai_provider: r.get(3)?,
-                        tier1_model: r.get(4)?,
-                        tier2_model: r.get(5)?,
-                        relay_url: r.get(6)?,
+                        always_on_top: r.get::<_, i64>(1)? != 0,
+                        ai_provider: r.get(2)?,
+                        tier1_model: r.get(3)?,
+                        tier2_model: r.get(4)?,
+                        relay_url: r.get(5)?,
                     })
                 },
             )
@@ -1414,16 +1413,6 @@ impl Repos {
             return Err(StoreError::Invalid(
                 "theme must be 'dark' or 'light'".into(),
             ));
-        }
-        // Empty hotkey normalizes to the default (boot does the same);
-        // anything longer than a plausible accelerator is junk.
-        let hotkey = if s.hotkey.trim().is_empty() {
-            "alt+space".to_string()
-        } else {
-            s.hotkey.clone()
-        };
-        if hotkey.chars().count() > 64 {
-            return Err(StoreError::Invalid("hotkey is too long".into()));
         }
         if let Some(p) = s.ai_provider.as_deref() {
             if !KNOWN_PROVIDERS.contains(&p) {
@@ -1452,25 +1441,25 @@ impl Repos {
         let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
-        // Row and op payload carry the same normalized hotkey so a pull
-        // can never resurrect the pre-normalization value.
-        let normalized = AppSettings {
-            hotkey,
-            ..s.clone()
-        };
+        // The `hotkey` column is deliberately absent from this statement
+        // and from the SELECT in `settings()`. The summon hotkey was
+        // removed as a feature; the column stays only because dropping a
+        // column on a CRDT-synced singleton costs a migration and buys
+        // nothing — `NOT NULL DEFAULT 'alt+space'` means omitting it here
+        // lets SQLite supply the default, and no reader ever asks for it.
         tx.execute(
-            "INSERT INTO app_settings (id, theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(id) DO UPDATE SET theme=?1, hotkey=?2, always_on_top=?3,
-                ai_provider=?4, tier1_model=?5, tier2_model=?6, relay_url=?7, hlc_timestamp=?8",
-            params![normalized.theme, normalized.hotkey, normalized.always_on_top as i64, normalized.ai_provider, normalized.tier1_model, normalized.tier2_model, normalized.relay_url, ts.to_string()],
+            "INSERT INTO app_settings (id, theme, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET theme=?1, always_on_top=?2,
+                ai_provider=?3, tier1_model=?4, tier2_model=?5, relay_url=?6, hlc_timestamp=?7",
+            params![s.theme, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
         )?;
         Self::emit_on(
             &tx,
             identity,
             crate::crdt::CrdtTable::AppSettings,
             "settings",
-            &Self::settings_json(&normalized),
+            &Self::settings_json(s),
             ts,
         )?;
         self.persist_head_on(&tx)?;
@@ -1546,7 +1535,6 @@ impl Repos {
     fn settings_json(s: &AppSettings) -> serde_json::Value {
         serde_json::json!({
             "theme": s.theme,
-            "hotkey": s.hotkey,
             // Numeric: the pull side reads `as_i64`.
             "always_on_top": if s.always_on_top { 1 } else { 0 },
             "ai_provider": s.ai_provider,

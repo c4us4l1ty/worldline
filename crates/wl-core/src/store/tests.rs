@@ -373,7 +373,6 @@ fn settings_default_and_save() {
     let r = setup();
     let s = r.settings().unwrap();
     assert_eq!(s.theme, "dark");
-    assert_eq!(s.hotkey, "alt+space");
     assert!(!s.always_on_top);
 
     let mut s2 = s.clone();
@@ -750,7 +749,7 @@ fn bailout_note_truncates_to_spec_cap() {
 }
 
 #[test]
-fn settings_reject_unknown_theme_provider_and_absurd_hotkey() {
+fn settings_reject_unknown_theme_provider_and_oversized_text() {
     let r = setup();
     let case = |f: &dyn Fn(&mut AppSettings)| {
         let mut s = AppSettings::default();
@@ -764,15 +763,17 @@ fn settings_reject_unknown_theme_provider_and_absurd_hotkey() {
         .save_settings(&case(&|s| s.ai_provider = Some("evil-ai".into())), None)
         .is_err());
     assert!(r
-        .save_settings(&case(&|s| s.hotkey = "x".repeat(65)), None)
-        .is_err());
-    assert!(r
         .save_settings(&case(&|s| s.tier1_model = Some("m".repeat(257))), None)
         .is_err());
-    // Empty hotkey normalizes to the default in both row and payload.
-    r.save_settings(&case(&|s| s.hotkey = "   ".into()), None)
+    // CORE-7(a): a replicated settings row can carry a relay URL, so the
+    // SSRF policy has to hold on this write path and not only in the shell.
+    assert!(r
+        .save_settings(&case(&|s| s.relay_url = Some("file:///etc/passwd".into())), None)
+        .is_err());
+    // A valid save still round-trips.
+    r.save_settings(&case(&|s| s.theme = "light".into()), None)
         .unwrap();
-    assert_eq!(r.settings().unwrap().hotkey, "alt+space");
+    assert_eq!(r.settings().unwrap().theme, "light");
 }
 
 #[test]

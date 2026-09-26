@@ -33,7 +33,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 tauri = { version = "2", features = [] }
 tauri-plugin-stronghold = "2"
-tauri-plugin-global-shortcut = "2"
+# NOTE: tauri-plugin-stronghold stays as a dependency but is deliberately
+# NOT registered as a plugin — its JS commands would expose a second,
+# zero-keyed vault to the webview. The shell owns `vault::Vault` instead.
+# tauri-plugin-global-shortcut was removed along with the global summon
+# hotkey feature.
 
 [dev-dependencies]
 wl-relay = { path = "../wl-relay" }

@@ -5,9 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{
-    flash, invoke, record_sync, set_directive, AppCtx, DirectiveView, SyncStats, VelocityView,
-};
+use crate::app::{flash, invoke, set_directive, AppCtx, DirectiveView, VelocityView};
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -80,37 +78,21 @@ pub fn CanvasScreen() -> Element {
         div { class: "wl-float-layer",
             // The layer spans the full width but must stay transparent to
             // input, so `pointer-events` is re-enabled on the controls.
+            //
+            // This is the canvas's ONLY chrome now. The sync control that
+            // used to float opposite it was a 34px circle that reported
+            // nothing until tapped; sync is a settings concern, not a
+            // canvas one, so it moved to the Sync section of Settings,
+            // where it is a full-width row that also shows what the last
+            // cycle did. Nothing became unreachable — sync status and the
+            // Evening audit were already reachable from the Ctrl+,
+            // telemetry drawer.
             button {
                 class: "wl-float-btn wl-float-menu",
                 aria_label: "Open navigation",
                 title: "Navigation",
                 onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } },
-                "☰"
-            }
-            div { class: "wl-float-right",
-                button {
-                    class: "wl-float-btn wl-float-sync",
-                    aria_label: "Sync now",
-                    title: "Sync now",
-                    disabled: *ctx.directive_busy.read(),
-                    onclick: move |_| {
-                        let ctx = ctx;
-                        dioxus::core::spawn_forever(async move {
-                            match invoke::<SyncStats>("sync_now", ()).await {
-                                Ok(s) => {
-                                    record_sync(&ctx, &s);
-                                    flash(&ctx, s.summary().as_str());
-                                }
-                                Err(_) => {
-                                    let mut st = ctx.sync_status;
-                                    *st.write() = "OFFLINE".to_string();
-                                    flash(&ctx, "SYNC FAILED — OFFLINE?");
-                                }
-                            }
-                        });
-                    },
-                    "⇅"
-                }
+                crate::icons::IconMenu {}
             }
         }
 

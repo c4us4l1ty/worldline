@@ -1,25 +1,65 @@
-//! Settings — theme, hotkey, always-on-top, BYOK provider/model ids,
-//! relay URL. API KEYS themselves live ONLY in the Stronghold vault —
-//! this screen configures *which* provider, never the secret.
+//! Settings — identity, appearance, intelligence, sync.
+//!
+//! API KEYS themselves live ONLY in the Stronghold vault — this screen
+//! configures *which* provider, never the secret.
+//!
+//! Two persistence paths coexist here, on purpose:
+//!
+//! * The two appearance switches (theme, window pin) apply AND persist
+//!   the moment they are touched. A theme toggle that only took effect
+//!   on "Save settings" would look broken — you cannot evaluate a theme
+//!   you are not allowed to see.
+//! * Text fields (provider, model ids, relay URL) stage into a local
+//!   draft and commit on "Save settings", which writes all of them.
+//!
+//! The switches persist from `ctx.settings` — the last state the SHELL
+//! confirmed — with their own one field flipped, never from the local
+//! draft. Sending the draft would silently commit whatever the user had
+//! half-typed into an unrelated field. That rule is locked by
+//! `switch_persists_from_shell_state_not_the_local_draft`.
 
 use dioxus::prelude::*;
 
-use crate::app::{flash, invoke, record_sync, AppCtx, IdentityStatus, Screen, SyncStats};
+use crate::app::{
+    flash, invoke, record_sync, AppCtx, AppSettingsView, IdentityStatus, Screen, SyncStats,
+};
+use crate::icons::{IconBack, IconMoon, IconSun};
 
 pub fn SettingsScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut local = use_signal(|| ctx.settings.read().clone());
     let mut api_key = use_signal(String::new);
     let mut key_saved = use_signal(|| false);
-    // MVP-4: guards the relay connection test (single in-flight probe).
     let mut busy = use_signal(|| false);
-    // MVP-5: identity management lives here (not at boot). The phrase
-    // input is write-only and cleared as soon as the shell accepts it.
+    // Separate guard for the relay handshake probe, so a connection test
+    // in flight cannot be re-entered by the sync button beside it.
+    let mut probing = use_signal(|| false);
     let mut phrase = use_signal(String::new);
     let mut identity_busy = use_signal(|| false);
     let mut identity_error = use_signal(String::new);
+    let theme_controller = use_context::<crate::theme::Theme>();
+
+    // The draft is seeded from context at mount and re-seeded from the
+    // shell on every mount. Previously it was a mount-time snapshot that
+    // never re-read the shell, so this page could display values the
+    // store no longer held — and Save would then write those stale values
+    // back over newer ones. The trade is deliberate: unsaved edits are
+    // discarded when you navigate away and back, which is the honest
+    // behaviour for a settings page and strictly better than silently
+    // resurrecting a snapshot.
+    {
+        let mut local = local;
+        use_effect(move || {
+            spawn(async move {
+                if let Ok(fresh) = invoke::<AppSettingsView>("settings_get", ()).await {
+                    local.set(fresh);
+                }
+            });
+        });
+    }
+
     // Probe whether a key is already stored for the current provider.
-    // Reads `local` inside the effect so provider switches re-probe;
+    // Reads the draft inside the effect so provider switches re-probe;
     // the in-flight guard drops stale responses from rapid switches.
     use_effect(move || {
         let p = local.read().ai_provider.clone().unwrap_or_default();
@@ -38,15 +78,11 @@ pub fn SettingsScreen() -> Element {
             }
         });
     });
-    let theme_controller = use_context::<crate::theme::Theme>();
 
     let save = move || {
-        let ctx = ctx;
+        let mut ctx = ctx;
         let s = local.read().clone();
         spawn(async move {
-            // Tauri maps top-level arg keys to command params, and the
-            // shell's param is named `settings` — so the object must be
-            // wrapped (a flat object would fail deserialization).
             match invoke::<serde_json::Value>(
                 "settings_save",
                 serde_json::json!({ "settings": s.clone() }),
@@ -54,11 +90,7 @@ pub fn SettingsScreen() -> Element {
             .await
             {
                 Ok(_) => {
-                    {
-                        let value = s.clone();
-                        let mut sig = ctx.settings;
-                        *sig.write() = value;
-                    }
+                    *ctx.settings.write() = s;
                     flash(&ctx, "SAVED");
                 }
                 Err(e) => flash(&ctx, &format!("ERR {e}")),
@@ -68,20 +100,22 @@ pub fn SettingsScreen() -> Element {
 
     let s = local.read().clone();
     let status = ctx.identity_status.read().clone();
+    let dark = s.theme != "light";
+    let sync_label = crate::app::sync_label(&ctx);
 
     rsx! {
         div { class: "wl-page",
             // The way back used to be a button at the very bottom of a long
             // page, styled `.wl-btn-escape` — which reads as the bailout
-            // affordance, not navigation. It now lives in a fixed header,
-            // in the same place as every other page.
+            // affordance, not navigation. It is now a floating control in a
+            // fixed header, the same place as every other page.
             div { class: "wl-page-head",
                 button {
                     class: "wl-back",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
-                    "\u{2190}"
+                    IconBack {}
                 }
                 div {
                     h1 { class: "wl-page-title", "Settings" }
@@ -92,12 +126,16 @@ pub fn SettingsScreen() -> Element {
             }
 
             div { class: "wl-scroll-region",
-            // MVP-5: identity (12-word phrase) lives in Settings.
-            // Boot never opens onboarding; this is the only place that
-            // unlocks, restores, or generates the phrase.
+            // ------------------------------------------------------------
+            // Identity
+            // ------------------------------------------------------------
             div { class: "wl-section",
                 span { class: "wl-section-label", "Identity" }
-                p { class: "wl-section-note wl-mono",
+                p { class: "wl-status",
+                    // Coral is a beacon, never a surface (skill §1); an
+                    // unlocked-identity dot is one of its three sanctioned
+                    // uses (a cryptographic security badge).
+                    if status.unlocked { span { class: "wl-status-dot wl-status-dot-sealed" } }
                     if !status.has {
                         "no identity on this install"
                     } else if status.unlocked {
@@ -111,7 +149,6 @@ pub fn SettingsScreen() -> Element {
                 if !status.has {
                     button {
                         class: "wl-btn-ghost",
-                        style: "width: auto; padding: 0 16px;",
                         disabled: *identity_busy.read(),
                         onclick: move |_| {
                             {
@@ -130,7 +167,7 @@ pub fn SettingsScreen() -> Element {
                     if status.vault_has_mnemonic {
                         button {
                             class: "wl-btn-ghost",
-                            style: "width: auto; padding: 0 16px; margin-bottom: 10px;",
+                            style: "margin-bottom: 10px;",
                             disabled: *identity_busy.read(),
                             onclick: move |_| {
                                 let ctx = ctx;
@@ -152,7 +189,9 @@ pub fn SettingsScreen() -> Element {
                             if *identity_busy.read() { "Unlocking…" } else { "Unlock from vault" }
                         }
                     }
-                    div { style: "display: flex; gap: 8px; align-items: center;",
+                    // The phrase input is a flex row rather than a bare
+                    // field so "Restore" sits beside the words it acts on.
+                    div { class: "wl-restore-row",
                         input {
                             class: "wl-input wl-mono",
                             r#type: "password",
@@ -163,8 +202,7 @@ pub fn SettingsScreen() -> Element {
                             oninput: move |e| phrase.set(e.value()),
                         }
                         button {
-                            class: "wl-btn-ghost",
-                            style: "width: auto; padding: 0 16px; flex-shrink: 0;",
+                            class: "wl-btn-ghost wl-btn-compact",
                             disabled: *identity_busy.read(),
                             onclick: move |_| {
                                 let ctx = ctx;
@@ -200,60 +238,96 @@ pub fn SettingsScreen() -> Element {
                         }
                     }
                     if !identity_error.read().is_empty() {
-                        p { class: "wl-seed-sub", style: "margin-top: 6px; color: var(--wl-accent-coral);",
+                        p { class: "wl-section-note", style: "margin-top: 8px; color: var(--wl-accent-coral);",
                             "{identity_error.read().clone()}"
                         }
                     }
                 }
-                p { class: "wl-section-note", style: "margin-top: 10px;",
+                p { class: "wl-section-note", style: "margin-top: 12px;",
                     "The phrase is never written to SQLite or the relay. Local directives work without it; sync and AI keys need it unlocked."
                 }
             }
 
+            // ------------------------------------------------------------
+            // Appearance
+            // ------------------------------------------------------------
+            // Both controls here are switches rather than a `<select>` and
+            // a label-bearing button. They apply instantly, because a theme
+            // you cannot preview is not a control.
             div { class: "wl-section",
                 span { class: "wl-section-label", "Appearance" }
                 div { class: "wl-field",
                     label { class: "wl-label", "Theme" }
-                    select { class: "wl-select",
-                        value: "{s.theme}",
-                        onchange: move |e| {
-                            let mut v = local.read().clone();
-                            v.theme = e.value();
-                            local.set(v);
-                            theme_controller.set(e.value());
+                    button {
+                        class: "wl-switch",
+                        role: "switch",
+                        aria_checked: if dark { "true" } else { "false" },
+                        aria_label: if dark {
+                            "Theme: dark graphite. Switch to light parchment."
+                        } else {
+                            "Theme: light parchment. Switch to dark graphite."
                         },
-                        option { value: "dark", "Dark graphite (default)" }
-                        option { value: "light", "Light parchment" }
+                        onclick: move |_| {
+                            let mut ctx = ctx;
+                            let next = if dark { "light" } else { "dark" };
+                            theme_controller.set(next.to_string());
+                            {
+                                let mut v = local.read().clone();
+                                v.theme = next.to_string();
+                                local.set(v);
+                            }
+                            // Persist from the shell-confirmed state, not
+                            // the draft — see the module note. The draft
+                            // already carries the new theme above, so
+                            // reading it here would commit whatever else
+                            // the user had half-typed.
+                            let mut base = ctx.settings.read().clone();
+                            base.theme = next.to_string();
+                            spawn(async move {
+                                match invoke::<serde_json::Value>(
+                                    "settings_save",
+                                    serde_json::json!({ "settings": base.clone() }),
+                                )
+                                .await
+                                {
+                                    Ok(_) => *ctx.settings.write() = base,
+                                    Err(e) => flash(&ctx, &format!("ERR {e}")),
+                                }
+                            });
+                        },
+                        span { class: "wl-switch-label",
+                            if dark { "Dark graphite" } else { "Light parchment" }
+                        }
+                        span { class: "wl-switch-track",
+                            span { class: "wl-switch-knob",
+                                if dark { IconMoon {} } else { IconSun {} }
+                            }
+                        }
                     }
                 }
                 div { class: "wl-field",
-                    label { class: "wl-label", "Summon hotkey" }
-                    input { class: "wl-input", r#type: "text", placeholder: "alt+space",
-                        value: "{s.hotkey}",
-                        oninput: move |e| {
-                            let mut v = local.read().clone();
-                            v.hotkey = e.value();
-                            local.set(v);
-                        } }
-                }
-                div { class: "wl-field",
                     label { class: "wl-label", "Window" }
-                    button { class: "wl-btn-ghost",
+                    button {
+                        class: "wl-switch",
+                        role: "switch",
+                        aria_checked: if s.always_on_top { "true" } else { "false" },
+                        aria_label: "Pin window above other windows",
                         onclick: move |_| {
                             let pinned = !local.read().always_on_top;
-                            // Optimistic display flip; the preference only
-                            // sticks when BOTH the window call and the persist
-                            // succeed — boot restores the persisted value, so
-                            // an unpersisted pin would silently unpin.
-                            // Unsaved form edits are left untouched: the save
-                            // payload flips only the pin on persisted state.
+                            let mut ctx = ctx;
+                            // Optimistic flip, reverted below if either
+                            // the window call or the persist fails: boot
+                            // restores the persisted value, so an
+                            // unpersisted pin would silently unpin on the
+                            // next launch.
                             {
                                 let mut cur = local;
                                 let mut back = cur.read().clone();
                                 back.always_on_top = pinned;
                                 cur.set(back);
                             }
-                            let ctx = ctx;
+                            // Persist from the shell-confirmed state, not
+                            // the draft — see the module note.
                             let mut base = ctx.settings.read().clone();
                             base.always_on_top = pinned;
                             spawn(async move {
@@ -268,8 +342,7 @@ pub fn SettingsScreen() -> Element {
                                 )
                                 .await;
                                 if win_ok.is_ok() && save_ok.is_ok() {
-                                    let mut sig = ctx.settings;
-                                    *sig.write() = base;
+                                    *ctx.settings.write() = base;
                                 } else {
                                     let mut cur = local;
                                     let mut back = cur.read().clone();
@@ -279,11 +352,22 @@ pub fn SettingsScreen() -> Element {
                                 }
                             });
                         },
-                        if s.always_on_top { "Pinned — always on top" } else { "Floating below other windows" }
+                        span { class: "wl-switch-label", "Pin above other windows" }
+                        span { class: "wl-switch-track",
+                            span { class: "wl-switch-knob",
+                                span { class: "wl-switch-pip" }
+                            }
+                        }
+                    }
+                    p { class: "wl-section-note", style: "margin-top: 6px;",
+                        "A pinned window floats above other apps — useful when the canvas should stay in view while you work."
                     }
                 }
             }
 
+            // ------------------------------------------------------------
+            // Intelligence
+            // ------------------------------------------------------------
             div { class: "wl-section",
                 span { class: "wl-section-label", "Intelligence" }
                 div { class: "wl-field",
@@ -368,8 +452,7 @@ pub fn SettingsScreen() -> Element {
                         if *key_saved.read() {
                             span { class: "wl-chip", "sealed" }
                             button {
-                                class: "wl-btn-ghost",
-                                style: "color: var(--wl-accent-coral); flex: 0 0 auto;",
+                                class: "wl-btn-ghost wl-btn-compact wl-btn-danger",
                                 onclick: move |_| {
                                     let ctx = ctx;
                                     let provider = local
@@ -402,6 +485,9 @@ pub fn SettingsScreen() -> Element {
                 }
             }
 
+            // ------------------------------------------------------------
+            // Sync
+            // ------------------------------------------------------------
             div { class: "wl-section",
                 span { class: "wl-section-label", "Sync" }
                 div { class: "wl-field",
@@ -414,77 +500,89 @@ pub fn SettingsScreen() -> Element {
                             v.relay_url = if e.value().is_empty() { None } else { Some(e.value()) };
                             local.set(v);
                         } }
-                    div { class: "wl-inline-actions",
-                        button { class: "wl-btn-ghost",
-                            disabled: *busy.read(),
-                            onclick: move |_| {
-                                // MVP-4: explicit handshake test — the docstring
-                                // promised one, nothing called it. Uses the
-                                // PERSISTED relay URL (the shell reads its own
-                                // copy), so unsaved edits must be saved first.
-                                let ctx = ctx;
-                                busy.set(true);
-                                spawn(async move {
-                                    #[derive(serde::Deserialize, Default)]
-                                    struct AuthOut {
-                                        account_id: String,
-                                        expires_at: i64,
+                    button { class: "wl-btn-ghost",
+                        disabled: *probing.read(),
+                        onclick: move |_| {
+                            // Uses the PERSISTED relay URL (the shell
+                            // reads its own copy), so an unsaved edit
+                            // must be saved before it can be tested.
+                            let ctx = ctx;
+                            probing.set(true);
+                            spawn(async move {
+                                #[derive(serde::Deserialize, Default)]
+                                struct AuthOut {
+                                    account_id: String,
+                                    expires_at: i64,
+                                }
+                                match invoke::<AuthOut>("relay_authenticate", ()).await {
+                                    Ok(a) => {
+                                        let mins = ((a.expires_at - (js_sys::Date::now() / 1000.0) as i64)
+                                            .max(0))
+                                            / 60;
+                                        flash(
+                                            &ctx,
+                                            format!("RELAY OK · session {mins}m · {}", a.account_id)
+                                                .as_str(),
+                                        );
                                     }
-                                    match invoke::<AuthOut>("relay_authenticate", ()).await {
-                                        Ok(a) => {
-                                            let mins = ((a.expires_at - (js_sys::Date::now() / 1000.0) as i64)
-                                                .max(0))
-                                                / 60;
-                                            flash(
-                                                &ctx,
-                                                format!("RELAY OK · session {mins}m · {}", a.account_id)
-                                                    .as_str(),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            let msg = if e.contains("no relay") {
-                                                "NO RELAY URL SAVED".to_string()
-                                            } else {
-                                                format!("RELAY FAILED — {e}")
-                                            };
-                                            flash(&ctx, &msg);
-                                        }
+                                    Err(e) => {
+                                        let msg = if e.contains("no relay") {
+                                            "NO RELAY URL SAVED".to_string()
+                                        } else {
+                                            format!("RELAY FAILED — {e}")
+                                        };
+                                        flash(&ctx, &msg);
                                     }
-                                    busy.set(false);
-                                });
-                            },
-                            if *busy.read() { "Testing…" } else { "Test connection" }
-                        }
-                        button { class: "wl-btn-ghost",
-                            onclick: move |_| {
-                                let ctx = ctx;
-                                spawn(async move {
-                                    match invoke::<SyncStats>("sync_now", ()).await {
-                                        Ok(s) => {
-                                            record_sync(&ctx, &s);
-                                            flash(&ctx, s.summary().as_str());
-                                        }
-                                        Err(_) => {
-                                            let mut st = ctx.sync_status;
-                                            *st.write() = "OFFLINE".to_string();
-                                            flash(&ctx, "SYNC FAILED — OFFLINE?");
-                                        }
+                                }
+                                probing.set(false);
+                            });
+                        },
+                        if *probing.read() { "Testing relay…" } else { "Test connection" }
+                    }
+                }
+
+                // The sync control itself, moved here from the canvas. It
+                // gained the room to report what the last cycle did, which
+                // the 34px circle never could.
+                div { class: "wl-sync-panel",
+                    button { class: "wl-sync-cta",
+                        disabled: *busy.read(),
+                        onclick: move |_| {
+                            let ctx = ctx;
+                            busy.set(true);
+                            spawn(async move {
+                                match invoke::<SyncStats>("sync_now", ()).await {
+                                    Ok(s) => {
+                                        record_sync(&ctx, &s);
+                                        flash(&ctx, s.summary().as_str());
                                     }
-                                });
-                            },
-                            "Sync now"
-                        }
+                                    Err(_) => {
+                                        let mut st = ctx.sync_status;
+                                        *st.write() = "OFFLINE".to_string();
+                                        flash(&ctx, "SYNC FAILED — OFFLINE?");
+                                    }
+                                }
+                                busy.set(false);
+                            });
+                        },
+                        if *busy.read() { "Syncing…" } else { "Sync now" }
+                    }
+                    p { class: "wl-status wl-sync-meta",
+                        // Honest about "never synced" rather than implying
+                        // a freshness it has not got.
+                        "{sync_label}"
                     }
                 }
             }
 
-            // Page-level: one `settings_save` writes EVERY field above, so
-            // the save action sits outside any section rather than reading
-            // as belonging to Sync.
+            // Page-level: one `settings_save` writes EVERY text field
+            // above, so the save action sits outside any section rather
+            // than reading as belonging to one group. The two appearance
+            // switches are the stated exception — they already persisted.
             div { class: "wl-page-actions",
                 button { class: "wl-btn-primary", onclick: move |_| save(), "Save settings" }
                 p { class: "wl-section-note", style: "margin: 2px 0 0; text-align: center;",
-                    "Saves every field on this page."
+                    "Saves the provider, model ids and relay URL. Appearance switches save themselves."
                 }
             }
             }

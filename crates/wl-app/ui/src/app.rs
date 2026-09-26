@@ -142,7 +142,6 @@ pub struct BriefingView {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppSettingsView {
     pub theme: String,
-    pub hotkey: String,
     pub always_on_top: bool,
     pub ai_provider: Option<String>,
     pub tier1_model: Option<String>,
@@ -154,7 +153,6 @@ impl Default for AppSettingsView {
     fn default() -> Self {
         Self {
             theme: "dark".into(),
-            hotkey: "alt+space".into(),
             always_on_top: false,
             ai_provider: None,
             tier1_model: None,

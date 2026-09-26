@@ -138,7 +138,7 @@ pub fn GoalCreateScreen() -> Element {
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
-                    "\u{2190}"
+                    crate::icons::IconBack {}
                 }
                 div {
                     h1 { class: "wl-page-title",

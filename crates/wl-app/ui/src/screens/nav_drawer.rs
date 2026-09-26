@@ -50,6 +50,10 @@ pub fn NavDrawer() -> Element {
                         aria_label: "Create a goal",
                         title: "Create a goal",
                         onclick: go(Screen::GoalCreate),
+                        // Left as a text glyph: a plus is unambiguous at
+                        // 20px, and it is the one mark on this screen that
+                        // never suffered the font-rendering drift the
+                        // other two did.
                         "✚"
                     }
                     button {
@@ -57,7 +61,7 @@ pub fn NavDrawer() -> Element {
                         aria_label: "Settings",
                         title: "Settings",
                         onclick: go(Screen::Settings),
-                        "⚙"
+                        crate::icons::IconSettings {}
                     }
                 }
             }

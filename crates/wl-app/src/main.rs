@@ -2,17 +2,20 @@
 //!
 //! Responsibilities (PRD §2.2, §3):
 //! * Fixed 420×747 9:16 window, non-resizable, non-maximizable.
-//! * Global hotkey (default Alt+Space) to summon/dismiss.
 //! * Stronghold vault for the mnemonic + BYOK keys (never in DOM).
 //! * #[tauri::command] thin layer over wl-core; SQLite stays native.
 //! * Emits engine outcomes as events for the Dioxus UI.
+//!
+//! There is no global summon hotkey: the feature was removed, along with
+//! `tauri-plugin-global-shortcut` and the `toggle_window_visibility`
+//! command that only existed to serve it. The window stays reachable
+//! through the taskbar (`skipTaskbar: false` in tauri.conf.json).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_state;
 mod commands;
 mod error;
-mod hotkey;
 mod relay;
 mod vault;
 
@@ -30,17 +33,15 @@ fn main() {
         // zero-keyed vault to the webview. The shell manages its own
         // `vault::Vault` instance instead; the crate dependency remains
         // for the snapshot format + Stronghold type.
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
-            // Summon hotkey comes from persisted settings (PRD §2.2).
-            let (hotkey, pinned) = state
+            // The window pin is the only persisted window preference.
+            let pinned = state
                 .repos
                 .settings()
-                .map(|s| (s.hotkey, s.always_on_top))
-                .unwrap_or_else(|_| (hotkey::DEFAULT_HOTKEY.to_string(), false));
+                .map(|s| s.always_on_top)
+                .unwrap_or(false);
             app.manage(Arc::new(state));
-            hotkey::register_summon_hotkey(app.handle(), &hotkey);
             // Dark boot background: the webview paints #131312 before the
             // first WASM frame instead of WebKit's white default, so the
             // fixed 9:16 window never flashes a blank white page. The same
@@ -77,7 +78,6 @@ fn main() {
             commands::morning_briefing,
             commands::master_plan,
             commands::set_always_on_top,
-            commands::toggle_window_visibility,
         ])
         .run(tauri::generate_context!())
         .expect("Worldline shell failed to start");

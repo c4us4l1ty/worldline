@@ -547,12 +547,19 @@ fn apply_upsert(
             )?;
         }
         CrdtTable::AppSettings => {
+            // `hotkey` is intentionally neither written nor read. The
+            // summon hotkey was removed as a feature, so a new peer's op
+            // payload has no such key — and an OLD peer's payload that
+            // still carries one is simply ignored rather than rejected.
+            // The column keeps its `NOT NULL DEFAULT 'alt+space'`, which
+            // SQLite supplies for the omitted INSERT field, so no
+            // migration is needed to drop it.
             conn.execute(
-                "INSERT INTO app_settings (id,theme,hotkey,always_on_top,ai_provider,tier1_model,tier2_model,relay_url,hlc_timestamp)
-                 VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8)
-                 ON CONFLICT(id) DO UPDATE SET theme=?1,hotkey=?2,always_on_top=?3,ai_provider=?4,tier1_model=?5,tier2_model=?6,relay_url=?7,hlc_timestamp=?8",
+                "INSERT INTO app_settings (id,theme,always_on_top,ai_provider,tier1_model,tier2_model,relay_url,hlc_timestamp)
+                 VALUES (1,?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(id) DO UPDATE SET theme=?1,always_on_top=?2,ai_provider=?3,tier1_model=?4,tier2_model=?5,relay_url=?6,hlc_timestamp=?7",
                 rusqlite::params![
-                    get(f, "theme").unwrap_or("dark".into()), get(f, "hotkey").unwrap_or("alt+space".into()),
+                    get(f, "theme").unwrap_or("dark".into()),
                     f["always_on_top"].as_i64().unwrap_or(0),
                     get(f, "ai_provider"), get(f, "tier1_model"), get(f, "tier2_model"), get(f, "relay_url"),
                     ts_s

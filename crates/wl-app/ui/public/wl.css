@@ -41,6 +41,20 @@
   --wl-light-cta: #1D1C13;
   --wl-light-cta-text: #F4F0E8;
 
+  /* Appearance-switch state colours.
+     These are ABSOLUTE on purpose, not derived from the active theme. A
+     switch encodes "which theme is selected", not "what is currently
+     rendered", so flipping them with `data-theme` would invert the whole
+     control the moment it took effect — a cream knob on a cream track the
+     instant you chose dark. Fixed values keep both states legible in
+     either rendered theme. Still no pure #000/#FFF (skill §5). */
+  --wl-switch-off-track: #353533;
+  --wl-switch-off-knob: #E5E2E0;
+  --wl-switch-off-icon: #353533;
+  --wl-switch-on-track: #DAD5C7;
+  --wl-switch-on-knob: #1D1C13;
+  --wl-switch-on-icon: #DAD5C7;
+
   /* Radii */
   --wl-radius-sm: 0.5rem;
   --wl-radius-card: 1.25rem;
@@ -148,13 +162,13 @@ body {
 }
 
 /* ==========================================================================
-   A. Floating controls (replaces the former full-width HUD bar)
+   A. Floating controls
    ========================================================================== */
 /* The old `.wl-hud` was a solid, full-width strip with a
-   `border-bottom`. It is gone: the menu is now a floating circular
-   control and the timer a floating pill, both overlaying the canvas the
-   way the reference design (Plan/3.png) does. The bar dominated a
-   surface whose whole premise is ONE directive and no chrome.
+   `border-bottom`. It is gone: the menu is a floating circular
+   control overlaying the canvas the way the reference design
+   (Plan/3.png) does. The bar dominated a surface whose whole premise
+   is ONE directive and no chrome.
 
    The layer spans the viewport but must not eat clicks meant for the
    directive card underneath, so it is `pointer-events: none` and the
@@ -170,12 +184,6 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   padding: 14px 16px 0;
-  pointer-events: none;
-}
-.wl-float-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   pointer-events: none;
 }
 
@@ -197,8 +205,11 @@ body {
   line-height: 1;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
-  transition: transform var(--duration-fast) var(--ease-tactile),
-    background-color var(--duration-fast) var(--ease-tactile);
+  /* Was `var(--duration-fast)`, a token that is defined nowhere in this
+     file — the declaration was invalid, so these transitions silently
+     collapsed to 0s and the controls snapped instead of easing. */
+  transition: transform var(--duration-instant) var(--ease-tactile),
+    background-color var(--duration-instant) var(--ease-tactile);
 }
 .wl-float-btn:hover:not(:disabled) {
   background: var(--wl-surface-card);
@@ -206,17 +217,20 @@ body {
 }
 .wl-float-btn:active:not(:disabled) { transform: translateY(0); }
 .wl-float-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.wl-float-menu { font-size: 16px; }
+.wl-float-btn svg { display: block; }
 
-/* The session timer was removed (2026-09-26). `.wl-float-timer` and its
-   hover/pulsing states are gone with it; the beacon accent now lives in
-   `.wl-directive-step-badge` and `.wl-nav-btn-create`. The sync control
-   below is the only thing in the right cluster. */
+/* The sync control that used to sit opposite the menu (`⇅`, 34px circle)
+   was removed: sync is a settings concern, not a canvas one, and it now
+   lives in the Sync section of Settings as a full-width row. Canvas
+   chrome is menu-only. `.wl-float-right` went with it.
+   The session timer (`.wl-float-timer`) is likewise gone — removed
+   2026-09-26. The beacon accent now lives in `.wl-directive-step-badge`
+   and `.wl-nav-btn-create`. */
 
-/* Milestone, sync status and the Evening audit nudge moved to the
+/* Milestone, sync status and the Evening audit nudge live in the
    telemetry drawer (Ctrl+,), which already rendered sync stats and an
    always-visible Evening audit button — so none of them became
-   unreachable. */
+   unreachable when the canvas bar came down. */
 
 /* `.wl-hud` is retained ONLY as a generic inline status row: the canvas
    bar is gone, but `byok.rs` still uses this as a small two-child flex
@@ -260,7 +274,7 @@ body {
    CSS (UI-5 tracks dead-rule removal). */
 
 /* ==========================================================================
-   G. Page shell — header with back affordance + sectioned body
+   G. Page shell — centred title + floating back affordance
    ========================================================================== */
 /* Secondary screens (goal creation, settings) previously had no back
    affordance at all: goal creation had NO way out except creating a goal,
@@ -270,7 +284,14 @@ body {
 
    The header sits OUTSIDE the scroll region on purpose — on a long page
    (settings) an in-flow back button scrolls away exactly when you need
-   it. */
+   it.
+
+   The title is CENTRED, which is why the back button is not a flex
+   sibling. As a 34px flex child it pushed the title permanently right of
+   the viewport axis and no amount of `justify-content` could fix that
+   without also centring the button. Instead the button is taken out of
+   flow and floated over the gutter, and the 40px symmetric side padding
+   keeps the title on the true centre axis while reserving room for it. */
 .wl-page {
   flex: 1;
   min-height: 0;
@@ -278,21 +299,26 @@ body {
   flex-direction: column;
 }
 .wl-page-head {
+  position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  justify-content: center;
+  text-align: center;
   flex-shrink: 0;
-  padding-bottom: 14px;
+  /* 40px gutter: the 34px control plus 6px of clearance on the left, and
+     the mirrored reserve that keeps the centred text on-axis. */
+  padding: 2px 40px 16px;
 }
 .wl-back {
   pointer-events: auto;
+  position: absolute;
+  left: 0;
+  top: 2px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 34px;
   height: 34px;
-  margin-top: 2px;
   border-radius: 50%;
   border: 1px solid var(--wl-border-subtle);
   background: var(--wl-surface-elevated);
@@ -306,12 +332,16 @@ body {
 }
 .wl-back:hover { background: var(--wl-surface-card); transform: translateX(-1px); }
 .wl-back:active { transform: translateX(0); }
+.wl-back svg { display: block; }
 
 .wl-page-title {
   font-family: var(--font-serif);
-  font-size: 26px;
+  /* 24px, down from 26px: the centred column is 40px narrower per side,
+     and "State the objective" (the longest title) needs the headroom to
+     stay on one line. */
+  font-size: 24px;
   font-weight: 400;
-  line-height: 1.15;
+  line-height: 1.2;
   letter-spacing: -0.025em;
   color: var(--wl-text-primary);
   margin: 0;
@@ -320,7 +350,8 @@ body {
   font-size: 13px;
   line-height: 1.5;
   color: var(--wl-text-muted);
-  margin: 6px 0 0;
+  margin: 6px auto 0;
+  max-width: 30ch;
 }
 
 /* A group of related fields. Replaces the flat, undifferentiated column
@@ -381,6 +412,172 @@ body {
   padding: 4px 10px;
   white-space: nowrap;
 }
+
+/* Compact button for a secondary action that shares a row with a field
+   (Restore beside the phrase input, Remove beside the sealed chip). The
+   old approach was an inline `style: "width: auto; padding: 0 16px"` on
+   every call site, which is why the sizes had drifted apart. */
+.wl-btn-compact {
+  width: auto;
+  flex: 0 0 auto;
+  height: 46px;
+  padding: 0 16px;
+}
+.wl-btn-danger { color: var(--wl-accent-coral); }
+.wl-btn-danger:hover { color: var(--wl-accent-coral); }
+
+/* Input paired with an inline action. */
+.wl-restore-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* The pin switch has no glyph in its knob (a sun/moon would be a lie), so
+   it gets a plain pip that reads as "a position, not an icon". */
+.wl-switch-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ==========================================================================
+   H. Appearance switches (theme, window pin)
+   ========================================================================== */
+/* Both of these were something else before: the theme was a `<select>`
+   listing two options, and the window pin was a full-width button whose
+   label changed to describe the state it would put you in. Both are
+   boolean device preferences, so both read as switches.
+
+   A switch has to show its effect immediately — that is the entire
+   affordance. So these two persist on click, while the text fields
+   (relay URL, model ids) still wait for "Save settings". That is the one
+   deliberate inconsistency on the page, and it is the right way round:
+   a theme toggle that only applied on Save would appear broken. */
+.wl-switch {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: transparent;
+  border: none;
+  padding: 8px 0;
+  cursor: pointer;
+  text-align: left;
+  color: var(--wl-text-primary);
+}
+.wl-switch-label {
+  font-family: var(--font-directive);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+.wl-switch-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 46px;
+  height: 26px;
+  border-radius: var(--wl-radius-pill);
+  background: var(--wl-switch-off-track);
+  border: 1px solid var(--wl-border-subtle);
+  transition: background-color var(--duration-settle) var(--ease-tactile),
+              border-color var(--duration-settle) var(--ease-tactile);
+}
+/* 20px knob inset 2px in a 44×24 content box: 2 + 20 + 20 + 2 = 44, so a
+   20px translate lands it exactly on the opposite inset. */
+.wl-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--wl-switch-off-knob);
+  color: var(--wl-switch-off-icon);
+  transition: transform var(--duration-settle) var(--ease-tactile),
+              background-color var(--duration-settle) var(--ease-tactile);
+}
+/* Checked = "dark graphite is the selected theme": the track takes the
+   cream CTA tone and the knob inverts to charcoal, so the two states are
+   distinguishable at a glance in either rendered theme. */
+.wl-switch[aria-checked="true"] .wl-switch-track {
+  background: var(--wl-switch-on-track);
+  border-color: var(--wl-switch-on-track);
+}
+.wl-switch[aria-checked="true"] .wl-switch-knob {
+  transform: translateX(20px);
+  background: var(--wl-switch-on-knob);
+  color: var(--wl-switch-on-icon);
+}
+.wl-switch:hover .wl-switch-track { border-color: var(--wl-border-strong); }
+.wl-switch svg { display: block; }
+
+/* Compact state readout (identity status, sync freshness). */
+.wl-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.wl-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--wl-text-muted);
+}
+/* The identity dot is a cryptographic-security badge, which is one of the
+   three sanctioned uses for the coral beacon (skill §1). */
+.wl-status-dot-sealed { background: var(--wl-accent-coral); }
+
+/* ==========================================================================
+   I. Sync panel (Settings)
+   ========================================================================== */
+/* The sync control was a 34px circle on the canvas. It is a settings
+   concern, not a canvas one, so it moved here and gained the room to show
+   what it last did instead of only offering to do it. */
+.wl-sync-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--wl-border-subtle);
+}
+.wl-sync-cta {
+  width: 100%;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  background: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+  font-family: var(--font-directive);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  transition: background-color var(--duration-instant) var(--ease-tactile),
+              transform var(--duration-instant) var(--ease-tactile);
+}
+.wl-sync-cta:hover:not(:disabled) { background: var(--wl-surface-high); }
+.wl-sync-cta:active:not(:disabled) { transform: scale(0.985); }
+.wl-sync-cta:disabled { opacity: 0.5; cursor: not-allowed; }
+.wl-sync-cta svg { display: block; }
+.wl-sync-meta { justify-content: center; }
 
 /* ==========================================================================
    B. Stackelberg Single Directive Card (skill §4.B)
@@ -905,7 +1102,10 @@ body {
   font-size: 17px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--wl-text-primary);
+  /* Cream (the spec's app-name tone), not `--wl-text-primary`. The drawer
+     is a dark card, so a linen wordmark read as body text rather than as
+     the product's one logotype. */
+  color: var(--wl-cta-bg);
 }
 .wl-nav-spacer { flex: 1; min-height: 24px; }
 .wl-nav-actions {
@@ -926,6 +1126,9 @@ body {
   transition: transform var(--duration-instant) var(--ease-tactile),
               filter var(--duration-instant) var(--ease-tactile);
 }
+/* Icons are inline SVG, so they need an explicit box; `font-size` above
+   only sizes the one remaining text glyph. */
+.wl-nav-btn svg { display: block; }
 .wl-nav-btn:hover { filter: brightness(1.06); }
 .wl-nav-btn:active { transform: scale(0.97); }
 .wl-nav-btn-create {
@@ -934,10 +1137,27 @@ body {
   border: none;
 }
 .wl-nav-btn-settings {
-  background-color: var(--wl-surface-elevated);
-  color: var(--wl-text-muted);
+  /* `--wl-surface-high`, one step above the sheet's `--wl-surface-card`.
+     The spec once said `--wl-surface-card` here, which would have made the
+     button invisible against the drawer it sits on. */
+  background-color: var(--wl-surface-high);
+  color: var(--wl-text-secondary);
   border: 1px solid var(--wl-border-subtle);
 }
+
+/* ==========================================================================
+   Icon sizing
+   ========================================================================== */
+/* Icons carry no width/height attributes (see `icons.rs`): one rule sizes
+   all of them, so a new icon cannot arrive at an arbitrary size. */
+.wl-icon { display: block; flex-shrink: 0; }
+.wl-icon-menu { width: 18px; height: 18px; }
+.wl-icon-settings { width: 20px; height: 20px; }
+.wl-icon-back { width: 18px; height: 18px; }
+.wl-icon-moon, .wl-icon-sun { width: 11px; height: 11px; }
+/* The moon is a filled silhouette, so it wants slightly more presence
+   than the sun's hairline strokes at the same box. */
+.wl-icon-moon { width: 12px; height: 12px; }
 
 /* Font faces: bundled OFL assets, no CDN (local-first, skill §6) */
 @font-face {
