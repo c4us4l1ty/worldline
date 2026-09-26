@@ -208,26 +208,10 @@ body {
 .wl-float-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .wl-float-menu { font-size: 16px; }
 
-/* Timer stays on the canvas: it is the coral beacon and the only
-   live-updating element, so it must remain visible while working. */
-.wl-float-timer {
-  pointer-events: auto;
-  font-family: var(--font-mono);
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--wl-text-primary);
-  background: var(--wl-surface-elevated);
-  padding: 8px 12px;
-  border-radius: var(--wl-radius-pill);
-  border: 1px solid var(--wl-border-subtle);
-  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
-  cursor: pointer;
-  font-variant-numeric: tabular-nums; /* prevent countdown jitter */
-}
-.wl-float-timer:hover { background: var(--wl-surface-card); }
-.wl-float-timer[data-pulsing="true"] {
-  border-color: rgba(226, 109, 82, 0.45);
-}
+/* The session timer was removed (2026-09-26). `.wl-float-timer` and its
+   hover/pulsing states are gone with it; the beacon accent now lives in
+   `.wl-directive-step-badge` and `.wl-nav-btn-create`. The sync control
+   below is the only thing in the right cluster. */
 
 /* Milestone, sync status and the Evening audit nudge moved to the
    telemetry drawer (Ctrl+,), which already rendered sync stats and an
@@ -270,9 +254,10 @@ body {
   border-radius: 50%;
   background-color: var(--wl-sync-green);
 }
-/* `.wl-hud-timer` was the in-bar timer; it is superseded by
-   `.wl-float-timer` above and has no rsx users left. Deleted rather
-   than left as dead CSS (UI-5 tracks dead-rule removal). */
+/* `.wl-hud-timer` (the in-bar timer) and `.wl-float-timer` (its
+   floating replacement) are both gone — the session timer was removed
+   entirely. Neither has an rsx user. Deleted rather than left as dead
+   CSS (UI-5 tracks dead-rule removal). */
 
 /* ==========================================================================
    B. Stackelberg Single Directive Card (skill §4.B)

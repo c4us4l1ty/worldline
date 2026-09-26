@@ -567,3 +567,34 @@ Locked decisions from the planning session are marked [approved].
     `.opencode/skills/worldline/SKILL.md` §4.A was rewritten to match —
     it is a binding doc, and leaving it specifying the old `<header>`
     would have invited the next agent to undo this.
+92. **The session timer is gone from the product.** Removed entirely
+    (2026-09-26, user directive) after it had just been re-homed as a
+    floating pill. Gone with it: the `MM:SS` readout, the 1 Hz
+    `start_timer` JS ticker and its `TimerSubscription` teardown, the
+    `TimerSession` type and its `update()` lifecycle, the
+    `timer_session` signal maintained on every `set_directive`, and
+    `fmt_mmss`. The canvas now shows **no elapsed time at all** — work is
+    bounded by the directive, not by a clock, which is a defensible
+    reading of "one directive, no chrome" and removes the only source of
+    per-second re-render in the app.
+
+    `elapsed_secs` was **kept**: it is not timer-shaped, it backs the
+    sync-freshness label (`SYNCED · 42s ago`) in the telemetry drawer.
+    Its test was renamed and rewritten to say so, and a sub-second
+    truncation case was added in place of the two `fmt_mmss` assertions
+    it lost.
+
+    Consequences recorded rather than hidden:
+    - `Ctrl+,` is now the **only** way into the telemetry drawer; the
+      timer used to be a second entry point. The keybinding is unchanged
+      and independent.
+    - Sync age no longer refreshes on a timer-driven re-render. It is
+      computed at render time and the drawer re-renders on open, so the
+      displayed age is still correct when read.
+    - `.wl-hud-timer` and `.wl-float-timer` CSS were deleted, not left
+      as dead rules.
+    - The coral accent lost its headline justification. `#E26D52` is now
+      carried by the active step badge and the create-goal button, so the
+      "beacon only, never a surface" rule still has real load-bearing
+      uses. The skill's colour table and AGENTS.md were corrected to stop
+      promising a timer that no longer exists.

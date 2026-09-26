@@ -65,9 +65,10 @@ cargo fmt --all               # run before committing
 
 All UI code follows `.opencode/skills/worldline/SKILL.md`. Highlights:
 - Canvas `#131312`, card `#20201F`, CTA `#DAD5C7`, coral accent `#E26D52`
-  (timer/beacon ONLY, never a surface). Pure `#000`/`#FFF` prohibited.
+  (beacon ONLY, never a surface; the session timer that used to be the
+  headline use was removed 2026-09-26). Pure `#000`/`#FFF` prohibited.
 - Fonts: DM Sans (directives/CTA), Doppio One (brief greeting), ui-monospace
-  (HUD/timers/seed words). Bundled TTFs in `ui/assets/fonts` — no CDN.
+  (HUD/telemetry/seed words). Bundled TTFs in `ui/assets/fonts` — no CDN.
 - Never render a list of future tasks, streak counters, or red failure states.
   Skips are "velocity adjustments" (GPS metaphor).
 - Escape hatch requires reason categorization before the directive unmounts.

@@ -8,7 +8,7 @@ description: Worldline Design System — Stackelberg single-directive 9:16 viewp
 - Enforce the **9:16 vertical terminal viewport constraint** (`420px × 747px` fixed on desktop; fluid-contained on mobile).
 - Codify the Stackelberg interface hierarchy:
   1. **Directive Command** (`DM Sans` Bold 700, `-0.03em`): non-negotiable active execution directive.
-  2. **Micro-HUD & Metadata** (`SF Mono` / `ui-monospace`): countdown timers, progressive steps, and HLC markers.
+  2. **Micro-HUD & Metadata** (`SF Mono` / `ui-monospace`): progressive step markers, HLC stamps, and sync telemetry.
   3. **Editorial Milestone Accent** (`Doppio One` / `Georgia` italic): contextual milestone tag and zero-guilt velocity markers.
   4. **Body & Micro-Directives** (`DM Sans` Regular 400): secondary execution context and setup instructions.
 - Provide production-ready design tokens, tactile containers (`#20201F` dark / `#ECE6DA` light), pill action triggers, and friction-controlled modal overlays.
@@ -26,7 +26,7 @@ Use this skill when:
 - **Stackelberg Single-Directive Canvas:** No scrollable task lists, kanban boards, or calendar backlogs. Screen real estate is reserved for **exactly one directive at a time**.
 - **Fixed 9:16 Vertical Discipline:** The desktop client is an ambient handheld companion (`420px × 747px`). It never maximizes or takes over the screen.
 - **Calm & Tactile Dark Default:** Deep matte-graphite canvas (`#131312`), elevated directive container (`#20201F`), elevated hover (`#2A2A29`), and linen text (`#E5E2E0`). Pure `#000000` and `#FFFFFF` are prohibited.
-- **Focal Coral Accent:** `#E26D52` is strictly reserved for the active timer pulse, primary action beacons, and cryptographic security badges—never applied as a surface background.
+- **Focal Coral Accent:** `#E26D52` is strictly reserved for the active step marker, primary action beacons, and cryptographic security badges—never applied as a surface background. (The active-timer pulse used to be the headline use; the session timer was removed 2026-09-26, so the active step badge and the create-goal button carry the accent now.)
 - **Anti-Guilt Objective UI:** Skipped or demoted tasks never display red alarms or broken streaks. Velocity adjustments display neutral slate and sand tones resembling a navigational GPS recalculating a route.
 
 ---
@@ -87,7 +87,7 @@ Use this skill when:
 | `--bg-dark-card` | `#20201F` | Primary Directive container card |
 | `--bg-dark-elevated` | `#2A2A29` | Chip badges, secondary controls, inputs |
 | `--bg-cream-primary` | `#DAD5C7` | Primary execution CTA ("Complete Directive") |
-| `--accent-coral` | `#E26D52` | Timer beacon, active step marker, security ring |
+| `--accent-coral` | `#E26D52` | Active step marker, primary action beacon, security ring |
 | `--text-dark-primary` | `#E5E2E0` | Command titles, high-contrast labels |
 | `--text-dark-secondary` | `#949087` | Execution context, time indicators |
 | `--text-dark-inverse` | `#1D1C13` | Contrast text inside cream CTA buttons |
@@ -100,7 +100,7 @@ Use this skill when:
 | `--bg-light-card` | `#ECE6DA` | Active directive container |
 | `--bg-light-elevated` | `#E0DAD0` | Secondary triggers and HUD counters |
 | `--bg-charcoal-primary` | `#1D1C13` | Primary execution CTA in light mode |
-| `--accent-coral` | `#D8583B` | Focal timer and active indicator |
+| `--accent-coral` | `#D8583B` | Focal active-step indicator |
 | `--text-light-primary` | `#1D1C13` | Deep slate-charcoal command titles |
 | `--text-light-secondary` | `#68645C` | Execution subtext and helper guides |
 | `--border-subtle` | `rgba(29, 28, 19, 0.10)` | Divider rules on parchment |
@@ -195,14 +195,13 @@ rounded:
 ## 4. UI Component Architecture
 
 ### A. Floating Controls
-Overlays the canvas instead of sitting in a bar above it. A full-width header strip fought the core premise — ONE directive, no chrome — and squeezed the empty state into a letterbox, so the bar was removed (2026-09-26). The menu is a floating circular control (top-left) and the timer a floating pill (top-right), both raised off the surface with a soft shadow.
+Overlays the canvas instead of sitting in a bar above it. A full-width header strip fought the core premise — ONE directive, no chrome — and squeezed the empty state into a letterbox, so the bar was removed (2026-09-26). The menu is a floating circular control (top-left); the sync control floats opposite it (top-right). Both are raised off the surface with a soft shadow.
 
 ```html
 <div class="wl-float-layer">
   <button class="wl-float-btn wl-float-menu" aria-label="Open navigation">☰</button>
   <div class="wl-float-right">
     <button class="wl-float-btn wl-float-sync" aria-label="Sync now">⇅</button>
-    <button class="wl-float-timer" aria-label="Session timer, opens system telemetry">24:58</button>
   </div>
 </div>
 ```
@@ -229,24 +228,11 @@ Overlays the canvas instead of sitting in a bar above it. A full-width header st
      as sitting above the content rather than embedded in it. */
   box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
 }
-.wl-float-timer {
-  pointer-events: auto;
-  font-family: var(--font-mono-telemetry);
-  font-size: 14px; font-weight: 500;
-  color: var(--wl-text-primary);
-  background: var(--wl-surface-elevated);
-  padding: 8px 12px; border-radius: var(--wl-radius-pill);
-  border: 1px solid var(--wl-border-subtle);
-  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
-  cursor: pointer;
-  font-variant-numeric: tabular-nums; /* prevent countdown jitter */
-}
-.wl-float-timer[data-pulsing="true"] { border-color: rgba(226, 109, 82, 0.45); }
 ```
 
 Two rules this section now encodes:
 
-- **The timer stays on the canvas.** It is the coral beacon and the only live-updating element; a focus timer you cannot see is not a timer. Milestone, sync status and the Evening audit nudge moved to the telemetry drawer (`Ctrl+,`), which already rendered sync stats and an always-visible Evening audit button — so nothing became unreachable.
+- **There is no session timer.** The `MM:SS` readout, its 1 Hz ticker, and the whole `TimerSession` state were removed 2026-09-26. The canvas shows no elapsed time at all; work is bounded by the directive, not by a clock. `elapsed_secs` survives only for sync freshness (`SYNCED · 42s ago`) in the telemetry drawer, which is not timer-shaped — do not reintroduce a timer from it.
 - **`.wl-hud` survives only as a generic inline status row** used by `byok.rs`. Its former `border-bottom` + `padding-bottom` (what made it read as a full-width bar) must **not** be restored.
 
 ### B. The Stackelberg Single Directive Card
@@ -416,7 +402,7 @@ Tactile 12-word recovery display during cryptographic account initialization.
 - **Lock the Viewport:** Constrain the desktop UI to `420px × 747px` (`resizable: false`, `maximizable: false`). Never allow layout stretch on widescreen monitors.
 - **Enforce the Single-Command Rule:** Only one active directive container may be rendered in the DOM at any given execution cycle.
 - **Emphasize Primary CTA Contrast:** The execution button (`.wl-btn-primary`) must always be rendered in warm cream `#DAD5C7` to act as an unequivocal behavioral magnet.
-- **Render Timers in Monospace:** All durations, HLC sequence stamps, and countdowns must use `var(--font-mono-telemetry)` to prevent tabular jitter.
+- **Render Telemetry in Monospace:** All durations, HLC sequence stamps, and sync counts must use `var(--font-mono-telemetry)` to prevent tabular jitter. (Countdowns no longer exist — the session timer was removed 2026-09-26 — but the rule stands for whatever numeric readout comes next.)
 - **Require Confirmation on Escape Hatch:** The bailout button (`.wl-btn-escape`) must open a modal requiring the user to categorize the stall (`Blocked`, `Scope`, `Energy`) before unmounting the directive.
 
 ### Don't:

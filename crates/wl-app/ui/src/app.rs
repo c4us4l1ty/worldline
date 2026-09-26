@@ -196,37 +196,18 @@ pub enum Screen {
     Settings,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct TimerSession {
-    directive_id: String,
-    phase: Option<(i64, i64)>,
-    pub started_ms: f64,
-}
-
-impl TimerSession {
-    fn update(
-        previous: Option<Self>,
-        directive: Option<&DirectiveView>,
-        now_ms: f64,
-    ) -> Option<Self> {
-        let directive = directive?;
-        if let Some(session) = previous {
-            if session.directive_id == directive.directive_id && session.phase == directive.phase {
-                return Some(session);
-            }
-        }
-        Some(Self {
-            directive_id: directive.directive_id.clone(),
-            phase: directive.phase,
-            started_ms: now_ms,
-        })
-    }
-}
-
+/// Note: the session timer was removed from the canvas (2026-09-26, user
+/// directive). With it went `TimerSession`, `timer_session`, `fmt_mmss`
+/// and the 1 Hz `start_timer` ticker — they existed only to drive the
+/// `MM:SS` readout, so all of it was dead weight rather than shared
+/// infrastructure. `elapsed_secs` SURVIVES because `sync_label` uses it
+/// for sync freshness ("SYNCED · 42s ago"), and that is not timer-shaped.
 pub fn active_directive(directive: Option<DirectiveView>) -> Option<DirectiveView> {
     directive.filter(|d| d.state == "active" && !d.directive_id.is_empty())
 }
 
+/// Milliseconds elapsed between two epoch-ms stamps, clamped at zero
+/// (a wall-clock step backwards must never render as a negative age).
 pub fn elapsed_secs(started_ms: f64, now_ms: f64) -> u64 {
     ((now_ms - started_ms).max(0.0) / 1000.0) as u64
 }
@@ -238,7 +219,6 @@ pub struct AppCtx {
     pub velocity: Signal<VelocityView>,
     pub settings: Signal<AppSettingsView>,
     pub toast: Signal<Option<String>>,
-    pub timer_session: Signal<Option<TimerSession>>,
     pub directive_busy: Signal<bool>,
     pub toast_task: Signal<Option<Task>>,
     pub escape_open: Signal<bool>,
@@ -265,7 +245,6 @@ fn App() -> Element {
         velocity: Signal::new(VelocityView::default()),
         settings: Signal::new(AppSettingsView::default()),
         toast: Signal::new(None),
-        timer_session: Signal::new(None),
         directive_busy: Signal::new(false),
         toast_task: Signal::new(None),
         escape_open: Signal::new(false),
@@ -390,21 +369,12 @@ fn BootErrorScreen(detail: String) -> Element {
     }
 }
 
-pub fn fmt_mmss(secs: u64) -> String {
-    format!("{:02}:{:02}", secs / 60, secs % 60)
-}
-
 pub fn set_directive(ctx: &AppCtx, directive: Option<DirectiveView>) {
-    let directive = active_directive(directive);
-    let mut session = ctx.timer_session;
-    let next = TimerSession::update(
-        session.peek().clone(),
-        directive.as_ref(),
-        js_sys::Date::now(),
-    );
-    session.set(next);
+    // The session-timer bookkeeping that used to live here went with the
+    // timer (see the note above `active_directive`); this is now just
+    // the single-active filter plus the write.
     let mut current = ctx.directive;
-    current.set(directive);
+    current.set(active_directive(directive));
 }
 
 pub fn flash(ctx: &AppCtx, msg: &str) {
@@ -491,13 +461,16 @@ mod tests {
         }
     }
 
+    /// `elapsed_secs` backs the sync-freshness label, not a timer: it must
+    /// derive from timestamps (not tick counts) and clamp a backwards wall
+    /// clock to zero rather than wrapping into a huge age.
     #[test]
     fn elapsed_uses_timestamps_not_ticks() {
         assert_eq!(elapsed_secs(1000.0, 1999.0), 0);
         assert_eq!(elapsed_secs(1000.0, 62000.0), 61);
         assert_eq!(elapsed_secs(1000.0, 500.0), 0);
-        assert_eq!(fmt_mmss(61), "01:01");
-        assert_eq!(fmt_mmss(6000), "100:00");
+        // Sub-second precision truncates, it does not round up.
+        assert_eq!(elapsed_secs(0.0, 999.0), 0);
     }
 
     #[test]
@@ -511,22 +484,6 @@ mod tests {
         d.state = "active".into();
         d.directive_id.clear();
         assert!(active_directive(Some(d)).is_none());
-    }
-
-    #[test]
-    fn timer_session_survives_refresh_but_resets_for_new_work() {
-        let mut d = directive();
-        let session = TimerSession::update(None, Some(&d), 1000.0);
-        d.title = "Updated title".into();
-        let unchanged = TimerSession::update(session.clone(), Some(&d), 5000.0);
-        assert_eq!(session, unchanged);
-        d.phase = Some((2, 2));
-        let next_phase = TimerSession::update(unchanged, Some(&d), 5000.0);
-        assert_eq!(next_phase.as_ref().unwrap().started_ms, 5000.0);
-        d.directive_id = "second".into();
-        let next_directive = TimerSession::update(next_phase, Some(&d), 9000.0);
-        assert_eq!(next_directive.as_ref().unwrap().started_ms, 9000.0);
-        assert!(TimerSession::update(next_directive, None, 10000.0).is_none());
     }
 
     #[test]

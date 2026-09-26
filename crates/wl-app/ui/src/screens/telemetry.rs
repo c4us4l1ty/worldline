@@ -1,10 +1,13 @@
 //! System Telemetry Drawer (spec Screen 7).
 //!
-//! Overlay toggled by Ctrl+, (web equivalent of spec ⌘,) or by tapping
-//! the timer pill. REUSE-ONLY: reads `settings_get` state already in
-//! `ctx.settings`, `sync_now` for pending counts, and static geometry.
-//! HLC head / WAL size have no shell command (per decision) and render
-//! as unavailable rather than fabricated.
+//! Overlay toggled by Ctrl,+ (web equivalent of spec ⌘,). REUSE-ONLY:
+//! reads `settings_get` state already in `ctx.settings`, `sync_now` for
+//! pending counts, and static geometry. HLC head / WAL size have no
+//! shell command (per decision) and render as unavailable rather than
+//! fabricated.
+//!
+//! The canvas timer used to be a second entry point here; it was removed
+//! 2026-09-26, so Ctrl,+ is now the only way in.
 
 use dioxus::prelude::*;
 

@@ -6,8 +6,7 @@
 use dioxus::prelude::*;
 
 use crate::app::{
-    elapsed_secs, flash, fmt_mmss, invoke, record_sync, set_directive, AppCtx, DirectiveView,
-    SyncStats, VelocityView,
+    flash, invoke, record_sync, set_directive, AppCtx, DirectiveView, SyncStats, VelocityView,
 };
 
 pub fn CanvasScreen() -> Element {
@@ -112,17 +111,6 @@ pub fn CanvasScreen() -> Element {
                     },
                     "⇅"
                 }
-                button {
-                    class: "wl-float-timer",
-                    aria_label: "Session timer, opens system telemetry",
-                    title: "System telemetry (Ctrl+,)",
-                    onclick: move |_| { { let mut s = ctx.telemetry_open; *s.write() = true; } },
-                    if let Some(session) = ctx.timer_session.read().clone() {
-                        TimerDisplay { key: "{session.started_ms}", started_ms: session.started_ms }
-                    } else {
-                        "00:00"
-                    }
-                }
             }
         }
 
@@ -170,58 +158,6 @@ pub fn CanvasScreen() -> Element {
         }
         }
     }
-}
-
-#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
-export function start_timer(tick) {
-    let timeout;
-    let stopped = false;
-    function update() {
-        clearTimeout(timeout);
-        if (stopped || document.hidden) return;
-        tick();
-        timeout = setTimeout(update, 1000);
-    }
-    document.addEventListener('visibilitychange', update);
-    if (!document.hidden) timeout = setTimeout(update, 1000);
-    return () => {
-        stopped = true;
-        clearTimeout(timeout);
-        document.removeEventListener('visibilitychange', update);
-    };
-}
-"#)]
-extern "C" {
-    fn start_timer(tick: &js_sys::Function) -> js_sys::Function;
-}
-
-struct TimerSubscription {
-    stop: js_sys::Function,
-    _tick: wasm_bindgen::closure::Closure<dyn FnMut()>,
-}
-
-impl Drop for TimerSubscription {
-    fn drop(&mut self) {
-        let _ = self.stop.call0(&wasm_bindgen::JsValue::NULL);
-    }
-}
-
-#[component]
-fn TimerDisplay(started_ms: f64) -> Element {
-    use wasm_bindgen::JsCast;
-
-    let mut seconds = use_signal(|| elapsed_secs(started_ms, js_sys::Date::now()));
-    use_hook(move || {
-        let tick = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
-            seconds.set(elapsed_secs(started_ms, js_sys::Date::now()));
-        }) as Box<dyn FnMut()>);
-        std::rc::Rc::new(TimerSubscription {
-            stop: start_timer(tick.as_ref().unchecked_ref()),
-            _tick: tick,
-        })
-    });
-    let timer = fmt_mmss(*seconds.read());
-    rsx! { "{timer}" }
 }
 
 #[component]
