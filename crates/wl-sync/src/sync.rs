@@ -280,7 +280,7 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
     let ts_s = ts.to_string();
     let get = |f: &serde_json::Value, k: &str| f[k].as_str().map(|s| s.to_string());
 
-    let conn = repos.conn.lock().unwrap();
+    let conn = repos.lock_conn();
     let head = load_head(&conn, table.as_str(), &op.record_id)?;
     // Effective head: stored merge memory, else the live row's own HLC
     // (legacy/local rows predate heads — they lose exact ties, remote
@@ -664,7 +664,7 @@ fn apply_delete(
 
 /// Reads the persisted pull cursor `(hlc, op_id)` ("" / "" = start).
 fn current_cursor(repos: &Repos) -> Result<(String, String), SyncError> {
-    let conn = repos.conn.lock().unwrap();
+    let conn = repos.lock_conn();
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT cursor, op_id FROM sync_cursor WHERE id = 1",
@@ -678,7 +678,7 @@ fn current_cursor(repos: &Repos) -> Result<(String, String), SyncError> {
 /// Persists the pull cursor (idempotent; called by `sync_cycle`
 /// itself so the shell cannot forget).
 pub fn save_cursor(repos: &Repos, cursor: &str, op_id: &str) -> Result<(), SyncError> {
-    let conn = repos.conn.lock().unwrap();
+    let conn = repos.lock_conn();
     conn.execute(
         "INSERT INTO sync_cursor (id, cursor, op_id) VALUES (1, ?1, ?2)
          ON CONFLICT(id) DO UPDATE SET cursor=?1, op_id=?2",
@@ -699,12 +699,19 @@ fn decode_response<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Sync
 
 /// Validates a pull batch against the relay's own hard caps before any
 /// op is applied: batch size, per-op envelope bounds (including the
-/// sealed-payload size and table allow-list — the same bounds push
-/// enforces server-side), monotonic (hlc, op_id) pagination, cursor
-/// continuity, and empty-batch cursor invariance. A hostile relay must
-/// neither wedge the cycle nor advance the cursor past data the client
-/// never received (an empty batch that jumps the cursor would make
-/// every op between the old and new position permanently unreachable).
+/// sealed-payload size — the same bounds push enforces server-side),
+/// monotonic (hlc, op_id) pagination, cursor continuity, and empty-batch
+/// cursor invariance. A hostile relay must neither wedge the cycle nor
+/// advance the cursor past data the client never received (an empty
+/// batch that jumps the cursor would make every op between the old and
+/// new position permanently unreachable).
+///
+/// **There is deliberately no table allow-list here (B-008).** Unknown
+/// tables from future-schema peers quarantine-skip in the apply loop;
+/// rejecting them in this validator would abort the cycle BEFORE any
+/// apply and wedge sync. Do not "restore" one. The relay's push
+/// boundary is a separate, server-side 400 and is the right place to
+/// keep unknown tables out of storage in the first place.
 fn validate_pull_response(
     resp: &wl_protocol::PullResponse,
     since_hlc: &str,

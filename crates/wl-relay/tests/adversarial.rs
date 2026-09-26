@@ -272,31 +272,117 @@ async fn defect_sessions_gc_never_invoked_by_validate() {
     assert!(!auth.session_row_exists(&token));
 }
 
-/// KNOWN-LIMITATION (not fixed in this pass): `insert_ops` still holds
-/// ONE transaction (and the store's single write mutex) across the
-/// whole batch — a large push briefly convoys pulls. Recorded here as
-/// the characterization guard; chunked commits are future work (P4).
+/// SYNC-1: push now commits in chunks (`INSERT_CHUNK_SIZE`) instead of
+/// one transaction for the whole batch, releasing the store's single
+/// write mutex between chunks.
+///
+/// This test asserts the contracts chunking must *preserve*, all
+/// deterministically. It deliberately does **not** assert on wall-clock
+/// interleaving: proving the mutex is genuinely released mid-push is a
+/// concurrency/latency property, and a timing assertion here would be
+/// flaky on shared CI. That measurement belongs with the p95 latency
+/// SLO in SHIP-3, not in a unit test.
 #[tokio::test]
 async fn defect_push_holds_global_mutex_across_whole_batch() {
-    let state = Arc::new(wl_relay::AppStateForTest {
-        auth: wl_relay::AuthForTest::new(),
-        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
-    });
-    let ops: Vec<_> = (0..20_000)
+    use wl_relay::store::BlobStore;
+    let blobs = wl_relay::SqliteForTest::open_in_memory().unwrap();
+    let account = format!("{:064x}", 1u64);
+    blobs.register_account(&account).unwrap();
+
+    // Comfortably more than one chunk, so the chunk loop actually runs.
+    let n = 4_000usize;
+    let ops: Vec<_> = (0..n)
         .map(|i| wl_relay::store::StoredOp {
             operation_id: format!("op-{i}"),
-            account: format!("{:064x}", 1u64),
+            account: account.clone(),
             hlc: format!("{:019}.0.1", 1_000_000 + i),
             table: "goals".into(),
             record_id: format!("g-{i}"),
             sealed: vec![7u8; 32 + 16],
         })
         .collect();
-    let t0 = std::time::Instant::now();
-    let outcome = state.blobs.insert_ops(&ops).unwrap();
-    let elapsed = t0.elapsed();
-    assert_eq!(outcome.accepted.len(), 20_000);
-    assert!(elapsed.as_millis() > 0);
+
+    // (1) A multi-chunk push still stores every op.
+    let outcome = blobs.insert_ops(&ops).unwrap();
+    assert_eq!(outcome.accepted.len(), n);
+    assert!(outcome.duplicates.is_empty());
+
+    // (2) Idempotence survives the chunk boundary: a re-push accepts
+    // nothing and reports every op as a duplicate. This is the property
+    // most at risk from splitting one transaction into many.
+    let again = blobs.insert_ops(&ops).unwrap();
+    assert_eq!(again.accepted.len(), 0, "re-push must accept nothing");
+    assert_eq!(again.duplicates.len(), n, "all must be duplicates");
+
+    // (3) A batch that is an exact multiple of the chunk size must not
+    // drop or duplicate its final op — the classic off-by-one in a
+    // `chunks()` loop.
+    let exact = 256usize;
+    let boundary: Vec<_> = (0..exact)
+        .map(|i| wl_relay::store::StoredOp {
+            operation_id: format!("b-{i}"),
+            account: account.clone(),
+            hlc: format!("{:019}.0.1", 3_000_000 + i),
+            table: "goals".into(),
+            record_id: format!("bg-{i}"),
+            sealed: vec![7u8; 48],
+        })
+        .collect();
+    let b = blobs.insert_ops(&boundary).unwrap();
+    assert_eq!(b.accepted.len(), exact, "no op lost at a chunk boundary");
+
+    // (4) Everything is actually durable and pullable.
+    let pulled = blobs.pull_ops(&account, "", "", 10_000).unwrap();
+    assert_eq!(pulled.len(), n + exact);
+}
+
+/// SYNC-1 companion: chunking must not weaken the per-account quota.
+/// The cap is re-checked inside every chunk's transaction, so crossing
+/// it partway through commits the prefix and then reports the cliff —
+/// never silently accepting the whole batch.
+#[tokio::test]
+async fn chunked_push_still_enforces_the_per_account_cap() {
+    use wl_relay::store::BlobStore;
+    let blobs = wl_relay::SqliteForTest::open_in_memory().unwrap();
+    let account = format!("{:064x}", 3u64);
+    blobs.register_account(&account).unwrap();
+
+    let chunk = 128usize;
+    let mk = |from: i64, n: usize| -> Vec<wl_relay::store::StoredOp> {
+        (0..n)
+            .map(|i| wl_relay::store::StoredOp {
+                operation_id: format!("op-{from}-{i}"),
+                account: account.clone(),
+                hlc: format!("{:019}.0.1", from + i as i64),
+                table: "goals".into(),
+                record_id: format!("g-{from}-{i}"),
+                sealed: vec![7u8; 48],
+            })
+            .collect()
+    };
+    // Cap is 100_000. Fill to 99_968 (781 whole chunks), then push one
+    // more chunk and expect the cliff.
+    for b in 0..(99_968 / chunk) {
+        blobs
+            .insert_ops(&mk(b as i64 * chunk as i64, chunk))
+            .unwrap();
+    }
+    let err = blobs.insert_ops(&mk(500_000, chunk)).unwrap_err();
+    assert!(
+        matches!(err, wl_relay::store::StoreError::OpsQuota),
+        "expected the quota cliff, got {err:?}"
+    );
+    // The refused push must not have overshot the cap, and the account
+    // must not be wedged: a push that still fits is accepted normally.
+    // (The 128-op batch tripped on its *first* chunk — 99_968 + 128 >
+    // 100_000 — so nothing was committed for it.)
+    let fits = blobs.insert_ops(&mk(600_000, 1)).unwrap();
+    assert_eq!(fits.accepted.len(), 1, "a fitting push still works");
+    let one_too_many = blobs.insert_ops(&mk(700_000, 32));
+    assert!(
+        one_too_many.is_err(),
+        "and the cap is still enforced immediately after"
+    );
 }
 
 /// Test helper: fresh app + authenticated session for a fixed key.
@@ -533,4 +619,151 @@ async fn operation_id_collisions_stay_scoped_per_account() {
     assert_eq!(rows_b.len(), 1);
     assert_eq!(rows_a[0].hlc, a.hlc);
     assert_eq!(rows_b[0].hlc, b.hlc);
+}
+
+/// SYNC-4: the pull byte budget is the smallest binding limit, and it
+/// is enforced by the relay.
+///
+/// Before this, the caps were incoherent as a product — 500 ops x 256 KiB
+/// sealed is ~167 MiB of *legitimate* response — so no single ceiling
+/// could be right, the 4 MiB `MAX_RESPONSE_BYTES` was referenced only by
+/// a text validator, and `MAX_PULL_BYTES` was dead code whose definition
+/// was its only occurrence. The relay now stops filling a batch at
+/// `MAX_PULL_BYTES`, which makes the emitted response unconditionally
+/// within budget.
+#[tokio::test]
+async fn pull_response_never_exceeds_the_byte_budget() {
+    let (app, token) = authed_app().await;
+
+    // Store enough max-sealed ops that a 500-op page cannot fit in the
+    // budget. The push request cap (`MAX_REQUEST_BYTES`, 2 MiB) binds
+    // first, so a max-sealed op (~341 KiB base64) means ~5 per push;
+    // 42 ops ≈ 10 MiB stored, comfortably past the 8 MiB pull budget.
+    let sealed_len = wl_protocol::MAX_SEALED_BYTES;
+    let per_push = 5usize;
+    for batch in 0..9i64 {
+        let ops: Vec<_> = (0..per_push)
+            .map(|i| {
+                let n = batch * per_push as i64 + i as i64;
+                serde_json::json!({
+                    "operation_id": format!("op-{n}"),
+                    "hlc": format!("{:020}.{:05}.{:05}", 1_000_000 + n, 0, 1),
+                    "table": "goals",
+                    "record_id": format!("rec-{n}"),
+                    "sealed_b64": base64::engine::general_purpose::STANDARD
+                        .encode(vec![0u8; sealed_len]),
+                })
+            })
+            .collect();
+        let resp = post(
+            &app,
+            "/sync/push",
+            serde_json::json!({"ops": ops}).to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "push batch {batch} must be accepted");
+    }
+
+    // Now pull with the maximum limit the protocol allows.
+    let resp = post(
+        &app,
+        "/sync/pull",
+        serde_json::json!({
+            "since_hlc": "",
+            "since_op_id": "",
+            "limit": wl_protocol::MAX_BATCH_OPS,
+        })
+        .to_string(),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let text = body_text(resp).await;
+    // The serialized response must fit the budget the client will use to
+    // read it. This is the end-to-end assertion the plan asked for: the
+    // smallest binding limit, proven from the bytes on the wire.
+    assert!(
+        text.len() <= wl_protocol::MAX_PULL_BYTES,
+        "pull response was {} bytes, over the {}-byte budget",
+        text.len(),
+        wl_protocol::MAX_PULL_BYTES
+    );
+    assert!(
+        text.len() <= wl_protocol::MAX_RESPONSE_BYTES,
+        "response must also fit MAX_RESPONSE_BYTES"
+    );
+
+    let pulled: wl_protocol::PullResponse = serde_json::from_str(&text).unwrap();
+    // The budget truncated the page, so there IS more to pull and the
+    // client is told so.
+    assert!(
+        !pulled.exhausted,
+        "a truncated page must not claim exhausted"
+    );
+    // And pagination is lossless: the cursor is the last op included, so
+    // resuming returns strictly later ops.
+    let second = post(
+        &app,
+        "/sync/pull",
+        serde_json::json!({
+            "since_hlc": pulled.next_cursor,
+            "since_op_id": pulled.next_op_id,
+            "limit": wl_protocol::MAX_BATCH_OPS,
+        })
+        .to_string(),
+        Some(&token),
+    )
+    .await;
+    let page2: wl_protocol::PullResponse = serde_json::from_str(&body_text(second).await).unwrap();
+    assert!(!page2.ops.is_empty(), "resuming must return more ops");
+    let first_ids: std::collections::HashSet<_> =
+        pulled.ops.iter().map(|o| &o.operation_id).collect();
+    assert!(
+        page2
+            .ops
+            .iter()
+            .all(|o| !first_ids.contains(&o.operation_id)),
+        "the second page must not repeat the first"
+    );
+}
+
+/// SYNC-4: a page that fits the budget is returned whole and correctly
+/// reports exhaustion — the budget must not silently truncate ordinary
+/// traffic.
+#[tokio::test]
+async fn ordinary_pull_pages_are_not_truncated() {
+    let (app, token) = authed_app().await;
+    let ops: Vec<_> = (0..10i64)
+        .map(|i| {
+            serde_json::json!({
+                "operation_id": format!("op-{i}"),
+                "hlc": format!("{:020}.{:05}.{:05}", 1_000_000 + i, 0, 1),
+                "table": "goals",
+                "record_id": format!("rec-{i}"),
+                "sealed_b64": base64::engine::general_purpose::STANDARD
+                    .encode(vec![7u8; 256]),
+            })
+        })
+        .collect();
+    let resp = post(
+        &app,
+        "/sync/push",
+        serde_json::json!({"ops": ops}).to_string(),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = post(
+        &app,
+        "/sync/pull",
+        serde_json::json!({"since_hlc": "", "since_op_id": "", "limit": 100}).to_string(),
+        Some(&token),
+    )
+    .await;
+    let pulled: wl_protocol::PullResponse = serde_json::from_str(&body_text(resp).await).unwrap();
+    assert_eq!(pulled.ops.len(), 10, "all 10 ops must come back");
+    assert!(pulled.exhausted, "a short page means nothing remains");
 }

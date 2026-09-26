@@ -4,12 +4,16 @@ use super::StoreError;
 
 /// Embedded migration runner (no C API dependency — keeps the crate
 /// free of build-time tooling; migrations are plain SQL files).
-const MIGRATIONS: &[&str] = &[
+///
+/// `pub` so tests can assert against `MIGRATIONS.len()` instead of a
+/// hand-copied integer that silently rots every time a migration lands.
+pub const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_sync_lww.sql"),
     include_str!("migrations/0003_settings_hlc.sql"),
     include_str!("migrations/0004_hlc_zero_backfill.sql"),
     include_str!("migrations/0005_record_heads.sql"),
+    include_str!("migrations/0006_identity_singleton.sql"),
 ];
 
 pub fn run(conn: &Connection) -> Result<(), StoreError> {

@@ -274,32 +274,51 @@ impl<'a> Engine<'a> {
     }
 
     /// Estimated minutes of the current execution unit.
+    ///
+    /// Self-heals a progressive directive whose phase rows went missing
+    /// (CORE-6). This used to return
+    /// `Invalid("current phase missing")`, which broke `activate_next`,
+    /// `complete` and the HUD with no way forward — the directive could
+    /// neither be run nor requeued. `ensure_phases` rebuilds the rows
+    /// deterministically from the directive's own estimate and
+    /// replicates the repair, so the only remaining failure is a
+    /// directive genuinely too short to split, whose error now names
+    /// the remedy.
     fn current_phase_minutes(&self, d: &Directive) -> Result<i64, EngineError> {
-        if d.uses_progressive_activation() {
-            let minutes = self
-                .repos
-                .conn
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT minutes FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
-                    rusqlite::params![d.id, d.progressive_step],
-                    |r| r.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(StoreError::Sqlite)?;
-            minutes.ok_or_else(|| StoreError::Invalid("current phase missing".into()).into())
-        } else {
-            Ok(d.estimated_minutes)
+        if !d.uses_progressive_activation() {
+            return Ok(d.estimated_minutes);
         }
+        let minutes = self
+            .repos
+            .lock_conn()
+            .query_row(
+                "SELECT minutes FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
+                rusqlite::params![d.id, d.progressive_step],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        if let Some(minutes) = minutes {
+            return Ok(minutes);
+        }
+        let rebuilt = self.repos.ensure_phases(&d.id, self.identity)?;
+        rebuilt
+            .into_iter()
+            .find(|p| p.step == d.progressive_step)
+            .map(|p| p.minutes)
+            .ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "directive {} is corrupt: no phase {} after rebuild — reschedule it",
+                    d.id, d.progressive_step
+                ))
+                .into()
+            })
     }
 
     fn ensure_milestone_active(&self, milestone_id: &str) -> Result<(), EngineError> {
         let m = self
             .repos
-            .conn
-            .lock()
-            .unwrap()
+            .lock_conn()
             .query_row(
                 "SELECT status FROM milestones WHERE id = ?1",
                 [milestone_id],
@@ -322,9 +341,7 @@ impl<'a> Engine<'a> {
     fn maybe_complete_milestone(&self, milestone_id: &str) -> Result<(), EngineError> {
         let remaining: i64 = self
             .repos
-            .conn
-            .lock()
-            .unwrap()
+            .lock_conn()
             .query_row(
                 "SELECT COUNT(*) FROM directives WHERE milestone_id = ?1
                  AND state IN ('queued', 'active', 'blocked')",

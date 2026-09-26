@@ -3,6 +3,9 @@
 //! The relay stores only: public key, opaque ciphertext, routing
 //! headers, HLC text. It can never read payload contents.
 
+#[cfg(feature = "sqlite")]
+use wl_core::poison::LockRecover;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[cfg(feature = "sqlite")]
@@ -89,6 +92,12 @@ pub mod sqlite_backend {
     /// otherwise fill the disk one push at a time — the push handler
     /// also caps ops-per-request and bytes-per-op).
     const OPS_PER_ACCOUNT_CAP: i64 = 100_000;
+    /// Ops per committed chunk (SYNC-1). The store has one write mutex,
+    /// so this bounds how long a single push can convoy concurrent pulls.
+    /// Sized well above the protocol's per-request op cap
+    /// (`wl_protocol::MAX_BATCH_OPS`) so an ordinary client push still
+    /// commits exactly once; only oversized pushes split.
+    pub(crate) const INSERT_CHUNK_SIZE: usize = 128;
 
     pub struct SqliteStore {
         conn: Mutex<Connection>,
@@ -166,7 +175,7 @@ pub mod sqlite_backend {
 
     impl BlobStore for SqliteStore {
         fn register_account(&self, public_key: &str) -> Result<(), StoreError> {
-            let conn = self.conn.lock().expect("store mutex");
+            let conn = self.conn.lock_recover();
             let changed = conn.execute(
                 "INSERT OR IGNORE INTO accounts (public_key, created_at) VALUES (?1, ?2)",
                 rusqlite::params![public_key, now_ms()],
@@ -185,7 +194,7 @@ pub mod sqlite_backend {
         }
 
         fn account_exists(&self, public_key: &str) -> Result<bool, StoreError> {
-            let conn = self.conn.lock().expect("store mutex");
+            let conn = self.conn.lock_recover();
             let n: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM accounts WHERE public_key = ?1",
                 [public_key],
@@ -195,46 +204,73 @@ pub mod sqlite_backend {
         }
 
         fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError> {
-            let mut conn = self.conn.lock().expect("store mutex");
-            let tx = conn.transaction()?;
-            // Per-account quota inside the same transaction (the store
-            // mutex serializes writers, so the check-and-insert is
-            // atomic on this backend).
-            if let Some(first) = ops.first() {
-                let held: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM ops WHERE account = ?1",
-                    [&first.account],
-                    |r| r.get(0),
-                )?;
-                // Multi-account batches are rejected at the HTTP layer;
-                // the store tolerates them by quota-checking the first.
-                if held + ops.len() as i64 > OPS_PER_ACCOUNT_CAP {
-                    return Err(StoreError::OpsQuota);
-                }
-            }
+            // SYNC-1: commit in chunks so a large push does not hold the
+            // single write mutex (and one SQLite transaction) across the
+            // whole batch. The store has exactly one write lock, so a
+            // 500-op push previously convoyed every concurrent pull for
+            // the duration. Chunking bounds the worst-case stall to
+            // CHUNK_SIZE ops while keeping the lock released between
+            // chunks.
+            //
+            // Quota atomicity is preserved: the cap is re-checked
+            // *inside every chunk's transaction* against a live COUNT,
+            // and the count only grows, so a batch that would exceed the
+            // cap still fails on the first chunk that crosses it — with
+            // the already-committed prefix durably stored. That is the
+            // intended trade: partial progress is retryable (ops are
+            // idempotent via `ON CONFLICT ... DO NOTHING`, and a retry
+            // reports them as duplicates), whereas a single 20k-op
+            // transaction that rolls back stores nothing and re-does all
+            // the work. Idempotence per op is unchanged.
             let mut out = PushOutcome::default();
-            for op in ops {
-                let changed = tx.execute(
-                    "INSERT INTO ops
-                        (operation_id, account, hlc, table_name, record_id, sealed)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(account, operation_id) DO NOTHING",
-                    rusqlite::params![
-                        op.operation_id,
-                        op.account,
-                        op.hlc,
-                        op.table,
-                        op.record_id,
-                        op.sealed
-                    ],
-                )?;
-                if changed > 0 {
-                    out.accepted.push(op.operation_id.clone());
-                } else {
-                    out.duplicates.push(op.operation_id.clone());
+            for chunk in ops.chunks(INSERT_CHUNK_SIZE) {
+                let mut conn = self.conn.lock_recover();
+                let tx = conn.transaction()?;
+                // Per-account quota inside the same transaction (the
+                // store mutex serializes writers, so the
+                // check-and-insert is atomic on this backend).
+                if let Some(first) = chunk.first() {
+                    let held: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM ops WHERE account = ?1",
+                        [&first.account],
+                        |r| r.get(0),
+                    )?;
+                    // Multi-account batches are rejected at the HTTP
+                    // layer; the store tolerates them by quota-checking
+                    // the first.
+                    if held + chunk.len() as i64 > OPS_PER_ACCOUNT_CAP {
+                        // Commit the prefix that already landed, then
+                        // report the cliff. Dropping it would discard
+                        // acknowledged work.
+                        tx.commit()?;
+                        return Err(StoreError::OpsQuota);
+                    }
                 }
+                for op in chunk {
+                    let changed = tx.execute(
+                        "INSERT INTO ops
+                            (operation_id, account, hlc, table_name, record_id, sealed)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(account, operation_id) DO NOTHING",
+                        rusqlite::params![
+                            op.operation_id,
+                            op.account,
+                            op.hlc,
+                            op.table,
+                            op.record_id,
+                            op.sealed
+                        ],
+                    )?;
+                    if changed > 0 {
+                        out.accepted.push(op.operation_id.clone());
+                    } else {
+                        out.duplicates.push(op.operation_id.clone());
+                    }
+                }
+                tx.commit()?;
+                // Guard drops here: the mutex is released between chunks
+                // so a concurrent pull can interleave.
             }
-            tx.commit()?;
             Ok(out)
         }
 
@@ -245,7 +281,7 @@ pub mod sqlite_backend {
             since_op_id: &str,
             limit: u32,
         ) -> Result<Vec<StoredOp>, StoreError> {
-            let conn = self.conn.lock().expect("store mutex");
+            let conn = self.conn.lock_recover();
             let mut stmt = if since_hlc.is_empty() {
                 conn.prepare(
                     "SELECT operation_id, account, hlc, table_name, record_id, sealed
@@ -305,10 +341,19 @@ pub mod postgres_backend {
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
 
+    /// Embedded migrations, applied in order on every boot. Each file is
+    /// individually idempotent so replay is safe without a version table.
+    const MIGRATIONS: &[&str] = &[
+        include_str!("../migrations/0001_init.sql"),
+        include_str!("../migrations/0002_pull_index.sql"),
+    ];
+
     /// Same registration cap as the SQLite backend (see there).
     const ACCOUNT_CAP: i64 = 10_000;
     /// Same per-account op cap as the SQLite backend (see there).
     const OPS_PER_ACCOUNT_CAP: i64 = 100_000;
+    /// Same chunk size as the SQLite backend (see there).
+    pub(crate) const INSERT_CHUNK_SIZE: usize = 128;
 
     pub struct PostgresStore {
         pool: PgPool,
@@ -337,13 +382,15 @@ pub mod postgres_backend {
 
         fn migrate(&self) -> Result<(), StoreError> {
             self.rt.block_on(async {
-                // Multi-statement script (it ends with the idempotent
-                // legacy-PK upgrade): raw_sql batches it; a prepared
-                // query() would reject multiple statements.
+                // Multi-statement scripts (0001 ends with the idempotent
+                // legacy-PK upgrade): raw_sql batches them; a prepared
+                // query() would reject multiple statements. Both files
+                // are themselves idempotent, so replaying the list on
+                // every boot is safe and needs no version table.
                 let mut tx = self.pool.begin().await?;
-                sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
-                    .execute(&mut *tx)
-                    .await?;
+                for sql in MIGRATIONS {
+                    sqlx::raw_sql(sql).execute(&mut *tx).await?;
+                }
                 tx.commit().await?;
                 Ok::<_, StoreError>(())
             })
@@ -396,38 +443,46 @@ pub mod postgres_backend {
 
         fn insert_ops(&self, ops: &[StoredOp]) -> Result<PushOutcome, StoreError> {
             self.rt.block_on(async {
-                let mut tx = self.pool.begin().await?;
-                if let Some(first) = ops.first() {
-                    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ops WHERE account = $1")
-                        .bind(&first.account)
-                        .fetch_one(&mut *tx)
-                        .await?;
-                    if row.0 + ops.len() as i64 > OPS_PER_ACCOUNT_CAP {
-                        return Err(StoreError::OpsQuota);
-                    }
-                }
+                // SYNC-1: same chunked-commit contract as the SQLite
+                // backend — the quota re-check runs inside every chunk's
+                // transaction against a live COUNT, and the committed
+                // prefix is retained when the cap trips. See the SQLite
+                // `insert_ops` for the full rationale.
                 let mut out = PushOutcome::default();
-                for op in ops {
-                    let res = sqlx::query(
-                        "INSERT INTO ops (operation_id, account, hlc, table_name, record_id, sealed)
-                         VALUES ($1, $2, $3, $4, $5, $6)
-                         ON CONFLICT (account, operation_id) DO NOTHING",
-                    )
-                    .bind(&op.operation_id)
-                    .bind(&op.account)
-                    .bind(&op.hlc)
-                    .bind(&op.table)
-                    .bind(&op.record_id)
-                    .bind(&op.sealed)
-                    .execute(&mut *tx)
-                    .await?;
-                    if res.rows_affected() > 0 {
-                        out.accepted.push(op.operation_id.clone());
-                    } else {
-                        out.duplicates.push(op.operation_id.clone());
+                for chunk in ops.chunks(INSERT_CHUNK_SIZE) {
+                    let mut tx = self.pool.begin().await?;
+                    if let Some(first) = chunk.first() {
+                        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ops WHERE account = $1")
+                            .bind(&first.account)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                        if row.0 + chunk.len() as i64 > OPS_PER_ACCOUNT_CAP {
+                            tx.commit().await?;
+                            return Err(StoreError::OpsQuota);
+                        }
                     }
+                    for op in chunk {
+                        let res = sqlx::query(
+                            "INSERT INTO ops (operation_id, account, hlc, table_name, record_id, sealed)
+                             VALUES ($1, $2, $3, $4, $5, $6)
+                             ON CONFLICT (account, operation_id) DO NOTHING",
+                        )
+                        .bind(&op.operation_id)
+                        .bind(&op.account)
+                        .bind(&op.hlc)
+                        .bind(&op.table)
+                        .bind(&op.record_id)
+                        .bind(&op.sealed)
+                        .execute(&mut *tx)
+                        .await?;
+                        if res.rows_affected() > 0 {
+                            out.accepted.push(op.operation_id.clone());
+                        } else {
+                            out.duplicates.push(op.operation_id.clone());
+                        }
+                    }
+                    tx.commit().await?;
                 }
-                tx.commit().await?;
                 Ok::<_, StoreError>(out)
             })
         }

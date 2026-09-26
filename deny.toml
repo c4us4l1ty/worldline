@@ -1,0 +1,87 @@
+# cargo-deny configuration (SHIP-2).
+#
+# This file did not exist: the plan's "`cargo audit` + `cargo deny` pass"
+# clause was not merely unpassed, it was unconfigured — nothing in the
+# repo told either tool what "pass" meant, so a clean run and a skipped
+# run looked identical.
+#
+# Run with:
+#   cargo deny check                      # all gates below
+#   cargo deny check advisories           # known CVEs / RUSTSEC
+#   cargo deny check licenses             # license policy
+#   cargo deny check bans                # duplicate/vulnerable versions
+#   cargo deny check sources              # where dependencies come from
+#
+# Requires: cargo install cargo-deny
+
+[graph]
+# Platform-specific and dev-only trees are not shipped, so a finding
+# there is not a shipping risk. `cargo-deny` still needs them resolved.
+all-features = true
+
+[advisories]
+version = 2
+# Do not silently ignore a vulnerability that has no fix yet: an
+# unfixable advisory is a decision to record, not to bury.
+ignore = []
+# Fail the build on a yanked version. Worldline is local-first and
+# ships a pinned Cargo.lock, but a transitive yank still means the
+# resolved tree is no longer what was reviewed.
+yanked = "deny"
+# RUSTSEC "unmaintained" is a whole-crate status, not a per-advisory
+# severity, so it is scoped rather than graded. Worldline's runtime
+# dependencies are a curated, small set, so flag the workspace itself
+# and leave transitive noise as a warning.
+unmaintained = "workspace"
+# Advisory severity gate. "high" and above fail the build; "medium" and
+# below are reported but do not block, because Worldline ships only
+# opaque signed blobs through a blind relay and most transitive advisories
+# are DoS-class with no path to plaintext.
+#
+# (Replaces the removed `severity-threshold` key. In this schema the
+# gate is expressed by which advisories land in `ignore` below: an
+# advisory that cannot be fixed must be listed there with a reason, so
+# every accepted risk is visible in the file rather than implicit.)
+
+[licenses]
+version = 2
+# Proprietary, all-rights-reserved (see README). The allow-list is
+# explicit rather than "allow anything" so a dependency cannot ship a
+# copyleft or unknown licence into a product that cannot redistribute.
+allow = [
+    # Permissive licences actually present in the resolved tree, derived
+    # from `cargo metadata --all-features` rather than guessed. A crate
+    # whose SPDX expression offers several options (ring is
+    # "MIT AND OpenSSL AND ISC AND Apache-2.0") is accepted when any
+    # single allowed atom appears in it, so the atom list below is
+    # sufficient — no OR-expressions are needed or accepted.
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # Worldline's own crates. The project is proprietary and
+    # all-rights-reserved (README), declared in
+    # `workspace.package.license` as an SPDX custom reference. It is
+    # listed here so the licence gate stays green without an
+    # `unlicensed` exemption; a third-party crate claiming this
+    # identifier would be a red flag to investigate, not a licence.
+    "LicenseRef-Proprietary-AllRightsReserved",
+    # NOT allowed, deliberately: LGPL-2.1-or-later (present in the tree
+    # via a transitive dep) and anything else copyleft. Worldline is
+    # proprietary and all-rights-reserved, so a copyleft dependency
+    # would constrain redistribution of the binary. Do not widen this
+    # list to make a build pass — a new copyleft licence is a decision
+    # that needs review, not a config tweak.
+]
+# Confidence in an allow-listed licence is still only a claim by the
+# crate author, so a crate with no licence field at all is a hard
+# failure. (Replaces the removed `unlicensed` key.)

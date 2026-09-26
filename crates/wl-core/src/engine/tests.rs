@@ -362,3 +362,130 @@ fn engine_rejects_malformed_dates_before_any_write() {
         .bail_out("not-a-date", BailoutReason::EnergyDepletion, None)
         .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// CORE-6: a progressive directive with missing phase rows self-heals
+// ---------------------------------------------------------------------------
+
+/// Builds a 2-phase, 60-minute progressive directive.
+fn progressive_directive(r: &Repos, identity: Option<&Identity>) -> Directive {
+    let g = r.create_goal("Long haul", None, None, identity).unwrap();
+    let m = r
+        .create_milestone(&g.id, "Phase work", None, 0, identity)
+        .unwrap();
+    r.create_directive(
+        &m.id,
+        "Sixty minutes of work",
+        None,
+        60,
+        2,
+        "2099-01-01",
+        &[("Warm up".into(), None, 20), ("Push".into(), None, 40)],
+        identity,
+    )
+    .unwrap()
+}
+
+#[test]
+fn missing_phase_rows_are_rebuilt_from_the_estimate() {
+    let r = setup_full();
+    let d = progressive_directive(&r, None);
+    // Simulate the corruption: the phase rows vanish (truncated pull,
+    // partial write, hand-edited dir) but the directive keeps
+    // progressive_total = 2.
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM directive_phases WHERE directive_id = ?1",
+            [&d.id],
+        )
+        .unwrap();
+    assert!(r.phases_for_directive(&d.id).unwrap().is_empty());
+
+    // The engine must now be able to read the current phase again
+    // instead of failing closed with "current phase missing".
+    let reparsed = r.directive(&d.id).unwrap().unwrap();
+    assert!(reparsed.uses_progressive_activation());
+    let e = Engine::new(&r, None);
+    e.activate_next("2099-01-01")
+        .expect("activate must self-heal phases");
+    let now = r.active_directive().unwrap().unwrap();
+    assert_eq!(now.progressive_step, 1);
+    e.complete(&now.id)
+        .expect("complete must survive the repair");
+}
+
+#[test]
+fn rebuilt_phases_sum_to_the_estimate() {
+    let r = setup_full();
+    let d = progressive_directive(&r, None);
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM directive_phases WHERE directive_id = ?1",
+            [&d.id],
+        )
+        .unwrap();
+
+    let rebuilt = r.ensure_phases(&d.id, None).unwrap();
+    assert_eq!(rebuilt.len(), 2);
+    let sum: i64 = rebuilt.iter().map(|p| p.minutes).sum();
+    assert_eq!(sum, d.estimated_minutes, "repair must not lose minutes");
+    assert!(rebuilt.iter().all(|p| p.minutes > 0));
+    // First step active, rest pending — same convention as create.
+    assert_eq!(rebuilt[0].state, PhaseState::Active);
+    assert_eq!(rebuilt[1].state, PhaseState::Pending);
+}
+
+#[test]
+fn ensure_phases_is_idempotent_and_preserves_good_rows() {
+    let r = setup_full();
+    let d = progressive_directive(&r, None);
+    let before = r.phases_for_directive(&d.id).unwrap();
+    // Complete rows must be returned untouched — no rewrite, no churn.
+    let after = r.ensure_phases(&d.id, None).unwrap();
+    assert_eq!(before.len(), after.len());
+    assert_eq!(
+        before.iter().map(|p| p.minutes).collect::<Vec<_>>(),
+        after.iter().map(|p| p.minutes).collect::<Vec<_>>(),
+        "a healthy directive must not be rewritten"
+    );
+}
+
+#[test]
+fn a_directive_too_short_to_split_fails_with_an_actionable_error() {
+    let r = setup_full();
+    let g = r.create_goal("Impossible", None, None, None).unwrap();
+    let m = r
+        .create_milestone(&g.id, "Too many steps", None, 0, None)
+        .unwrap();
+    // 5 minutes across 10 phases: the repair cannot invent time.
+    let d = r
+        .create_directive(
+            &m.id,
+            "Absurd",
+            None,
+            5,
+            10,
+            "2099-01-01",
+            &vec![("s".into(), None, 1); 10],
+            None,
+        )
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM directive_phases WHERE directive_id = ?1",
+            [&d.id],
+        )
+        .unwrap();
+    let err = r.ensure_phases(&d.id, None).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("corrupt") && msg.contains("reschedule"),
+        "error must name the remedy, got: {msg}"
+    );
+}

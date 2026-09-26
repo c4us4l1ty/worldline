@@ -12,8 +12,43 @@ pub const MAX_SEALED_BYTES: usize = 256 * 1024;
 pub const MAX_SEALED_B64: usize = MAX_SEALED_BYTES.div_ceil(3) * 4;
 pub const MAX_HEADER_LEN: usize = 128;
 pub const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_PULL_BYTES: usize = 1024 * 1024;
+
+/// The authoritative pull-response byte budget (SYNC-4).
+///
+/// This used to be two constants that no code agreed on: a 4 MiB
+/// `MAX_RESPONSE_BYTES` that only a text validator ever referenced, and
+/// a 1 MiB `MAX_PULL_BYTES` whose *definition was its only occurrence*
+/// repo-wide. Meanwhile the client read bodies with a hardcoded 16 MiB
+/// and the relay enforced neither, so the "limit" was fiction in three
+/// directions.
+///
+/// The deeper problem was that the caps were mutually incoherent as a
+/// product: `MAX_BATCH_OPS (500) * MAX_SEALED_B64 (~341 KiB)` implies a
+/// legitimate pull response of ~167 MiB. Any single byte ceiling
+/// therefore had to be wrong for some input. The fix makes the **byte
+/// budget the real limiter** and treats the op count as a secondary
+/// ceiling:
+///
+/// * The relay fills a pull batch until *either* `MAX_BATCH_OPS` ops
+///   *or* `MAX_PULL_BYTES` is reached, so a response can never exceed
+///   the budget regardless of what a client asks for.
+/// * The client reads with exactly this budget, so it can never be
+///   truncated by its own reader being smaller than the server's
+///   ceiling.
+///
+/// 8 MiB comfortably admits a full 500-op batch of realistic ops
+/// (hundreds of bytes each) while bounding the pathological case.
+pub const MAX_PULL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Largest response the relay will ever emit, across every route. Set
+/// equal to [`MAX_PULL_BYTES`] deliberately: the pull is the only route
+/// whose size scales with stored data, so it defines the ceiling.
+pub const MAX_RESPONSE_BYTES: usize = MAX_PULL_BYTES;
+
+/// Per-op JSON envelope in a pull response (`operation_id`, `hlc`,
+/// `table`, `record_id`, base64 padding, punctuation). Used to convert
+/// the byte budget into an op-count ceiling when filling a batch.
+pub const MAX_OP_ENVELOPE_BYTES: usize = 512;
 
 pub fn valid_hlc(hlc: &str) -> bool {
     let bytes = hlc.as_bytes();

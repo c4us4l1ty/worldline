@@ -9,6 +9,8 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
+use crate::poison::LockRecover;
+
 /// Wall-clock offset applied to `SystemTime::now()` (nanoseconds).
 /// Used in tests to simulate clock drift; always zero in production.
 pub struct Hlc {
@@ -80,7 +82,7 @@ impl Hlc {
     /// stay strictly monotonic even on coarse wall clocks during bulk
     /// enqueues (E6 — `wrapping_add` used to regress mid-burst).
     pub fn now(&self, device: u16) -> HlcTimestamp {
-        let mut inner = self.inner.lock().expect("HLC mutex poisoned");
+        let mut inner = self.inner.lock_recover();
         let wall = self.wall_nanos();
         if wall > inner.last_wall_nanos {
             inner.last_wall_nanos = wall;
@@ -101,7 +103,7 @@ impl Hlc {
     /// Same overflow rule as [`Hlc::now`]: never wraps, steps physical
     /// forward instead.
     pub fn observe(&self, remote: &HlcTimestamp, device: u16) -> HlcTimestamp {
-        let mut inner = self.inner.lock().expect("HLC mutex poisoned");
+        let mut inner = self.inner.lock_recover();
         let wall = self.wall_nanos();
         let pt = wall.max(inner.last_wall_nanos).max(remote.physical);
         let next = if pt == inner.last_wall_nanos && pt == remote.physical {
@@ -130,7 +132,7 @@ impl Hlc {
 
     /// Current clock head (for persistence across restarts — E5).
     pub fn head(&self) -> (u64, u16) {
-        let inner = self.inner.lock().expect("HLC mutex poisoned");
+        let inner = self.inner.lock_recover();
         (inner.last_wall_nanos, inner.counter)
     }
 
@@ -139,7 +141,7 @@ impl Hlc {
     /// wall clock after restart cannot issue timestamps older than
     /// pre-restart ops.
     pub fn restore(&self, last_wall_nanos: u64, counter: u16) {
-        let mut inner = self.inner.lock().expect("HLC mutex poisoned");
+        let mut inner = self.inner.lock_recover();
         if last_wall_nanos > inner.last_wall_nanos
             || (last_wall_nanos == inner.last_wall_nanos && counter > inner.counter)
         {

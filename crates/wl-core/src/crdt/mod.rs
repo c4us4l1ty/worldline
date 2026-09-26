@@ -111,6 +111,17 @@ impl TableState {
             Ok(t) => t,
             Err(_) => return false, // malformed op: ignore deterministically
         };
+        // A field-less non-tombstone op is malformed (crafted or truncated).
+        // Reject it BEFORE any mutation (CORE-5): the old order inserted
+        // `last_op` and cleared the tombstone and only then returned
+        // false, so a poison op advanced the record's merge head and
+        // un-deleted the row without ever writing it back — which both
+        // corrupted the merge memory and let a later legitimate op be
+        // rejected as stale. `apply` must stay a total function so sync
+        // can quarantine poison ops without wedging the cycle.
+        if !op.tombstone && op.fields.is_none() {
+            return false;
+        }
         let prior = self.last_op.get(&op.record_id);
         let accept = match prior {
             Some((prev_ts, prev_dev, prev_op)) => {
@@ -139,13 +150,8 @@ impl TableState {
             };
             if resurrect_ok {
                 self.tombstones.remove(&op.record_id);
-                // A field-less non-tombstone op is malformed (crafted or
-                // truncated): ignore deterministically instead of
-                // panicking — `apply` must stay a total function so sync
-                // can quarantine poison ops without wedging the cycle.
-                let Some(fields) = op.fields.clone() else {
-                    return false;
-                };
+                // Validated non-`None` above.
+                let fields = op.fields.clone().unwrap_or_default();
                 self.rows.insert(op.record_id.clone(), fields);
             }
         }
@@ -357,6 +363,84 @@ mod tests {
             serde_json::json!({"x": 1}),
         );
         assert!(!s.apply(&bad));
+        assert!(s.rows.is_empty());
+    }
+
+    /// CORE-5: a field-less upsert is rejected **without mutating
+    /// anything**. The old order inserted `last_op` and cleared the
+    /// tombstone first, so the poison op both corrupted the merge head
+    /// and resurrected a deleted row.
+    #[test]
+    fn fieldless_upsert_is_rejected_without_mutating_state() {
+        let mut s = TableState::new();
+        // Real row, then a real delete of it.
+        assert!(s.apply(&op(
+            "1",
+            "goals",
+            "g1",
+            "100.0.1",
+            1,
+            serde_json::json!({"title": "real"}),
+        )));
+        assert!(s.apply(&tomb("2", "goals", "g1", "200.0.2", 1)));
+        assert!(s.tombstones.contains_key("g1"));
+        assert!(!s.rows.contains_key("g1"));
+        let head_before = s.last_op["g1"].clone();
+
+        // A field-less (malformed) upsert at a NEWER timestamp. It must
+        // be rejected outright: no head advance, no tombstone cleared.
+        let poison = CrdtOp {
+            operation_id: "3".into(),
+            table: "goals".into(),
+            record_id: "g1".into(),
+            hlc: "300.0.3".into(),
+            device: 1,
+            fields: None,
+            tombstone: false,
+        };
+        assert!(!s.apply(&poison), "field-less upsert must not apply");
+        assert_eq!(
+            s.last_op["g1"], head_before,
+            "poison op must not advance the merge head"
+        );
+        assert!(
+            s.tombstones.contains_key("g1"),
+            "poison op must not clear the tombstone"
+        );
+        assert!(
+            !s.rows.contains_key("g1"),
+            "poison op must not resurrect the deleted row"
+        );
+
+        // The follow-on consequence: a later LEGITIMATE op with a
+        // timestamp between the delete and the poison op must still win.
+        // Pre-fix the poison op's head advance made this reject as stale.
+        assert!(s.apply(&op(
+            "4",
+            "goals",
+            "g1",
+            "250.0.4",
+            1,
+            serde_json::json!({"title": "resurrected"}),
+        )));
+        assert_eq!(s.rows["g1"]["title"], "resurrected");
+    }
+
+    /// CORE-5 companion: a well-formed tombstone legitimately has no
+    /// `fields`, so the new up-front guard must not reject tombstones.
+    #[test]
+    fn tombstones_without_fields_still_apply() {
+        let mut s = TableState::new();
+        assert!(s.apply(&op(
+            "1",
+            "goals",
+            "g1",
+            "100.0.1",
+            1,
+            serde_json::json!({"title": "real"}),
+        )));
+        assert!(s.apply(&tomb("2", "goals", "g1", "200.0.2", 1)));
+        assert!(s.tombstones.contains_key("g1"));
         assert!(s.rows.is_empty());
     }
 

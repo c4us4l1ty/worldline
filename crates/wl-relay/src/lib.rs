@@ -285,21 +285,58 @@ async fn pull(
     .await
     {
         Ok(stored) => {
-            let exhausted = (stored.len() as u32) < limit;
-            let ops: Vec<wl_protocol::PushOp> = stored
-                .iter()
-                .map(|o| wl_protocol::PushOp {
+            // SYNC-4: enforce the pull byte budget here, at the only
+            // place that can. `limit` alone cannot bound the response:
+            // 500 ops of 256 KiB each is ~167 MiB, so an op-count cap
+            // alone is not a size limit. Ops are appended until the
+            // budget is reached, which makes the emitted response
+            // unconditionally within `MAX_PULL_BYTES`.
+            //
+            // Truncating here is pagination-safe: the cursor is taken
+            // from the last op actually *included*, so the next pull
+            // resumes exactly where this one stopped and nothing is
+            // skipped. `exhausted` is false whenever we stopped early,
+            // which is what tells the client to keep pulling.
+            let mut ops: Vec<wl_protocol::PushOp> = Vec::new();
+            let mut used = 0usize;
+            let mut last_included: Option<&StoredOp> = None;
+            for o in &stored {
+                // Account for the ENCODED op, not the raw ciphertext:
+                // base64 inflates by 4/3, so measuring `sealed.len()`
+                // under-counts by a third and lets the response blow
+                // straight through the budget. The routing headers are
+                // counted too, and `MAX_OP_ENVELOPE_BYTES` covers JSON
+                // punctuation plus worst-case string escaping.
+                let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&o.sealed);
+                let cost = sealed_b64.len()
+                    + o.operation_id.len()
+                    + o.hlc.len()
+                    + o.table.len()
+                    + o.record_id.len()
+                    + wl_protocol::MAX_OP_ENVELOPE_BYTES;
+                if used + cost > wl_protocol::MAX_PULL_BYTES {
+                    break;
+                }
+                used += cost;
+                last_included = Some(o);
+                ops.push(wl_protocol::PushOp {
                     operation_id: o.operation_id.clone(),
                     hlc: o.hlc.clone(),
                     table: o.table.clone(),
                     record_id: o.record_id.clone(),
-                    sealed_b64: base64::engine::general_purpose::STANDARD.encode(&o.sealed),
-                })
-                .collect();
-            // Composite cursor: (hlc, operation_id) of the last op.
-            // Same-HLC ties are advanced by the op id, so no op is
-            // unreachable no matter how many share a timestamp.
-            let (next_cursor, next_op_id) = match stored.last() {
+                    sealed_b64,
+                });
+            }
+            // `exhausted` means "nothing remains after this batch", so the
+            // client can stop pulling. It is true only when we included
+            // everything the store returned AND the store returned fewer
+            // ops than we asked for. Byte-truncation (`ops.len() <
+            // stored.len()`) and a full page both mean "keep going".
+            let exhausted = ops.len() == stored.len() && (stored.len() as u32) < limit;
+            // Composite cursor: (hlc, operation_id) of the last op
+            // *included*. Same-HLC ties are advanced by the op id, so no
+            // op is unreachable no matter how many share a timestamp.
+            let (next_cursor, next_op_id) = match last_included {
                 Some(o) => (o.hlc.clone(), o.operation_id.clone()),
                 None => (req.since_hlc.clone(), req.since_op_id.clone()),
             };

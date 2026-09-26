@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 use wl_core::crypto::identity::Identity;
+use wl_core::poison::LockRecover;
 use wl_core::store::repo::Repos;
 
 use crate::vault::Vault;
@@ -64,7 +65,7 @@ impl AppState {
         &self,
         f: impl FnOnce(&Identity) -> Result<T, ShellError>,
     ) -> Result<T, ShellError> {
-        let guard = self.identity.lock().expect("identity mutex");
+        let guard = self.identity.lock_recover();
         match guard.as_ref() {
             Some(id) => f(id),
             None => Err(ShellError::Locked),
@@ -78,7 +79,7 @@ impl AppState {
         &self,
         f: impl FnOnce(Option<&Identity>) -> Result<T, ShellError>,
     ) -> Result<T, ShellError> {
-        let guard = self.identity.lock().expect("identity mutex");
+        let guard = self.identity.lock_recover();
         f(guard.as_ref())
     }
 }

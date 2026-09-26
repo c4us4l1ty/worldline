@@ -427,3 +427,112 @@ Locked decisions from the planning session are marked [approved].
       the OS-keychain gap in-product rather than implying protection
       that does not exist. `vault.rs`'s module header carried the same
       two errors and was corrected to match.
+
+## Implementation pass 2026-09-26 (SHELL-1, CORE-3…6, SYNC-1/3/4, SHIP-2/3)
+
+78. **Mutex poisoning recovers instead of failing the process** — the
+    single highest-severity fix in this pass. 65 sites across
+    `wl-core`, `wl-sync`, `wl-relay` and `wl-app` called
+    `lock().unwrap()`/`.expect(..)`, so one panicking writer made a
+    `Mutex` permanently unusable: the app, the relay, or the HLC (which
+    every row mutation touches) could never take it again, stranding
+    the user's data dir with no recovery path. New `wl-core::poison`
+    provides `LockRecover::lock_recover()` for plain state and
+    `lock_conn()` for the SQLite handle, which additionally rolls back a
+    half-open transaction left by a panicking writer. Poison is
+    deliberately **not** propagated as an error: a `Mutex<Connection>`
+    cannot manufacture a fresh connection, so every call site would
+    need a restart path for a condition strictly worse than continuing.
+    14 of the 65 sites were in the long-lived relay or the HLC hot path.
+
+79. **CRDT reject is now side-effect free** — `TableState::apply`
+    inserted the merge head and cleared the tombstone *before* checking
+    that a field-less upsert had any fields, then returned `false`. A
+    poison op therefore corrupted the merge memory and resurrected a
+    deleted row without writing it back, and the head advance made the
+    next *legitimate* op lose as stale. Validation is hoisted above all
+    mutation.
+
+80. **`identity_config` is a singleton** — migration `0006`. The old
+    `public_key` primary key let a restore with a different phrase append
+    a second identity, so `identity()`'s `LIMIT 1` was an arbitrary
+    pick and `set_mnemonic_verified` (a bare `UPDATE`) stamped the flag
+    onto every row. Now `id = 1 CHECK (id = 1)`, with duplicates
+    collapsed to the earliest row so an upgrading install keeps the
+    identity it already trusted.
+
+81. **Goals have a lifecycle; the plan no longer orphans the old goal** —
+    `GoalStatus` had no writer, so every goal stayed `active` forever and
+    `active_goal()` broke ties arbitrarily. Added `set_goal_status` +
+    `archive_other_active_goals`; `persist_plan` archives the superseded
+    goal, so the single-active invariant that already held for
+    directives now holds for goals.
+
+82. **A progressive directive with missing phase rows self-heals** — the
+    old `Invalid("current phase missing")` broke `activate_next`,
+    `complete` and the HUD with no way forward. `Repos::ensure_phases`
+    rebuilds the rows as `progressive_total` equal slices of
+    `estimated_minutes` (remainder to the last step, so the sum is exact)
+    through the normal write path, so the repair *replicates* rather than
+    silently diverging. Genuinely unsplittable directives still fail
+    closed, but the error names the remedy.
+
+83. **Relay push commits in chunks** — the store has one write mutex, so a
+    single transaction per batch convoyed every concurrent pull. Now
+    `INSERT_CHUNK_SIZE = 128`, chosen above `MAX_BATCH_OPS` so an
+    ordinary client push still commits once. The per-account quota is
+    re-checked inside *every* chunk against a live `COUNT`; crossing the
+    cap retains the committed prefix rather than discarding
+    acknowledged work (ops are idempotent, so a retry reports duplicates).
+
+84. **Relay feature selection is a build error** — `--no-default-features`
+    previously failed with a baffling `E0425: cannot find value 'blobs'`,
+    and `--features sqlite,postgres` silently selected SQLite while the
+    operator believed they had deployed Postgres. Both are now
+    `compile_error!`s that say what to type. Postgres also gained
+    migration `0002`: its pull index lacked the `operation_id` tail, so
+    every pull sorted the account's whole tail — a latency cliff the
+    SQLite dev path never showed.
+
+85. **The pull size budget is coherent and enforced** — the caps were
+    mutually inconsistent as a product (`500 ops × ~341 KiB` base64
+    implies a ~167 MiB *legitimate* response), which is why nothing was
+    enforced: `MAX_RESPONSE_BYTES` was referenced only by a text
+    validator and `MAX_PULL_BYTES` was dead code. `MAX_PULL_BYTES` (8 MiB)
+    is now authoritative, `MAX_RESPONSE_BYTES` is defined as it, the
+    relay stops filling a batch at the budget (cursor taken from the last
+    op *included*, so pagination stays lossless), and the client reads
+    with the same constant instead of a hand-picked 16 MiB.
+
+86. **`save_settings` validates `relay_url` at the write boundary** — this
+    closes a live SSRF path, not a tidiness gap: `save_settings` is also
+    reached by pull-apply, so a peer could replicate an `app_settings`
+    row carrying a `file://` or metadata-endpoint URL that the next sync
+    cycle would dial, bypassing the shell's pre-validation entirely.
+
+87. **An oversized CRDT op is rejected, not enqueued** — the relay 400s
+    any sealed op over 256 KiB, which does not merely reject it but makes
+    it *undrainable*: it sits in the outbox forever, every drain fails
+    the whole batch, and sync is wedged with no local remedy. The cap is
+    now enforced at enqueue, so the caller's row write rolls back in the
+    same transaction and the store never holds state it cannot replicate.
+
+88. **Supply chain is configured and green** — `deny.toml` did not exist,
+    so the `cargo audit`/`cargo deny` clause was unconfigured rather than
+    merely unpassed. Configuring it found two real problems: rustls
+    0.23.44 was vulnerable to RUSTSEC-2026-0285 (TLS 1.3 handshake
+    messages accepted across encryption-level boundaries; fixed by
+    0.23.45), and `bincode` was declared in two manifests while being
+    referenced by zero source files — removed rather than kept.
+
+89. **`workspace.package.license` is a real SPDX identifier** — was the
+    crates.io `UNLICENSED` placeholder, which is unparseable and made
+    `cargo deny` hard-fail all four first-party crates as `unlicensed`.
+    Now `LicenseRef-Proprietary-AllRightsReserved` (owner-approved);
+    same proprietary intent, but expressible to tooling.
+
+90. **The wasm size budget is a real guard** — `prune-dx-dist.sh` is a
+    staleness pruner and enforces no bytes; the plan had been treating it
+    as a size gate. New `scripts/check-dist-size.sh` fails the release
+    build when the wasm payload exceeds 1 MiB (current: 840 KB, 80% of
+    budget) and is wired into `build-ui.sh`. Verified in both directions.

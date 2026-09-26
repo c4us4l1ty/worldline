@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::RngCore;
+use wl_core::poison::LockRecover;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -87,7 +88,7 @@ impl AuthState {
         let nonce = hex::encode(nonce_bytes);
         let expires_at = now_secs() + CHALLENGE_TTL.as_secs() as i64;
         {
-            let mut challenges = self.challenges.lock().expect("auth mutex");
+            let mut challenges = self.challenges.lock_recover();
             // GC first so expired slots don't count against the caps.
             let now = now_secs();
             challenges.retain(|_, (_, e)| *e > now);
@@ -116,7 +117,7 @@ impl AuthState {
         signature: &[u8],
     ) -> Result<(String, i64), AuthError> {
         {
-            let challenges = self.challenges.lock().expect("auth mutex");
+            let challenges = self.challenges.lock_recover();
             let (expected_pk, stored_exp) = challenges.get(nonce).ok_or(AuthError::BadChallenge)?;
             if expected_pk != public_key || *stored_exp != expires_at {
                 return Err(AuthError::BadChallenge);
@@ -124,7 +125,7 @@ impl AuthState {
         }
         if expires_at <= now_secs() {
             // Consume the challenge either way (one-shot).
-            self.challenges.lock().expect("auth mutex").remove(nonce);
+            self.challenges.lock_recover().remove(nonce);
             return Err(AuthError::BadChallenge);
         }
 
@@ -141,14 +142,7 @@ impl AuthState {
 
         // Claim the verified challenge atomically. Concurrent verification
         // may both pass the signature check, but only one can mint a token.
-        if self
-            .challenges
-            .lock()
-            .expect("auth mutex")
-            .remove(nonce)
-            .is_none()
-            || expires_at <= now_secs()
-        {
+        if self.challenges.lock_recover().remove(nonce).is_none() || expires_at <= now_secs() {
             return Err(AuthError::BadChallenge);
         }
 
@@ -159,7 +153,7 @@ impl AuthState {
             self.counter.fetch_add(1, Ordering::Relaxed),
             uuid::Uuid::new_v4()
         );
-        let mut sessions = self.sessions.lock().expect("auth mutex");
+        let mut sessions = self.sessions.lock_recover();
         let now = now_secs();
         sessions.retain(|_, (_, e)| *e > now);
         let per_account = sessions.values().filter(|(pk, _)| pk == public_key).count();
@@ -180,7 +174,7 @@ impl AuthState {
         }
         let now = now_secs();
         let pk = {
-            let mut sessions = self.sessions.lock().expect("auth mutex");
+            let mut sessions = self.sessions.lock_recover();
             match sessions.get(token).cloned() {
                 Some((pk, exp)) => {
                     if exp <= now {
@@ -210,26 +204,20 @@ impl AuthState {
     /// Drops expired challenges/sessions.
     pub fn gc(&self) {
         let now = now_secs();
-        self.challenges
-            .lock()
-            .expect("auth mutex")
-            .retain(|_, (_, e)| *e > now);
+        self.challenges.lock_recover().retain(|_, (_, e)| *e > now);
         self.gc_sessions();
     }
 
     fn gc_sessions(&self) {
         let now = now_secs();
-        self.sessions
-            .lock()
-            .expect("auth mutex")
-            .retain(|_, (_, e)| *e > now);
+        self.sessions.lock_recover().retain(|_, (_, e)| *e > now);
     }
 
     /// Test support: force a session row to expired (TTLs are real
     /// wall-clock 1h; tests need the row dead NOW).
     #[doc(hidden)]
     pub fn expire_session_for_test(&self, token: &str) {
-        if let Some(entry) = self.sessions.lock().expect("auth mutex").get_mut(token) {
+        if let Some(entry) = self.sessions.lock_recover().get_mut(token) {
             entry.1 = 0;
         }
     }
@@ -237,10 +225,7 @@ impl AuthState {
     /// Test support: does a session row still exist (expired or not)?
     #[doc(hidden)]
     pub fn session_row_exists(&self, token: &str) -> bool {
-        self.sessions
-            .lock()
-            .expect("auth mutex")
-            .contains_key(token)
+        self.sessions.lock_recover().contains_key(token)
     }
 }
 
@@ -393,7 +378,7 @@ mod tests {
         let (pk, sk) = fresh_keypair();
         let (nonce, _) = auth.issue_challenge(&pk).unwrap();
         let expiry = now_secs();
-        auth.challenges.lock().unwrap().get_mut(&nonce).unwrap().1 = expiry;
+        auth.challenges.lock_recover().get_mut(&nonce).unwrap().1 = expiry;
         let sig = sk
             .sign(&wl_protocol::challenge_signing_payload(&nonce, expiry))
             .to_bytes();

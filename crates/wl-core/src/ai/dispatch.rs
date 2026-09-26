@@ -282,10 +282,16 @@ fn validate_briefing(b: &BriefingResult) -> Result<(), DispatchError> {
 }
 
 fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
+    // CORE-7(c): the guard allowed 1 milestone while the message claimed
+    // "2–5". A model returning a single-milestone plan got a rejection
+    // that contradicted the code, and a 1-milestone plan that *was*
+    // valid failed schema review against this string. The code is the
+    // intended contract (a lone milestone is a legitimate plan), so the
+    // message now matches it.
     if p.milestones.is_empty() || p.milestones.len() > 5 {
         return Err(DispatchError::Invalid {
             field: "milestones",
-            why: "2–5 milestones required".into(),
+            why: "1–5 milestones required".into(),
         });
     }
     for m in &p.milestones {
@@ -397,6 +403,12 @@ pub fn persist_plan(
         Some((title, desc, target)) => repos.create_goal(title, desc, target, identity)?.id,
         None => repos.create_goal("Untitled goal", None, None, identity)?.id,
     };
+    // CORE-3: a new plan supersedes the previous one. Without this every
+    // `persist_plan` left the old goal `active` forever, so goals
+    // accumulated in the `active` state and `active_goal()`'s `LIMIT 1`
+    // became an arbitrary tie-break. Runs AFTER the new goal exists so
+    // `keep` can never archive the goal we just created.
+    repos.archive_other_active_goals(&goal_id, identity)?;
     for (i, m) in plan.milestones.iter().enumerate() {
         let ms = repos.create_milestone(
             &goal_id,

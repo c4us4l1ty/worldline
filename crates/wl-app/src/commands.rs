@@ -10,6 +10,7 @@ use wl_core::ai::dispatch::{AiDispatcher, ProviderAdapter};
 use wl_core::crypto::identity::Identity;
 use wl_core::domain::*;
 use wl_core::engine::{Engine, EngineOutcome, RecoveryAction};
+use wl_core::poison::LockRecover;
 use wl_core::store::repo::Repos;
 
 use crate::app_state::AppState;
@@ -27,7 +28,7 @@ use crate::relay;
 pub(crate) async fn identity_generate(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<GeneratedIdentity> {
-    let mut current = state.identity.lock().unwrap();
+    let mut current = state.identity.lock_recover();
     if current.is_some() || state.repos.identity()?.is_some() || state.vault.has_mnemonic() {
         return Err(ShellError::Invalid(
             "identity already exists; unlock or restore it".into(),
@@ -66,7 +67,7 @@ pub(crate) async fn identity_verify_backup(
     indices: Vec<usize>,
     words: Vec<String>,
 ) -> ShellResult<bool> {
-    let guard = state.identity.lock().unwrap();
+    let guard = state.identity.lock_recover();
     let Some(id) = guard.as_ref() else {
         return Err(ShellError::Locked);
     };
@@ -104,7 +105,7 @@ pub(crate) async fn identity_restore(
     phrase: String,
 ) -> ShellResult<String> {
     let phrase = Zeroizing::new(phrase);
-    let mut current = state.identity.lock().unwrap();
+    let mut current = state.identity.lock_recover();
     let identity = Identity::from_phrase(&phrase).map_err(|_| ShellError::BadMnemonic)?;
     let account_id = identity.account_id_hex();
     // Fresh challenge positions for the re-verified backup check.
@@ -161,7 +162,7 @@ pub(crate) async fn identity_status(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<IdentityStatus> {
     let has = state.repos.identity()?.is_some();
-    let unlocked = state.identity.lock().unwrap().is_some();
+    let unlocked = state.identity.lock_recover().is_some();
     let vault_has_mnemonic = state.vault.has_mnemonic();
     Ok(IdentityStatus {
         has,
@@ -183,7 +184,7 @@ pub struct IdentityStatus {
 pub(crate) async fn identity_unlock(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<String> {
-    let mut current = state.identity.lock().unwrap();
+    let mut current = state.identity.lock_recover();
     let phrase = state
         .vault
         .get_mnemonic()
@@ -357,9 +358,7 @@ pub(crate) async fn create_manual_milestone(
 ) -> ShellResult<String> {
     let next = state
         .repos
-        .conn
-        .lock()
-        .unwrap()
+        .lock_conn()
         .query_row(
             "SELECT COALESCE(MAX(order_index) + 1, 0) FROM milestones WHERE goal_id = ?1",
             [&goal_id],
@@ -489,9 +488,7 @@ fn directive_details(repos: &Repos, id: &str) -> (String, Option<String>, String
 
 fn milestone_title(repos: &Repos, milestone_id: &str) -> Option<String> {
     repos
-        .conn
-        .lock()
-        .unwrap()
+        .lock_conn()
         .query_row(
             "SELECT title FROM milestones WHERE id = ?1",
             [milestone_id],
@@ -683,10 +680,10 @@ pub(crate) async fn settings_save(
     }
     // Keep the live session coherent: a changed relay URL invalidates
     // any cached token (it belongs to a different server/account view).
-    let mut url = state.relay_url.lock().unwrap();
+    let mut url = state.relay_url.lock_recover();
     if *url != settings.relay_url {
         *url = settings.relay_url.clone();
-        *state.relay_token.lock().unwrap() = None;
+        *state.relay_token.lock_recover() = None;
     }
     Ok(())
 }
@@ -737,7 +734,12 @@ impl wl_sync::sync::Transport for ReqwestTransport {
             if !status.is_success() {
                 return Err(format!("HTTP {status}"));
             }
-            relay::read_body(resp, 16 * 1024 * 1024).await
+            // SYNC-4: the reader's ceiling is the protocol's, not a
+            // hand-picked 16 MiB. It must be at least the relay's
+            // emission budget or a legitimate full pull would be
+            // truncated client-side and look like data loss; being
+            // exactly equal means the relay's own budget is what binds.
+            relay::read_body(resp, wl_protocol::MAX_PULL_BYTES).await
         })
     }
 }
@@ -763,15 +765,14 @@ pub(crate) async fn relay_authenticate(
     tokio::task::spawn_blocking(move || {
         let base = shared
             .relay_url
-            .lock()
-            .unwrap()
+            .lock_recover()
             .clone()
             .ok_or(ShellError::NoRelay)?;
         let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
         shared.with_identity(|identity| {
             let session = relay::handshake(&base, identity, shared_client())?;
             let account_id = identity.account_id_hex();
-            *shared.relay_token.lock().unwrap() = Some(crate::app_state::RelaySession {
+            *shared.relay_token.lock_recover() = Some(crate::app_state::RelaySession {
                 base,
                 account_id: account_id.clone(),
                 token: session.token,
@@ -791,15 +792,14 @@ fn ensure_token(state: &AppState, base: &str, identity: &Identity) -> ShellResul
     let account_id = identity.account_id_hex();
     if let Some(token) = state
         .relay_token
-        .lock()
-        .unwrap()
+        .lock_recover()
         .as_ref()
         .and_then(|session| session.token_for(base, &account_id))
     {
         return Ok(token.to_string());
     }
     let token = relay::handshake(base, identity, shared_client())?.token;
-    *state.relay_token.lock().unwrap() = Some(crate::app_state::RelaySession {
+    *state.relay_token.lock_recover() = Some(crate::app_state::RelaySession {
         base: base.to_string(),
         account_id,
         token: token.clone(),
@@ -830,8 +830,7 @@ pub(crate) async fn sync_now(
     tokio::task::spawn_blocking(move || {
         let base = shared
             .relay_url
-            .lock()
-            .unwrap()
+            .lock_recover()
             .clone()
             .ok_or(ShellError::NoRelay)?;
         let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
@@ -839,7 +838,7 @@ pub(crate) async fn sync_now(
             let token = ensure_token(&shared, &base, identity)?;
             match run_cycle(&shared, identity, &base, &token) {
                 Err(wl_sync::sync::SyncError::Transport(msg)) if msg.starts_with("HTTP 401") => {
-                    *shared.relay_token.lock().unwrap() = None;
+                    *shared.relay_token.lock_recover() = None;
                     let fresh = ensure_token(&shared, &base, identity)?;
                     run_cycle(&shared, identity, &base, &fresh).map_err(ShellError::from)
                 }

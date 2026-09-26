@@ -880,7 +880,9 @@ fn zero_backfill_migration_repairs_legacy_rows() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(versions, 5);
+    // Derived, never hand-copied: this assertion used to be a literal
+    // `5` and went stale the moment a migration was added.
+    assert_eq!(versions, super::migrations::MIGRATIONS.len() as i64);
 }
 
 #[test]
@@ -917,5 +919,396 @@ fn clone_split_boot_jitter_separates_forked_heads() {
     assert!(
         identical_pairs < 64,
         "boot jitter never separated 64 forked heads"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-3: goal lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_goal_status_persists_and_emits_a_crdt_op() {
+    let r = setup();
+    let identity = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let g = r.create_goal("Ship v0.1", None, None, None).unwrap();
+    assert_eq!(g.status, GoalStatus::Active);
+
+    r.set_goal_status(&g.id, GoalStatus::Achieved, Some(&identity))
+        .unwrap();
+    assert_eq!(r.goal(&g.id).unwrap().unwrap().status, GoalStatus::Achieved);
+    // The status change must replicate, not just land locally.
+    let ops: i64 = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM crdt_outbox WHERE table_name = 'goals' AND record_id = ?1",
+            [&g.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ops, 1, "status change should enqueue exactly one op");
+}
+
+#[test]
+fn set_goal_status_rejects_unknown_goal() {
+    let r = setup();
+    assert!(matches!(
+        r.set_goal_status("goal-missing", GoalStatus::Archived, None),
+        Err(crate::store::StoreError::NotFound(_))
+    ));
+}
+
+#[test]
+fn archive_other_active_goals_leaves_exactly_one_active() {
+    let r = setup();
+    let a = r.create_goal("A", None, None, None).unwrap();
+    let b = r.create_goal("B", None, None, None).unwrap();
+    let c = r.create_goal("C", None, None, None).unwrap();
+    let active_count = |r: &Repos| -> i64 {
+        r.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM goals WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(active_count(&r), 3, "precondition: three active goals");
+
+    let archived = r.archive_other_active_goals(&c.id, None).unwrap();
+    assert_eq!(archived.len(), 2, "A and B should be archived");
+    assert!(archived.contains(&a.id) && archived.contains(&b.id));
+    assert_eq!(active_count(&r), 1);
+    // `keep` must never archive itself.
+    assert_eq!(r.goal(&c.id).unwrap().unwrap().status, GoalStatus::Active);
+    assert_eq!(r.goal(&a.id).unwrap().unwrap().status, GoalStatus::Archived);
+}
+
+#[test]
+fn active_goal_is_deterministic_when_duplicates_exist() {
+    // Even if a legacy data dir still carries two `active` goals,
+    // `active_goal()` must not flip between them across calls.
+    let r = setup();
+    r.create_goal("older", None, None, None).unwrap();
+    r.create_goal("newer", None, None, None).unwrap();
+    let first = r.active_goal().unwrap().unwrap().id;
+    for _ in 0..20 {
+        assert_eq!(r.active_goal().unwrap().unwrap().id, first);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CORE-4: identity_config singleton
+// ---------------------------------------------------------------------------
+
+#[test]
+fn identity_config_is_a_singleton_across_restore() {
+    let r = setup();
+    let first = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let second = Identity::from_phrase(
+        "all year wave sausage worth useful legal winner thank yellow winner thank",
+    )
+    .unwrap();
+    assert_ne!(first.account_id_hex(), second.account_id_hex());
+
+    r.insert_identity(&first, true, &[0, 3, 7]).unwrap();
+    assert_eq!(
+        r.identity().unwrap().unwrap().public_key,
+        first.account_id_hex()
+    );
+
+    // Restoring a DIFFERENT phrase must replace, not append.
+    r.insert_identity(&second, false, &[1, 2, 3]).unwrap();
+    let rows: i64 = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM identity_config", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "identity_config must never hold two rows");
+
+    let got = r.identity().unwrap().unwrap();
+    assert_eq!(got.public_key, second.account_id_hex());
+    assert!(!got.bip39_mnemonic_verified);
+    assert_eq!(got.verify_indices, vec![1, 2, 3]);
+}
+
+#[test]
+fn schema_rejects_a_second_identity_row() {
+    let r = setup();
+    let id = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    r.insert_identity(&id, true, &[]).unwrap();
+    // The `id = 1` CHECK must make a duplicate impossible at the schema
+    // level, not merely unused by the writers.
+    let err = r.conn.lock().unwrap().execute(
+        "INSERT INTO identity_config (id, public_key, bip39_mnemonic_verified, verify_indices, hlc_timestamp)
+         VALUES (1, 'deadbeef', 0, '[]', '00000000000000000001.00000.00001')",
+        [],
+    );
+    assert!(err.is_err(), "a second identity row must be rejected");
+}
+
+#[test]
+fn set_mnemonic_verified_touches_only_the_singleton() {
+    let r = setup();
+    let id = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    r.insert_identity(&id, false, &[]).unwrap();
+    r.set_mnemonic_verified(true).unwrap();
+    assert!(r.identity().unwrap().unwrap().bip39_mnemonic_verified);
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT-3: the tombstone writers had integration coverage only
+// ---------------------------------------------------------------------------
+
+/// Decrypts every pending outbox op and returns `(table, record_id, is_tombstone)`.
+fn decoded_outbox(r: &Repos, identity: &Identity) -> Vec<(String, String, bool)> {
+    r.pending_outbox(1024)
+        .unwrap()
+        .into_iter()
+        .map(|op| {
+            let aad = format!("{}:{}", op.table_name, op.record_id);
+            let sealed = crate::crypto::aead::Sealed::from_bytes(&op.encrypted_payload).unwrap();
+            let plain = crate::crypto::aead::unseal(identity, &sealed, aad.as_bytes()).unwrap();
+            let fields: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+            let tomb = fields
+                .get(crate::crdt::TOMBSTONE_MARKER)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            (op.table_name, op.record_id, tomb)
+        })
+        .collect()
+}
+
+#[test]
+fn delete_writers_emit_decryptable_tombstone_ops() {
+    let r = setup();
+    let identity = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let (_goal, milestones) = goal_with_milestones(&r);
+    let d = r
+        .create_directive(
+            &milestones[0].id,
+            "T",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &[("A".into(), None, 5), ("B".into(), None, 25)],
+            Some(&identity),
+        )
+        .unwrap();
+
+    // Before the delete: the insert ops decrypt as upserts, not tombstones.
+    let before = decoded_outbox(&r, &identity);
+    assert!(!before.iter().any(|(_, _, tomb)| *tomb));
+
+    // Deletes are leaf-first by contract: FKs are enforced, so a
+    // directive that still has phase rows must have them removed first.
+    for phase in r.phases_for_directive(&d.id).unwrap() {
+        r.delete_directive_phase(&d.id, phase.step, Some(&identity))
+            .unwrap();
+    }
+    r.delete_directive(&d.id, Some(&identity)).unwrap();
+    assert!(
+        r.directive(&d.id).unwrap().is_none(),
+        "row must be gone locally"
+    );
+
+    // The deletes must be replicable: sealed tombstone ops naming each
+    // deleted record, decryptable with the identity's payload key under
+    // the `table:record` AAD.
+    let after = decoded_outbox(&r, &identity);
+    let tombs: Vec<_> = after.iter().filter(|(_, _, t)| *t).collect();
+    assert_eq!(tombs.len(), 3, "two phases + the directive: {after:?}");
+    assert!(tombs
+        .iter()
+        .any(|(t, rec, _)| t == "directive_phases" && *rec == d.id));
+    assert!(tombs
+        .iter()
+        .any(|(t, rec, _)| t == "directives" && *rec == d.id));
+
+    // Local delete memory is recorded too, so a later stale upsert for
+    // the same record cannot resurrect the row.
+    let head_tomb: i64 = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT tombstone FROM record_heads WHERE table_name = 'directives' AND record_id = ?1",
+            [&d.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(head_tomb, 1, "record_heads must remember the tombstone");
+}
+
+#[test]
+fn deleting_a_missing_row_is_not_found_and_enqueues_nothing() {
+    let r = setup();
+    let identity = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let before = r.pending_outbox(1024).unwrap().len();
+    let err = r.delete_directive("directive-nope", Some(&identity));
+    assert!(matches!(err, Err(crate::store::StoreError::NotFound(_))));
+    assert_eq!(
+        r.pending_outbox(1024).unwrap().len(),
+        before,
+        "a no-op delete must not enqueue an op"
+    );
+}
+
+#[test]
+fn delete_check_in_and_goal_tombstone_too() {
+    let r = setup();
+    let identity = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let (goal, milestones) = goal_with_milestones(&r);
+    let directive = r
+        .create_directive(
+            &milestones[0].id,
+            "T",
+            None,
+            10,
+            1,
+            "2026-09-13",
+            &[],
+            Some(&identity),
+        )
+        .unwrap();
+    let ci = r
+        .upsert_check_in("2026-09-13", CheckInOutcome::Done, None, Some(&identity))
+        .unwrap();
+    r.delete_check_in(&ci.id, Some(&identity)).unwrap();
+    // Leaf-first again: directives hang off milestones, milestones off
+    // the goal. Delete the whole chain, then the goal.
+    r.delete_directive(&directive.id, Some(&identity)).unwrap();
+    for m in &milestones {
+        r.delete_milestone(&m.id, Some(&identity)).unwrap();
+    }
+    r.delete_goal(&goal.id, Some(&identity)).unwrap();
+    assert!(r.goal(&goal.id).unwrap().is_none());
+
+    let tombs: Vec<(String, String)> = decoded_outbox(&r, &identity)
+        .into_iter()
+        .filter(|(_, _, t)| *t)
+        .map(|(t, r, _)| (t, r))
+        .collect();
+    assert!(
+        tombs.contains(&("check_ins".to_string(), ci.id.clone())),
+        "check-in tombstone missing: {tombs:?}"
+    );
+    assert!(
+        tombs.contains(&("goals".to_string(), goal.id.clone())),
+        "goal tombstone missing: {tombs:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-7: write-boundary gaps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn save_settings_rejects_a_dangerous_relay_url() {
+    let r = setup();
+    // `net::validate_relay_url` is the SSRF policy; save_settings must
+    // apply it itself, because pull-apply can write `relay_url` from a
+    // peer without passing through the shell.
+    for bad in [
+        "file:///etc/passwd",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://user:pw@example.com/",
+        "javascript:alert(1)",
+    ] {
+        let s = AppSettings {
+            relay_url: Some(bad.into()),
+            ..AppSettings::default()
+        };
+        assert!(
+            matches!(
+                r.save_settings(&s, None),
+                Err(crate::store::StoreError::Invalid(_))
+            ),
+            "must reject {bad}"
+        );
+    }
+    // A legitimate URL still persists.
+    let ok = AppSettings {
+        relay_url: Some("https://relay.example.com".into()),
+        ..AppSettings::default()
+    };
+    r.save_settings(&ok, None).unwrap();
+    assert_eq!(
+        r.settings().unwrap().relay_url.as_deref(),
+        Some("https://relay.example.com")
+    );
+    // Empty means "no relay configured" and stays allowed.
+    let none = AppSettings {
+        relay_url: Some("  ".into()),
+        ..AppSettings::default()
+    };
+    r.save_settings(&none, None).unwrap();
+}
+
+#[test]
+fn an_oversized_write_is_rejected_rather_than_enqueued_undrainable() {
+    // The relay 400s any sealed op over 256 KiB, which would leave the op
+    // in the outbox forever and wedge every drain. The write must fail
+    // (and roll back) instead.
+    let r = setup();
+    let identity = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let (_goal, _) = goal_with_milestones(&r);
+    let huge = "x".repeat(crate::domain::MAX_DESCRIPTION_CHARS + 1);
+    // First line of defence: the write-boundary text budget (#64).
+    assert!(
+        r.create_goal("Big", Some(&huge), None, Some(&identity))
+            .is_err(),
+        "an over-budget description must be rejected at the text boundary"
+    );
+
+    // Second line of defence: bypass the text budget to prove the
+    // sealed-size guard is live code, not an unreachable belt-and-braces.
+    let g2 = r
+        .create_goal("Sealed cap", None, None, Some(&identity))
+        .unwrap();
+    let payload = serde_json::json!({
+        "title": "x".repeat(400 * 1024),
+    });
+    let err = r.enqueue_outbox(&identity, "goals", &g2.id, &payload);
+    assert!(
+        matches!(err, Err(crate::store::StoreError::Invalid(ref m)) if m.contains("undrainable")),
+        "expected the sealed-cap rejection, got {err:?}"
+    );
+    // Nothing undrainable was left behind.
+    assert!(
+        r.pending_outbox(1024)
+            .unwrap()
+            .iter()
+            .all(|op| op.encrypted_payload.len() <= 256 * 1024),
+        "no oversized op may reach the outbox"
     );
 }

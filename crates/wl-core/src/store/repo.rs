@@ -2,7 +2,7 @@
 //! enqueues the corresponding CRDT op into `crdt_outbox` (encrypted
 //! with the identity's payload key) so sync is durable-by-default.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -10,8 +10,15 @@ use crate::crypto::aead;
 use crate::crypto::identity::Identity;
 use crate::domain::*;
 use crate::hlc::{Hlc, HlcTimestamp};
+use crate::poison::lock_conn;
 
 use super::StoreError;
+
+/// The relay rejects any single sealed op larger than this
+/// (`wl-protocol::MAX_SEALED_BYTES`, 256 KiB). Mirrored here as a
+/// literal rather than a dependency so `wl-core` stays
+/// platform-clean and dependency-light; the two must move together.
+const MAX_SEALED_OP_BYTES: usize = 256 * 1024;
 
 /// Repository handle. The SQLite connection lives behind a mutex so
 /// `Repos` is `Send + Sync` (rusqlite `Connection` is `Send` but not
@@ -56,6 +63,17 @@ impl Repos {
         repos
     }
 
+    /// The single sanctioned way to reach the SQLite handle.
+    ///
+    /// Recovers from mutex poisoning rather than failing the process
+    /// (SHELL-1) and rolls back any transaction a panicking writer left
+    /// open. Prefer this over touching [`Repos::conn`] directly — the
+    /// engine and the sync layer both did the latter, which is exactly
+    /// how the poison-panic sites accumulated (CORE-7f).
+    pub fn lock_conn(&self) -> MutexGuard<'_, Connection> {
+        lock_conn(&self.conn)
+    }
+
     /// Issues a timestamp and persists the new clock head to `hlc_clock`
     /// (E5). All mutation paths go through here instead of calling
     /// `self.hlc.now` directly, so every process boot resumes at least
@@ -70,7 +88,7 @@ impl Repos {
     }
 
     fn read_hlc_head(&self) -> Result<Option<(u64, u16)>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row: Option<(i64, i64, i64)> = conn
             .query_row(
                 "SELECT last_wall_nanos, counter, device FROM hlc_clock WHERE id = 1",
@@ -83,7 +101,7 @@ impl Repos {
     }
 
     fn write_hlc_head(&self) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let (wall, ctr) = self.hlc.head();
         conn.execute(
             "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
@@ -100,6 +118,15 @@ impl Repos {
     /// Persists the public identity half after onboarding.
     /// `verify_indices`: the 3-word backup-challenge positions, so the
     /// authoritative re-check stays positional across restarts.
+    ///
+    /// `identity_config` is a singleton keyed on `id = 1` (CORE-4), so a
+    /// restore with a *different* phrase replaces the row rather than
+    /// appending a second one. It is a plain `INSERT` with no
+    /// `ON CONFLICT`: the previous `ON CONFLICT(public_key) DO UPDATE`
+    /// only deduplicated the *same* key and silently accumulated
+    /// identities, leaving `identity()`'s `LIMIT 1` an arbitrary pick.
+    /// Replace-then-insert inside one transaction keeps the singleton
+    /// intact if the insert ever fails.
     pub fn insert_identity(
         &self,
         identity: &Identity,
@@ -107,34 +134,28 @@ impl Repos {
         verify_indices: &[usize],
     ) -> Result<(), StoreError> {
         let ts = self.tick();
-        self.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO identity_config (public_key, bip39_mnemonic_verified, verify_indices, hlc_timestamp)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(public_key) DO UPDATE SET
-                    bip39_mnemonic_verified = excluded.bip39_mnemonic_verified,
-                    verify_indices = excluded.verify_indices,
-                    hlc_timestamp = excluded.hlc_timestamp",
-                params![
-                    identity.account_id_hex(),
-                    verified,
-                    serde_json::to_string(verify_indices).expect("json indices"),
-                    ts.to_string()
-                ],
-            )
-            .map_err(StoreError::Sqlite)?;
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM identity_config", [])?;
+        tx.execute(
+            "INSERT INTO identity_config (id, public_key, bip39_mnemonic_verified, verify_indices, hlc_timestamp)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                identity.account_id_hex(),
+                verified,
+                serde_json::to_string(verify_indices).expect("json indices"),
+                ts.to_string()
+            ],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn identity(&self) -> Result<Option<IdentityConfig>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT public_key, bip39_mnemonic_verified, verify_indices, hlc_timestamp
-                 FROM identity_config LIMIT 1",
+                 FROM identity_config WHERE id = 1",
                 [],
                 |r| {
                     Ok(IdentityConfig {
@@ -151,10 +172,15 @@ impl Repos {
     }
 
     /// Persists the backup-challenge verification result.
+    ///
+    /// Targets `id = 1` explicitly (CORE-4). With the old multi-row
+    /// schema this bare `UPDATE` had no `WHERE`, so it stamped the flag
+    /// onto *every* stored identity at once.
     pub fn set_mnemonic_verified(&self, verified: bool) -> Result<(), StoreError> {
         let ts = self.tick();
-        self.conn.lock().unwrap().execute(
-            "UPDATE identity_config SET bip39_mnemonic_verified = ?1, hlc_timestamp = ?2",
+        self.lock_conn().execute(
+            "UPDATE identity_config SET bip39_mnemonic_verified = ?1, hlc_timestamp = ?2
+             WHERE id = 1",
             params![verified, ts.to_string()],
         )?;
         Ok(())
@@ -178,7 +204,7 @@ impl Repos {
             check_date("goal target date", d).map_err(StoreError::Invalid)?;
         }
         let id = new_id("goal");
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let goal = Goal {
@@ -215,9 +241,7 @@ impl Repos {
     }
 
     pub fn active_goal(&self) -> Result<Option<Goal>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, title, description, target_date, status, hlc_timestamp
                  FROM goals WHERE status = 'active' ORDER BY hlc_timestamp LIMIT 1",
@@ -229,9 +253,7 @@ impl Repos {
     }
 
     pub fn goal(&self, id: &str) -> Result<Option<Goal>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, title, description, target_date, status, hlc_timestamp
                  FROM goals WHERE id = ?1",
@@ -258,7 +280,7 @@ impl Repos {
         check_optional_text("milestone description", description, MAX_DESCRIPTION_CHARS)
             .map_err(StoreError::Invalid)?;
         let id = new_id("ms");
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let m = Milestone {
@@ -290,7 +312,7 @@ impl Repos {
 
     /// All milestones of a goal, ordered.
     pub fn milestones_for_goal(&self, goal_id: &str) -> Result<Vec<Milestone>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
              FROM milestones WHERE goal_id = ?1 ORDER BY order_index",
@@ -307,7 +329,7 @@ impl Repos {
         status: MilestoneStatus,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         if tx.execute(
@@ -338,11 +360,77 @@ impl Repos {
         Ok(())
     }
 
+    /// Sets a goal's lifecycle status (CORE-3).
+    ///
+    /// `GoalStatus` existed but had no writer, so every goal stayed
+    /// `active` forever and `active_goal()`'s `LIMIT 1` was an
+    /// arbitrary tie-break. Park a goal explicitly when it is achieved
+    /// or superseded.
+    pub fn set_goal_status(
+        &self,
+        id: &str,
+        status: GoalStatus,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        let ts = self.hlc.now(self.device);
+        if tx.execute(
+            "UPDATE goals SET status = ?2, hlc_timestamp = ?3 WHERE id = ?1",
+            params![id, status.as_str(), ts.to_string()],
+        )? == 0
+        {
+            return Err(StoreError::NotFound(format!("goal {id}")));
+        }
+        if identity.is_some() {
+            let g = tx.query_row(
+                "SELECT id, title, description, target_date, status, hlc_timestamp
+                 FROM goals WHERE id = ?1",
+                [id],
+                goal_row,
+            )?;
+            Self::emit_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::Goals,
+                &g.id,
+                &Self::goal_json(&g),
+                ts,
+            )?;
+        }
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Parks every `active` goal except `keep` (CORE-3).
+    ///
+    /// Returns the ids it archived. Used when a new plan replaces an
+    /// existing goal so multiple `active` goals cannot accumulate — the
+    /// single-active invariant that holds for directives has to hold for
+    /// goals too, or `active_goal()` has to break ties arbitrarily.
+    pub fn archive_other_active_goals(
+        &self,
+        keep: &str,
+        identity: Option<&Identity>,
+    ) -> Result<Vec<String>, StoreError> {
+        let stale: Vec<String> = {
+            let conn = self.lock_conn();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM goals WHERE status = 'active' AND id <> ?1 ORDER BY hlc_timestamp",
+            )?;
+            let rows = stmt.query_map([keep], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &stale {
+            self.set_goal_status(id, GoalStatus::Archived, identity)?;
+        }
+        Ok(stale)
+    }
+
     /// The next `pending` milestone (lowest order_index) for a goal.
     pub fn next_pending_milestone(&self, goal_id: &str) -> Result<Option<Milestone>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
                  FROM milestones WHERE goal_id = ?1 AND status = 'pending'
@@ -356,9 +444,7 @@ impl Repos {
 
     /// Single milestone by id (used by status-change write-through).
     pub fn milestone(&self, id: &str) -> Result<Option<Milestone>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
                  FROM milestones WHERE id = ?1",
@@ -410,7 +496,7 @@ impl Repos {
             )));
         }
         let id = new_id("dir");
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let d = Directive {
@@ -474,7 +560,119 @@ impl Repos {
     }
 
     pub fn directive(&self, id: &str) -> Result<Option<Directive>, StoreError> {
-        Self::directive_on(&self.conn.lock().unwrap(), id)
+        Self::directive_on(&self.lock_conn(), id)
+    }
+
+    /// Returns the directive's phase rows, rebuilding them from the
+    /// directive's own estimate if any are missing (CORE-6).
+    ///
+    /// `current_phase_minutes` used to fail closed with
+    /// `Invalid("current phase missing")` whenever a progressive
+    /// directive lost a phase row — a truncated pull, a partial
+    /// `create_directive`, or a hand-edited data dir. That error broke
+    /// `activate_next`, `complete` and the HUD with no way forward: the
+    /// user could neither run nor requeue the directive.
+    ///
+    /// The repair is deterministic and lossless by construction: phases
+    /// are `progressive_total` equal slices of `estimated_minutes` (floor
+    /// 1 minute each, remainder to the last step) so the rows always sum
+    /// back to the estimate. A monolithic directive (`progressive_total
+    /// <= 1`) legitimately has no rows and returns an empty vec without
+    /// writing anything.
+    ///
+    /// Rebuilt rows go through the normal write path — fresh HLC, an
+    /// emitted CRDT op when an identity is present, and `record_heads` —
+    /// so the repair replicates to other devices instead of silently
+    /// diverging.
+    pub fn ensure_phases(
+        &self,
+        directive_id: &str,
+        identity: Option<&Identity>,
+    ) -> Result<Vec<DirectivePhase>, StoreError> {
+        let existing = self.phases_for_directive(directive_id)?;
+        let d = self
+            .directive(directive_id)?
+            .ok_or_else(|| StoreError::NotFound(format!("directive {directive_id}")))?;
+        if d.progressive_total <= 1 {
+            return Ok(existing);
+        }
+        if existing.len() as i64 == d.progressive_total
+            && (1..=d.progressive_total)
+                .all(|step| existing.iter().any(|p| p.step == step && p.minutes > 0))
+        {
+            return Ok(existing);
+        }
+
+        let count = d.progressive_total;
+        if d.estimated_minutes < count {
+            // Cannot split `estimated_minutes` into `count` positive
+            // phases. Repairing would mean inventing time the user never
+            // estimated, so fail closed — but with an error that names
+            // the actual remedy instead of the old bare "current phase
+            // missing".
+            return Err(StoreError::Invalid(format!(
+                "directive {directive_id} is corrupt: {count} phases cannot fit in a \
+                 {}-minute estimate — reschedule it",
+                d.estimated_minutes
+            )));
+        }
+        // Equal slices, remainder to the last step: sums exactly, and
+        // identical on every device that runs the repair.
+        let base = d.estimated_minutes / count;
+        let remainder = d.estimated_minutes % count;
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        let mut rebuilt = Vec::with_capacity(count as usize);
+        for step in 1..=count {
+            let minutes = if step == count {
+                base + remainder
+            } else {
+                base
+            };
+            let ts = self.hlc.now(self.device);
+            let title = format!("Step {step}");
+            tx.execute(
+                "INSERT INTO directive_phases (directive_id, step, title, instruction, minutes, state, hlc_timestamp)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)
+                 ON CONFLICT(directive_id, step) DO UPDATE SET
+                    minutes = excluded.minutes, hlc_timestamp = excluded.hlc_timestamp",
+                params![
+                    directive_id,
+                    step,
+                    title,
+                    minutes,
+                    if step == 1 { "active" } else { "pending" },
+                    ts.to_string()
+                ],
+            )?;
+            let p = DirectivePhase {
+                directive_id: directive_id.to_string(),
+                step,
+                title,
+                instruction: None,
+                minutes,
+                state: if step == 1 {
+                    PhaseState::Active
+                } else {
+                    PhaseState::Pending
+                },
+                hlc_timestamp: ts,
+            };
+            if identity.is_some() {
+                Self::emit_on(
+                    &tx,
+                    identity,
+                    crate::crdt::CrdtTable::DirectivePhases,
+                    directive_id,
+                    &Self::phase_json(&p),
+                    ts,
+                )?;
+            }
+            rebuilt.push(p);
+        }
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(rebuilt)
     }
 
     fn directive_on(conn: &Connection, id: &str) -> Result<Option<Directive>, StoreError> {
@@ -495,7 +693,7 @@ impl Repos {
     /// lowest id) so a transiently violated invariant still renders
     /// deterministically instead of an arbitrary row.
     pub fn active_directive(&self) -> Result<Option<Directive>, StoreError> {
-        self.conn.lock().unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, milestone_id, title, execution_context, estimated_minutes,
                         progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
@@ -511,7 +709,7 @@ impl Repos {
     /// Queued directives scheduled on or before `date` (execution pool
     /// for today — NOT exposed as a list in the UI; engine only).
     pub fn runnable_directives(&self, date: &str) -> Result<Vec<Directive>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, milestone_id, title, execution_context, estimated_minutes,
                     progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
@@ -526,9 +724,7 @@ impl Repos {
     }
 
     pub fn next_runnable_directive(&self, date: &str) -> Result<Option<Directive>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, milestone_id, title, execution_context, estimated_minutes,
                     progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
@@ -547,7 +743,7 @@ impl Repos {
         state: DirectiveState,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM directives WHERE id = ?1)",
@@ -642,7 +838,7 @@ impl Repos {
         if record_id.is_empty() || record_id.len() > 128 {
             return Err(StoreError::Invalid("bad CRDT record id".into()));
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let removed = tx.execute(delete_sql, params![record_id])?;
@@ -734,7 +930,7 @@ impl Repos {
         if directive_id.is_empty() || directive_id.len() > 128 {
             return Err(StoreError::Invalid("bad CRDT record id".into()));
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let removed = tx.execute(
@@ -794,7 +990,7 @@ impl Repos {
     /// tie-break min `id`); losers are parked to queued with
     /// write-through. Returns the number parked.
     pub fn enforce_single_active(&self, identity: Option<&Identity>) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let tx = conn.unchecked_transaction()?;
         let actives: Vec<String> = {
             let mut stmt = tx.prepare(
@@ -839,7 +1035,7 @@ impl Repos {
         scheduled_for_date: &str,
         identity: Option<&Identity>,
     ) -> Result<(), StoreError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let mut d = Self::directive_on(&tx, id)?
             .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
@@ -888,6 +1084,17 @@ impl Repos {
                     let rounded = (i128::from(p.minutes) * i128::from(estimated_minutes)
                         + old_total / 2)
                         / old_total;
+                    // CORE-7(e) / AUDIT-6: `rounded` is non-negative and
+                    // bounded by `estimated_minutes` (≤1440, validated
+                    // above), so the `i128 -> i64` narrowing cannot
+                    // overflow. Asserted rather than assumed: this is the
+                    // repo's first `debug_assert`, and the convention
+                    // going forward is that a narrowing cast on a
+                    // user-influenced number states why it is safe.
+                    debug_assert!(
+                        rounded >= 0 && rounded <= i128::from(estimated_minutes),
+                        "phase rescale out of range: {rounded} for estimate {estimated_minutes}"
+                    );
                     (rounded as i64).clamp(1, remaining - reserved)
                 };
                 remaining -= scaled;
@@ -925,7 +1132,7 @@ impl Repos {
         id: &str,
         identity: Option<&Identity>,
     ) -> Result<bool, StoreError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let mut d = Self::directive_on(&tx, id)?
             .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
@@ -986,7 +1193,7 @@ impl Repos {
         &self,
         directive_id: &str,
     ) -> Result<Vec<DirectivePhase>, StoreError> {
-        Self::phases_on(&self.conn.lock().unwrap(), directive_id)
+        Self::phases_on(&self.lock_conn(), directive_id)
     }
 
     fn phases_on(conn: &Connection, directive_id: &str) -> Result<Vec<DirectivePhase>, StoreError> {
@@ -1016,9 +1223,7 @@ impl Repos {
 
     /// Count of completed directives for a milestone (velocity data).
     pub fn completed_count_for_milestone(&self, milestone_id: &str) -> Result<i64, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT COUNT(*) FROM directives WHERE milestone_id = ?1 AND state = 'completed'",
                 [milestone_id],
@@ -1040,7 +1245,7 @@ impl Repos {
     ) -> Result<CheckIn, StoreError> {
         check_date("check-in date", date).map_err(StoreError::Invalid)?;
         check_optional_text("check-in note", note, MAX_NOTE_CHARS).map_err(StoreError::Invalid)?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let existing: Option<String> = tx
             .query_row("SELECT id FROM check_ins WHERE date = ?1", [date], |r| {
@@ -1077,9 +1282,7 @@ impl Repos {
     }
 
     pub fn check_in_for_date(&self, date: &str) -> Result<Option<CheckIn>, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT id, date, outcome, note, hlc_timestamp FROM check_ins WHERE date = ?1",
                 [date],
@@ -1109,7 +1312,7 @@ impl Repos {
                 "check-in limit must be in 0–1024".into(),
             ));
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, date, outcome, note, hlc_timestamp FROM check_ins
              ORDER BY date DESC LIMIT ?1",
@@ -1147,7 +1350,7 @@ impl Repos {
         // already trims to 140 chars; this keeps other producers honest.
         let note: Option<String> = note.map(|n| n.chars().take(MAX_BAILOUT_NOTE_CHARS).collect());
         let id = new_id("bail");
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let b = Bailout {
@@ -1180,7 +1383,7 @@ impl Repos {
     // ------------------------------------------------------------------
 
     pub fn settings(&self) -> Result<AppSettings, StoreError> {
-        self.conn.lock().unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT theme, hotkey, always_on_top, ai_provider, tier1_model, tier2_model, relay_url
                  FROM app_settings WHERE id = 1",
@@ -1233,7 +1436,20 @@ impl Repos {
         ] {
             check_optional_text(field, v, MAX_MODEL_ID_CHARS).map_err(StoreError::Invalid)?;
         }
-        let mut conn = self.conn.lock().unwrap();
+        // CORE-7(a): validate the relay URL at the write boundary, not
+        // only in the shell. `save_settings` is also reached by
+        // pull-apply (a peer can set `relay_url` via a replicated
+        // `app_settings` op), and the shell's pre-validation cannot see
+        // that path — so a malicious or buggy peer could persist a
+        // `file://` or metadata-endpoint URL that the next sync cycle
+        // would then dial. `net::validate_relay_url` is the single
+        // policy (SSRF blocklist, scheme/credential/query rules).
+        if let Some(url) = s.relay_url.as_deref() {
+            if !url.trim().is_empty() {
+                crate::net::validate_relay_url(url).map_err(StoreError::Invalid)?;
+            }
+        }
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         // Row and op payload carry the same normalized hotkey so a pull
@@ -1370,6 +1586,25 @@ impl Repos {
         );
         let sealed = aead::seal(identity, &plaintext, aad.as_bytes())
             .map_err(|e| StoreError::Invalid(e.to_string()))?;
+        // CORE-7(b): enforce the relay's per-op sealed cap at enqueue.
+        // The relay rejects a >256 KiB sealed op with a 4xx, so an
+        // oversized op written here is not merely rejected — it is
+        // *undrainable*: it sits in the outbox forever, every drain
+        // attempt fails the whole batch, and sync is wedged with no
+        // local remedy. Failing the write is strictly better: the
+        // caller's own row write rolls back in the same transaction, so
+        // the store never holds state it cannot replicate. The
+        // write-boundary text budgets (#64) keep normal content far
+        // below this, so tripping it means something unbounded leaked in
+        // and the error should be loud.
+        if sealed.to_bytes().len() > MAX_SEALED_OP_BYTES {
+            return Err(StoreError::Invalid(format!(
+                "sealed op for {table_name}/{record_id} is {} bytes, over the \
+                 {MAX_SEALED_OP_BYTES}-byte relay cap — the write was rolled back \
+                 rather than enqueueing an undrainable op",
+                sealed.to_bytes().len()
+            )));
+        }
         conn.execute(
             "INSERT INTO crdt_outbox (operation_id, hlc_timestamp, table_name, record_id, encrypted_payload, created_at_epoch_ms, pushed)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
@@ -1404,7 +1639,7 @@ impl Repos {
         if record_id.is_empty() || record_id.len() > 128 {
             return Err(StoreError::Invalid("bad CRDT record id".into()));
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
         let op_id = Self::enqueue_on(&tx, identity, table_name, record_id, payload_json, ts)?;
@@ -1422,7 +1657,7 @@ impl Repos {
         if !(0..=1024).contains(&limit) {
             return Err(StoreError::Invalid("outbox limit must be in 0–1024".into()));
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT operation_id, hlc_timestamp, table_name, record_id, encrypted_payload
              FROM crdt_outbox WHERE pushed = 0
@@ -1445,7 +1680,7 @@ impl Repos {
     pub fn mark_outbox_pushed(&self, operation_ids: &[String]) -> Result<(), StoreError> {
         // Single transaction: one lock acquisition, atomic drain state —
         // a crash mid-batch can never leave half the batch pushed.
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for id in operation_ids {
             tx.execute(
@@ -1463,9 +1698,7 @@ impl Repos {
     /// outbox grows forever on long-lived installs.
     pub fn delete_pushed_outbox(&self) -> Result<usize, StoreError> {
         let n = self
-            .conn
-            .lock()
-            .unwrap()
+            .lock_conn()
             .execute("DELETE FROM crdt_outbox WHERE pushed = 1", [])?;
         Ok(n)
     }
@@ -1475,9 +1708,7 @@ impl Repos {
     // ------------------------------------------------------------------
 
     pub fn is_op_applied(&self, operation_id: &str) -> Result<bool, StoreError> {
-        self.conn
-            .lock()
-            .unwrap()
+        self.lock_conn()
             .query_row(
                 "SELECT COUNT(*) FROM crdt_applied WHERE operation_id = ?1",
                 [operation_id],
@@ -1495,7 +1726,7 @@ impl Repos {
     /// path for undecryptable/unparseable remote ops, which have no
     /// usable timestamp but must still advance past the poison op.
     pub fn mark_op_applied_str(&self, operation_id: &str, hlc: &str) -> Result<(), StoreError> {
-        self.conn.lock().unwrap().execute(
+        self.lock_conn().execute(
             "INSERT OR IGNORE INTO crdt_applied (operation_id, hlc_timestamp) VALUES (?1, ?2)",
             params![operation_id, hlc],
         )?;
@@ -1507,7 +1738,7 @@ impl Repos {
     /// never be re-pulled — without this `crdt_applied` grows forever.
     /// Callers skip the prune while the cursor is still ("", "").
     pub fn prune_applied_below(&self, hlc: &str, op_id: &str) -> Result<usize, StoreError> {
-        let n = self.conn.lock().unwrap().execute(
+        let n = self.lock_conn().execute(
             "DELETE FROM crdt_applied
               WHERE hlc_timestamp < ?1 OR (hlc_timestamp = ?1 AND operation_id <= ?2)",
             params![hlc, op_id],

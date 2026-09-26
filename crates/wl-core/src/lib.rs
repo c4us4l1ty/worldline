@@ -11,6 +11,8 @@ pub mod domain;
 pub mod engine;
 pub mod hlc;
 pub mod net;
+pub mod poison;
 pub mod store;
 
 pub use crypto::identity::Identity;
+pub use poison::{lock_conn, LockRecover};
