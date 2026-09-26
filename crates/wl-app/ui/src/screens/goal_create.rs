@@ -127,46 +127,78 @@ pub fn GoalCreateScreen() -> Element {
     };
 
     rsx! {
-        div { class: "wl-scroll-region",
-            h1 { class: "wl-serif-title",
-                "State the " span { class: "wl-italic-accent", "objective" }
-            }
-            p { class: "wl-body-muted", style: "margin: 10px 0 18px;",
-                "The architect builds the milestone hierarchy; you execute one directive at a time. Manual mode needs no API key — the local engine handles the rest."
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "Goal" }
-                input { class: "wl-input", r#type: "text", placeholder: "e.g. Ship Worldline v0.1",
-                    value: "{title.read().clone()}",
-                    oninput: move |e| title.set(e.value()) }
-            }
-            div { class: "wl-field",
-                label { class: "wl-label", "Details" }
-                textarea { class: "wl-textarea", placeholder: "Optional context for the architect",
-                    value: "{description.read().clone()}",
-                    oninput: move |e| description.set(e.value()) }
-            }
-            div { class: "wl-field",
-                label { class: "wl-label", "Target date (YYYY-MM-DD)" }
-                input { class: "wl-input", r#type: "date",
-                    value: "{target_date.read().clone()}",
-                    oninput: move |e| target_date.set(e.value()) }
-            }
-            div { class: "wl-field",
-                label { class: "wl-label", "Constraints (for Tier-1 architect)" }
-                textarea { class: "wl-textarea", placeholder: "Hours/day, skills, hard deadlines…",
-                    value: "{context.read().clone()}",
-                    oninput: move |e| context.set(e.value()) }
+        div { class: "wl-page",
+            // Fixed header, outside the scroll region: on a full page of
+            // fields an in-flow back button scrolls out of reach. Before
+            // this, goal creation had NO way back at all — the only exit
+            // was creating a goal.
+            div { class: "wl-page-head",
+                button {
+                    class: "wl-back",
+                    aria_label: "Back to the line",
+                    title: "Back to the line",
+                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
+                    "\u{2190}"
+                }
+                div {
+                    h1 { class: "wl-page-title",
+                        "State the " span { class: "wl-italic-accent", "objective" }
+                    }
+                    p { class: "wl-page-sub",
+                        "The architect builds the milestone hierarchy. You execute one directive at a time."
+                    }
+                }
             }
 
-            button { class: "wl-btn-primary", disabled: *busy.read(),
-                onclick: move |_| create_ai(),
-                if *busy.read() { "Architecting…" } else { "Generate master plan (Tier-1)" }
-            }
-            button { class: "wl-btn-escape", style: "margin-top: 6px;", disabled: *busy.read(),
-                onclick: move |_| create_manual(),
-                "Create manually — no API key"
+            div { class: "wl-scroll-region",
+                div { class: "wl-section",
+                    span { class: "wl-section-label", "The objective" }
+                    div { class: "wl-field",
+                        label { class: "wl-label", "Goal" }
+                        input { class: "wl-input", r#type: "text", placeholder: "e.g. Ship Worldline v0.1",
+                            value: "{title.read().clone()}",
+                            oninput: move |e| title.set(e.value()) }
+                    }
+                    div { class: "wl-field",
+                        label { class: "wl-label", "Details" }
+                        textarea { class: "wl-textarea", placeholder: "Optional context for the architect",
+                            value: "{description.read().clone()}",
+                            oninput: move |e| description.set(e.value()) }
+                    }
+                }
+
+                div { class: "wl-section",
+                    span { class: "wl-section-label", "Boundaries" }
+                    div { class: "wl-field",
+                        label { class: "wl-label", "Target date" }
+                        input { class: "wl-input", r#type: "date",
+                            value: "{target_date.read().clone()}",
+                            oninput: move |e| target_date.set(e.value()) }
+                    }
+                    div { class: "wl-field",
+                        label { class: "wl-label", "Constraints (for Tier-1 architect)" }
+                        textarea { class: "wl-textarea", placeholder: "Hours/day, skills, hard deadlines…",
+                            value: "{context.read().clone()}",
+                            oninput: move |e| context.set(e.value()) }
+                    }
+                }
+
+                p { class: "wl-section-note",
+                    "Manual mode needs no API key — the local engine seeds the first directive itself."
+                }
+
+                div { class: "wl-page-actions",
+                    button { class: "wl-btn-primary", disabled: *busy.read(),
+                        onclick: move |_| create_ai(),
+                        if *busy.read() { "Architecting…" } else { "Generate master plan" }
+                    }
+                    // Was `.wl-btn-escape`, which is the bailout affordance
+                    // and made an ordinary fallback look destructive.
+                    button { class: "wl-btn-ghost", disabled: *busy.read(),
+                        onclick: move |_| create_manual(),
+                        "Create manually — no API key"
+                    }
+                }
             }
         }
     }

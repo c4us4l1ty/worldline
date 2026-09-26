@@ -598,3 +598,40 @@ Locked decisions from the planning session are marked [approved].
       "beacon only, never a surface" rule still has real load-bearing
       uses. The skill's colour table and AGENTS.md were corrected to stop
       promising a timer that no longer exists.
+
+## Page redesign pass (2026-09-26 — user-directed, visual only)
+
+93. **Goal creation and Settings redesigned around a shared page shell.**
+    Visual/markup only: every handler, shell command, payload, and
+    validation string was carried over verbatim (verified — the entire
+    pre-`rsx!` region of `settings.rs` is byte-identical to its previous
+    form, and both `goal_create.rs` closures are unchanged).
+
+    **A real bug was found and fixed underneath the "the design is not
+    good" complaint: goal creation had NO way back.** The only exit was
+    completing a goal, so opening it and changing your mind was a dead
+    end. Both pages now open with the same fixed header carrying a
+    circular back affordance (`←`, `aria-label="Back to the line"`)
+    that returns to the canvas.
+
+    - The header sits **outside** the scroll region with
+      `flex-shrink: 0`, because on a long page (settings) an in-flow
+      back button scrolls away exactly when it is needed. Verified by
+      rendering a scrolled state: the header and back button remain.
+    - Settings previously buried "Back to the line" at the very bottom
+      styled `.wl-btn-escape` — the *bailout* affordance — so ordinary
+      navigation read as a destructive action. It is now navigation,
+      where the eye expects it.
+    - Eight undifferentiated fields became four labelled sections
+      (Identity / Appearance / Intelligence / Sync). Goal creation's
+      four loose fields became "The objective" and "Boundaries".
+    - "Create manually — no API key" was `.wl-btn-escape` for the same
+      reason; it is now `.wl-btn-ghost`. An ordinary fallback no longer
+      looks destructive.
+    - `settings_save` writes **every** field, so "Save settings" was
+      deliberately kept outside any section (with a note saying so)
+      rather than reading as belonging to Sync.
+    - Minor: the ad-hoc `wl-hud-pill` reuse for the "sealed" chip became
+      `.wl-chip`; the redundant "Pin to top" label became "Window"; the
+      `(YYYY-MM-DD)` hint was dropped from the date field because
+      `type="date"` already renders that format.

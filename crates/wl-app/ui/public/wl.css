@@ -260,6 +260,129 @@ body {
    CSS (UI-5 tracks dead-rule removal). */
 
 /* ==========================================================================
+   G. Page shell — header with back affordance + sectioned body
+   ========================================================================== */
+/* Secondary screens (goal creation, settings) previously had no back
+   affordance at all: goal creation had NO way out except creating a goal,
+   and settings buried "Back to the line" at the very bottom styled as the
+   escape hatch. Every page now opens with the same fixed header, so the
+   way back is in the same place on every screen.
+
+   The header sits OUTSIDE the scroll region on purpose — on a long page
+   (settings) an in-flow back button scrolls away exactly when you need
+   it. */
+.wl-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.wl-page-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
+  padding-bottom: 14px;
+}
+.wl-back {
+  pointer-events: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 1px solid var(--wl-border-subtle);
+  background: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
+  transition: transform var(--duration-instant) var(--ease-tactile),
+    background-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-back:hover { background: var(--wl-surface-card); transform: translateX(-1px); }
+.wl-back:active { transform: translateX(0); }
+
+.wl-page-title {
+  font-family: var(--font-serif);
+  font-size: 26px;
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+  color: var(--wl-text-primary);
+  margin: 0;
+}
+.wl-page-sub {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--wl-text-muted);
+  margin: 6px 0 0;
+}
+
+/* A group of related fields. Replaces the flat, undifferentiated column
+   of inputs these pages used to be. */
+.wl-section {
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-card);
+  padding: 16px 16px 4px;
+  margin-bottom: 14px;
+}
+.wl-section-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  margin: 0 0 12px;
+  display: block;
+}
+.wl-section .wl-field:last-child { margin-bottom: 12px; }
+.wl-section-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--wl-text-muted);
+  margin: 0 0 12px;
+}
+
+/* Page-level action row. Sits below the sections, outside any card, so a
+   "save everything" button does not read as belonging to one group. */
+.wl-page-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+/* Inline row for a secondary action beside its own field (e.g. "Test
+   connection" under the relay URL). */
+.wl-inline-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.wl-inline-actions .wl-btn-ghost { width: auto; padding: 0 16px; flex: 1 1 auto; }
+
+/* Status chip, replacing the ad-hoc `wl-hud-pill` reuse in settings. */
+.wl-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-pill);
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
    B. Stackelberg Single Directive Card (skill §4.B)
    ========================================================================== */
 .wl-directive-container {

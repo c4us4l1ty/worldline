@@ -70,15 +70,34 @@ pub fn SettingsScreen() -> Element {
     let status = ctx.identity_status.read().clone();
 
     rsx! {
-        div { class: "wl-scroll-region",
-            h1 { class: "wl-serif-title", "Settings" }
+        div { class: "wl-page",
+            // The way back used to be a button at the very bottom of a long
+            // page, styled `.wl-btn-escape` — which reads as the bailout
+            // affordance, not navigation. It now lives in a fixed header,
+            // in the same place as every other page.
+            div { class: "wl-page-head",
+                button {
+                    class: "wl-back",
+                    aria_label: "Back to the line",
+                    title: "Back to the line",
+                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
+                    "\u{2190}"
+                }
+                div {
+                    h1 { class: "wl-page-title", "Settings" }
+                    p { class: "wl-page-sub",
+                        "Secrets stay in the local vault. This screen only points the app at them."
+                    }
+                }
+            }
 
+            div { class: "wl-scroll-region",
             // MVP-5: identity (12-word phrase) lives in Settings.
             // Boot never opens onboarding; this is the only place that
             // unlocks, restores, or generates the phrase.
-            div { class: "wl-field", style: "margin-top: 18px;",
-                label { class: "wl-label", "Identity (12-word phrase)" }
-                p { class: "wl-body-muted wl-mono",
+            div { class: "wl-section",
+                span { class: "wl-section-label", "Identity" }
+                p { class: "wl-section-note wl-mono",
                     if !status.has {
                         "no identity on this install"
                     } else if status.unlocked {
@@ -91,8 +110,8 @@ pub fn SettingsScreen() -> Element {
                 }
                 if !status.has {
                     button {
-                        class: "wl-btn-primary",
-                        style: "margin-top: 8px;",
+                        class: "wl-btn-ghost",
+                        style: "width: auto; padding: 0 16px;",
                         disabled: *identity_busy.read(),
                         onclick: move |_| {
                             {
@@ -110,8 +129,8 @@ pub fn SettingsScreen() -> Element {
                 } else if !status.unlocked {
                     if status.vault_has_mnemonic {
                         button {
-                            class: "wl-btn-primary",
-                            style: "margin-top: 8px;",
+                            class: "wl-btn-ghost",
+                            style: "width: auto; padding: 0 16px; margin-bottom: 10px;",
                             disabled: *identity_busy.read(),
                             onclick: move |_| {
                                 let ctx = ctx;
@@ -133,19 +152,19 @@ pub fn SettingsScreen() -> Element {
                             if *identity_busy.read() { "Unlocking…" } else { "Unlock from vault" }
                         }
                     }
-                    div { style: "display: flex; gap: 8px; margin-top: 8px; align-items: center;",
+                    div { style: "display: flex; gap: 8px; align-items: center;",
                         input {
                             class: "wl-input wl-mono",
                             r#type: "password",
                             autocomplete: "off",
                             spellcheck: "false",
-                            placeholder: "Restore: 12 words, space-separated",
+                            placeholder: "12 words, space-separated",
                             value: "{phrase.read().clone()}",
                             oninput: move |e| phrase.set(e.value()),
                         }
                         button {
                             class: "wl-btn-ghost",
-                            style: "width: auto;",
+                            style: "width: auto; padding: 0 16px; flex-shrink: 0;",
                             disabled: *identity_busy.read(),
                             onclick: move |_| {
                                 let ctx = ctx;
@@ -186,173 +205,136 @@ pub fn SettingsScreen() -> Element {
                         }
                     }
                 }
-                p { class: "wl-seed-sub", style: "margin-top: 6px;",
+                p { class: "wl-section-note", style: "margin-top: 10px;",
                     "The phrase is never written to SQLite or the relay. Local directives work without it; sync and AI keys need it unlocked."
                 }
             }
 
-            div { class: "wl-field", style: "margin-top: 18px;",
-                label { class: "wl-label", "Theme" }
-                select { class: "wl-select",
-                    value: "{s.theme}",
-                    onchange: move |e| {
-                        let mut v = local.read().clone();
-                        v.theme = e.value();
-                        local.set(v);
-                        theme_controller.set(e.value());
-                    },
-                    option { value: "dark", "Dark graphite (default)" }
-                    option { value: "light", "Light parchment" }
+            div { class: "wl-section",
+                span { class: "wl-section-label", "Appearance" }
+                div { class: "wl-field",
+                    label { class: "wl-label", "Theme" }
+                    select { class: "wl-select",
+                        value: "{s.theme}",
+                        onchange: move |e| {
+                            let mut v = local.read().clone();
+                            v.theme = e.value();
+                            local.set(v);
+                            theme_controller.set(e.value());
+                        },
+                        option { value: "dark", "Dark graphite (default)" }
+                        option { value: "light", "Light parchment" }
+                    }
                 }
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "Summon hotkey" }
-                input { class: "wl-input", r#type: "text", value: "{s.hotkey}",
-                    oninput: move |e| {
-                        let mut v = local.read().clone();
-                        v.hotkey = e.value();
-                        local.set(v);
-                    } }
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "Pin to top" }
-                button { class: "wl-btn-ghost",
-                    onclick: move |_| {
-                        let pinned = !local.read().always_on_top;
-                        // Optimistic display flip; the preference only
-                        // sticks when BOTH the window call and the persist
-                        // succeed — boot restores the persisted value, so
-                        // an unpersisted pin would silently unpin.
-                        // Unsaved form edits are left untouched: the save
-                        // payload flips only the pin on persisted state.
-                        {
-                            let mut cur = local;
-                            let mut back = cur.read().clone();
-                            back.always_on_top = pinned;
-                            cur.set(back);
-                        }
-                        let ctx = ctx;
-                        let mut base = ctx.settings.read().clone();
-                        base.always_on_top = pinned;
-                        spawn(async move {
-                            let win_ok: Result<serde_json::Value, String> = invoke(
-                                "set_always_on_top",
-                                serde_json::json!({ "pinned": pinned }),
-                            )
-                            .await;
-                            let save_ok: Result<serde_json::Value, String> = invoke(
-                                "settings_save",
-                                serde_json::json!({ "settings": base.clone() }),
-                            )
-                            .await;
-                            if win_ok.is_ok() && save_ok.is_ok() {
-                                let mut sig = ctx.settings;
-                                *sig.write() = base;
-                            } else {
+                div { class: "wl-field",
+                    label { class: "wl-label", "Summon hotkey" }
+                    input { class: "wl-input", r#type: "text", placeholder: "alt+space",
+                        value: "{s.hotkey}",
+                        oninput: move |e| {
+                            let mut v = local.read().clone();
+                            v.hotkey = e.value();
+                            local.set(v);
+                        } }
+                }
+                div { class: "wl-field",
+                    label { class: "wl-label", "Window" }
+                    button { class: "wl-btn-ghost",
+                        onclick: move |_| {
+                            let pinned = !local.read().always_on_top;
+                            // Optimistic display flip; the preference only
+                            // sticks when BOTH the window call and the persist
+                            // succeed — boot restores the persisted value, so
+                            // an unpersisted pin would silently unpin.
+                            // Unsaved form edits are left untouched: the save
+                            // payload flips only the pin on persisted state.
+                            {
                                 let mut cur = local;
                                 let mut back = cur.read().clone();
-                                back.always_on_top = !pinned;
+                                back.always_on_top = pinned;
                                 cur.set(back);
-                                flash(&ctx, "PIN FAILED");
                             }
-                        });
-                    },
-                    if s.always_on_top { "Pinned — always on top" } else { "Floating below other windows" }
-                }
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "AI provider (BYOK)" }
-                select { class: "wl-select",
-                    value: "{s.ai_provider.clone().unwrap_or_default()}",
-                    onchange: move |e| {
-                        let mut v = local.read().clone();
-                        v.ai_provider = if e.value().is_empty() { None } else { Some(e.value()) };
-                        local.set(v);
-                    },
-                    option { value: "", "None (manual mode)" }
-                    option { value: "openrouter", "OpenRouter" }
-                    option { value: "google", "Google" }
-                    option { value: "qwen", "Qwen" }
-                    option { value: "bytez.com", "bytez.com" }
-                }
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "Tier-1 model (architect)" }
-                input { class: "wl-input", r#type: "text",
-                    placeholder: "e.g. gpt-4o / claude-sonnet (your choice)",
-                    value: "{s.tier1_model.clone().unwrap_or_default()}",
-                    oninput: move |e| {
-                        let mut v = local.read().clone();
-                        v.tier1_model = if e.value().is_empty() { None } else { Some(e.value()) };
-                        local.set(v);
-                    } }
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "Tier-2 model (dispatcher)" }
-                input { class: "wl-input", r#type: "text",
-                    placeholder: "e.g. claude-haiku / gemini-flash",
-                    value: "{s.tier2_model.clone().unwrap_or_default()}",
-                    oninput: move |e| {
-                        let mut v = local.read().clone();
-                        v.tier2_model = if e.value().is_empty() { None } else { Some(e.value()) };
-                        local.set(v);
-                    } }
-            }
-
-            div { class: "wl-field",
-                label { class: "wl-label", "API key (stored in vault only)" }
-                input { class: "wl-input", r#type: "password",
-                    placeholder: "Never synced, never in SQLite",
-                    autocomplete: "off",
-                    spellcheck: "false",
-                    value: "{api_key.read().clone()}",
-                    oninput: move |e| api_key.set(e.value()) }
-                p { class: "wl-seed-sub", style: "margin-top: 6px;",
-                    "Sealed into the local Stronghold vault, then cleared from this field. Never written to SQLite, never sent to the relay."
-                }
-                div { style: "display: flex; gap: 8px; margin-top: 8px; align-items: center;",
-                    button {
-                        class: "wl-btn-ghost",
-                        onclick: move |_| {
                             let ctx = ctx;
-                            let provider = local
-                                .read()
-                                .ai_provider
-                                .clone()
-                                .unwrap_or_else(|| "openrouter".into());
-                            let key = api_key.read().clone();
-                            if key.trim().is_empty() {
-                                flash(&ctx, "KEY EMPTY");
-                                return;
-                            }
+                            let mut base = ctx.settings.read().clone();
+                            base.always_on_top = pinned;
                             spawn(async move {
-                                match invoke::<bool>(
-                                    "set_api_key",
-                                    serde_json::json!({ "provider": provider, "key": key }),
+                                let win_ok: Result<serde_json::Value, String> = invoke(
+                                    "set_always_on_top",
+                                    serde_json::json!({ "pinned": pinned }),
                                 )
-                                .await
-                                {
-                                    Ok(true) => {
-                                        key_saved.set(true);
-                                        api_key.set(String::new());
-                                        flash(&ctx, "KEY SEALED IN VAULT");
-                                    }
-                                    _ => flash(&ctx, "KEY REJECTED"),
+                                .await;
+                                let save_ok: Result<serde_json::Value, String> = invoke(
+                                    "settings_save",
+                                    serde_json::json!({ "settings": base.clone() }),
+                                )
+                                .await;
+                                if win_ok.is_ok() && save_ok.is_ok() {
+                                    let mut sig = ctx.settings;
+                                    *sig.write() = base;
+                                } else {
+                                    let mut cur = local;
+                                    let mut back = cur.read().clone();
+                                    back.always_on_top = !pinned;
+                                    cur.set(back);
+                                    flash(&ctx, "PIN FAILED");
                                 }
                             });
                         },
-                        if *key_saved.read() { "Replace vault key" } else { "Save key to vault" }
+                        if s.always_on_top { "Pinned — always on top" } else { "Floating below other windows" }
                     }
-                    if *key_saved.read() {
-                        span { class: "wl-hud-pill", "sealed" }
+                }
+            }
+
+            div { class: "wl-section",
+                span { class: "wl-section-label", "Intelligence" }
+                div { class: "wl-field",
+                    label { class: "wl-label", "AI provider (BYOK)" }
+                    select { class: "wl-select",
+                        value: "{s.ai_provider.clone().unwrap_or_default()}",
+                        onchange: move |e| {
+                            let mut v = local.read().clone();
+                            v.ai_provider = if e.value().is_empty() { None } else { Some(e.value()) };
+                            local.set(v);
+                        },
+                        option { value: "", "None (manual mode)" }
+                        option { value: "openrouter", "OpenRouter" }
+                        option { value: "google", "Google" }
+                        option { value: "qwen", "Qwen" }
+                        option { value: "bytez.com", "bytez.com" }
+                    }
+                }
+                div { class: "wl-field",
+                    label { class: "wl-label", "Tier-1 model (architect)" }
+                    input { class: "wl-input", r#type: "text",
+                        placeholder: "e.g. gpt-4o / claude-sonnet (your choice)",
+                        value: "{s.tier1_model.clone().unwrap_or_default()}",
+                        oninput: move |e| {
+                            let mut v = local.read().clone();
+                            v.tier1_model = if e.value().is_empty() { None } else { Some(e.value()) };
+                            local.set(v);
+                        } }
+                }
+                div { class: "wl-field",
+                    label { class: "wl-label", "Tier-2 model (dispatcher)" }
+                    input { class: "wl-input", r#type: "text",
+                        placeholder: "e.g. claude-haiku / gemini-flash",
+                        value: "{s.tier2_model.clone().unwrap_or_default()}",
+                        oninput: move |e| {
+                            let mut v = local.read().clone();
+                            v.tier2_model = if e.value().is_empty() { None } else { Some(e.value()) };
+                            local.set(v);
+                        } }
+                }
+                div { class: "wl-field",
+                    label { class: "wl-label", "API key" }
+                    input { class: "wl-input", r#type: "password",
+                        placeholder: "Sealed into the local vault",
+                        autocomplete: "off",
+                        spellcheck: "false",
+                        value: "{api_key.read().clone()}",
+                        oninput: move |e| api_key.set(e.value()) }
+                    div { class: "wl-inline-actions",
                         button {
                             class: "wl-btn-ghost",
-                            style: "color: var(--wl-accent-coral);",
                             onclick: move |_| {
                                 let ctx = ctx;
                                 let provider = local
@@ -360,104 +342,151 @@ pub fn SettingsScreen() -> Element {
                                     .ai_provider
                                     .clone()
                                     .unwrap_or_else(|| "openrouter".into());
+                                let key = api_key.read().clone();
+                                if key.trim().is_empty() {
+                                    flash(&ctx, "KEY EMPTY");
+                                    return;
+                                }
                                 spawn(async move {
                                     match invoke::<bool>(
-                                        "delete_api_key",
-                                        serde_json::json!({ "provider": provider }),
+                                        "set_api_key",
+                                        serde_json::json!({ "provider": provider, "key": key }),
                                     )
                                     .await
                                     {
                                         Ok(true) => {
-                                            key_saved.set(false);
-                                            flash(&ctx, "VAULT KEY REMOVED");
+                                            key_saved.set(true);
+                                            api_key.set(String::new());
+                                            flash(&ctx, "KEY SEALED IN VAULT");
                                         }
-                                        _ => flash(&ctx, "KEY NOT FOUND"),
+                                        _ => flash(&ctx, "KEY REJECTED"),
                                     }
                                 });
                             },
-                            "Remove"
+                            if *key_saved.read() { "Replace vault key" } else { "Save key to vault" }
+                        }
+                        if *key_saved.read() {
+                            span { class: "wl-chip", "sealed" }
+                            button {
+                                class: "wl-btn-ghost",
+                                style: "color: var(--wl-accent-coral); flex: 0 0 auto;",
+                                onclick: move |_| {
+                                    let ctx = ctx;
+                                    let provider = local
+                                        .read()
+                                        .ai_provider
+                                        .clone()
+                                        .unwrap_or_else(|| "openrouter".into());
+                                    spawn(async move {
+                                        match invoke::<bool>(
+                                            "delete_api_key",
+                                            serde_json::json!({ "provider": provider }),
+                                        )
+                                        .await
+                                        {
+                                            Ok(true) => {
+                                                key_saved.set(false);
+                                                flash(&ctx, "VAULT KEY REMOVED");
+                                            }
+                                            _ => flash(&ctx, "KEY NOT FOUND"),
+                                        }
+                                    });
+                                },
+                                "Remove"
+                            }
+                        }
+                    }
+                    p { class: "wl-section-note", style: "margin-top: 10px;",
+                        "Sealed into the local Stronghold vault, then cleared from this field. Never written to SQLite, never sent to the relay."
+                    }
+                }
+            }
+
+            div { class: "wl-section",
+                span { class: "wl-section-label", "Sync" }
+                div { class: "wl-field",
+                    label { class: "wl-label", "Relay URL" }
+                    input { class: "wl-input", r#type: "text",
+                        placeholder: "http://127.0.0.1:8080",
+                        value: "{s.relay_url.clone().unwrap_or_default()}",
+                        oninput: move |e| {
+                            let mut v = local.read().clone();
+                            v.relay_url = if e.value().is_empty() { None } else { Some(e.value()) };
+                            local.set(v);
+                        } }
+                    div { class: "wl-inline-actions",
+                        button { class: "wl-btn-ghost",
+                            disabled: *busy.read(),
+                            onclick: move |_| {
+                                // MVP-4: explicit handshake test — the docstring
+                                // promised one, nothing called it. Uses the
+                                // PERSISTED relay URL (the shell reads its own
+                                // copy), so unsaved edits must be saved first.
+                                let ctx = ctx;
+                                busy.set(true);
+                                spawn(async move {
+                                    #[derive(serde::Deserialize, Default)]
+                                    struct AuthOut {
+                                        account_id: String,
+                                        expires_at: i64,
+                                    }
+                                    match invoke::<AuthOut>("relay_authenticate", ()).await {
+                                        Ok(a) => {
+                                            let mins = ((a.expires_at - (js_sys::Date::now() / 1000.0) as i64)
+                                                .max(0))
+                                                / 60;
+                                            flash(
+                                                &ctx,
+                                                format!("RELAY OK · session {mins}m · {}", a.account_id)
+                                                    .as_str(),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            let msg = if e.contains("no relay") {
+                                                "NO RELAY URL SAVED".to_string()
+                                            } else {
+                                                format!("RELAY FAILED — {e}")
+                                            };
+                                            flash(&ctx, &msg);
+                                        }
+                                    }
+                                    busy.set(false);
+                                });
+                            },
+                            if *busy.read() { "Testing…" } else { "Test connection" }
+                        }
+                        button { class: "wl-btn-ghost",
+                            onclick: move |_| {
+                                let ctx = ctx;
+                                spawn(async move {
+                                    match invoke::<SyncStats>("sync_now", ()).await {
+                                        Ok(s) => {
+                                            record_sync(&ctx, &s);
+                                            flash(&ctx, s.summary().as_str());
+                                        }
+                                        Err(_) => {
+                                            let mut st = ctx.sync_status;
+                                            *st.write() = "OFFLINE".to_string();
+                                            flash(&ctx, "SYNC FAILED — OFFLINE?");
+                                        }
+                                    }
+                                });
+                            },
+                            "Sync now"
                         }
                     }
                 }
             }
 
-            div { class: "wl-field",
-                label { class: "wl-label", "Relay URL" }
-                input { class: "wl-input", r#type: "text",
-                    placeholder: "http://127.0.0.1:8080",
-                    value: "{s.relay_url.clone().unwrap_or_default()}",
-                    oninput: move |e| {
-                        let mut v = local.read().clone();
-                        v.relay_url = if e.value().is_empty() { None } else { Some(e.value()) };
-                        local.set(v);
-                    } }
-            }
-
-            div { style: "display: flex; flex-direction: column; gap: 8px; margin-top: 6px;",
+            // Page-level: one `settings_save` writes EVERY field above, so
+            // the save action sits outside any section rather than reading
+            // as belonging to Sync.
+            div { class: "wl-page-actions",
                 button { class: "wl-btn-primary", onclick: move |_| save(), "Save settings" }
-                button { class: "wl-btn-ghost",
-                    disabled: *busy.read(),
-                    onclick: move |_| {
-                        // MVP-4: explicit handshake test — the docstring
-                        // promised one, nothing called it. Uses the
-                        // PERSISTED relay URL (the shell reads its own
-                        // copy), so unsaved edits must be saved first.
-                        let ctx = ctx;
-                        busy.set(true);
-                        spawn(async move {
-                            #[derive(serde::Deserialize, Default)]
-                            struct AuthOut {
-                                account_id: String,
-                                expires_at: i64,
-                            }
-                            match invoke::<AuthOut>("relay_authenticate", ()).await {
-                                Ok(a) => {
-                                    let mins = ((a.expires_at - (js_sys::Date::now() / 1000.0) as i64)
-                                        .max(0))
-                                        / 60;
-                                    flash(
-                                        &ctx,
-                                        format!("RELAY OK · session {mins}m · {}", a.account_id)
-                                            .as_str(),
-                                    );
-                                }
-                                Err(e) => {
-                                    let msg = if e.contains("no relay") {
-                                        "NO RELAY URL SAVED".to_string()
-                                    } else {
-                                        format!("RELAY FAILED — {e}")
-                                    };
-                                    flash(&ctx, &msg);
-                                }
-                            }
-                            busy.set(false);
-                        });
-                    },
-                    if *busy.read() { "Testing…" } else { "Test connection" }
+                p { class: "wl-section-note", style: "margin: 2px 0 0; text-align: center;",
+                    "Saves every field on this page."
                 }
-                button { class: "wl-btn-ghost",
-                    onclick: move |_| {
-                        let ctx = ctx;
-                        spawn(async move {
-                            match invoke::<SyncStats>("sync_now", ()).await {
-                                Ok(s) => {
-                                    record_sync(&ctx, &s);
-                                    flash(&ctx, s.summary().as_str());
-                                }
-                                Err(_) => {
-                                    let mut st = ctx.sync_status;
-                                    *st.write() = "OFFLINE".to_string();
-                                    flash(&ctx, "SYNC FAILED — OFFLINE?");
-                                }
-                            }
-                        });
-                    },
-                    "Sync now"
-                }
-                button { class: "wl-btn-escape",
-                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
-                    "Back to the line"
-                }
+            }
             }
         }
     }
