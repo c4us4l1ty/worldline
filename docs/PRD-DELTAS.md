@@ -647,7 +647,7 @@ Locked decisions from the planning session are marked [approved].
     carries symmetric `40px` side padding so the title sits on the true
     centre axis while the control keeps its reserved space.
     `.wl-page-title` dropped 26px → 24px because the centred column is
-    40px narrower per side and "State the objective" is the longest
+    40px narrower per side and "State the Objective" is the longest
     title; verified rendering on one line at 420px.
 
 95. **The theme selector is a switch, and the window pin stopped
@@ -771,3 +771,34 @@ Locked decisions from the planning session are marked [approved].
 103. **Test counts.** 13 UI tests (was 10): three added for the switch
     payload rule, the flip direction, and theme-toggle symmetry from an
     unrecognised starting value. Workspace 187, shell 17.
+
+104. **Page sub-headings removed; titles are one plain line.**
+    Both secondary pages dropped their deck beneath the title
+    ("The architect builds the milestone hierarchy…" /
+    "Secrets stay in the local vault…"). Under a two-word heading they
+    restated the heading rather than adding information, and they cost
+    ~40px of vertical space on a page that has to scroll. `.wl-page-sub`
+    was deleted with them — it had no other users.
+
+    Removing them is also what let the header be genuinely centred: the
+    title plus a deck is a two-line block whose optical centre sits below
+    the axis, so a single line is both simpler and better centred.
+
+105. **The goal-creation title is now "State the Objective", in the same
+    plain style as "Settings".** It previously accented the word
+    "objective" in coral italic (`wl-italic-accent`), which was wrong
+    twice over. It made that one heading read as a different kind of
+    object from every other screen, and it spent the coral beacon — a
+    live-status accent — on a decorative word. The beacon's sanctioned
+    uses are the active step badge, the create-goal button, and
+    cryptographic security badges.
+
+    `wl-italic-accent` itself is unchanged and still correct for the
+    *editorial* headings it was designed for: the morning greeting, the
+    dormant line, the evening recalibration, the seed-phrase title, and
+    the (currently unreachable) BYOK screen. This is a correction of
+    where the accent belongs, not a removal of the accent.
+
+    Verified by rendering: the goal-creation form now fits one 420×747
+    screen with both CTAs visible, which the deck had been pushing below
+    the fold.

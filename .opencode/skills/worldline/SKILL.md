@@ -260,7 +260,6 @@ Goal creation and Settings open with the same fixed header: a **centred** title 
   </button>
   <div>
     <h1 class="wl-page-title">Settings</h1>
-    <p class="wl-page-sub">Secrets stay in the local vault.</p>
   </div>
 </div>
 ```
@@ -275,10 +274,12 @@ Goal creation and Settings open with the same fixed header: a **centred** title 
 }
 .wl-back { position: absolute; left: 0; top: 2px; /* …circular control… */ }
 .wl-page-title { font-family: var(--font-serif); font-size: 24px; }
-.wl-page-sub { margin: 6px auto 0; max-width: 30ch; }
 ```
 
-`--font-serif` titles are **24px, not 26px**: the centred column is 40px narrower per side, and "State the objective" is the longest title in the app.
+Two rules this section encodes:
+
+- **A page title is one plain serif line — no sub-heading, no accent.** Both titles ("Settings", "State the Objective") are the same weight, colour, and case treatment. A deck under a short heading restated the heading rather than adding anything, and `.wl-page-sub` was deleted with it. **The coral accent does not go in a title.** It was briefly applied to the word "objective", which made that heading read as a different kind of object from every other screen and spent the beacon on a decorative word rather than on something live. `.wl-italic-accent` remains correct for the *editorial* headings it was designed for — the morning greeting, the dormant line, the seed-phrase title.
+- **`--font-serif` titles are 24px, not 26px**: the centred column is 40px narrower per side, and "State the Objective" is the longest title in the app.
 
 ### B. The Stackelberg Single Directive Card
 The focal heart of the application. Presents only one directive.
@@ -459,6 +460,7 @@ Tactile 12-word recovery display during cryptographic account initialization.
 - **Never use pure white (`#FFF`) or deep black (`#000`):** Use the specified slate canvas (`#131312`) and muted text tones (`#E5E2E0` / `#CAC6BC`). This holds for switch knobs and tracks too.
 - **No decorative background illustrations or icons:** Maintain tactile, terminal-level discipline. Avoid extraneous emojis and marketing illustrations. UI icons are functional inline SVG (see §4.A); emoji are not UI iconography.
 - **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately; the canvas keeps exactly one floating control.
+- **Never accent a page title.** Page titles are one plain serif line in `--wl-text-primary`. The coral beacon belongs to the active step badge, the create-goal button, and cryptographic security badges — not to a heading, and not to a decorative word inside one.
 
 ---
 
