@@ -41,6 +41,11 @@ fn __obs() {
         } catch (e) {}
       }
       var n = 0, was = false;
+      document.addEventListener('mousemove', function (e) {
+        put('MM c=' + Math.round(e.clientX) + ',' + Math.round(e.clientY)
+          + ' s=' + window.screenX + ',' + window.screenY
+          + ' dpr=' + window.devicePixelRatio);
+      }, true);
       setInterval(function () {
         n++;
         var btn = document.querySelector('.wl-float-menu');
