@@ -72,6 +72,16 @@
     </style>
   </head>
   <body>
+    <script>
+      // Stand in for programmatic focus: the canvas root is focused on
+      // every boot (that is how it receives ⌘+Enter and Escape), so this
+      // is the state the focus-ring rule has to survive. A static
+      // screenshot cannot focus anything, so apply the class on load.
+      document.addEventListener('DOMContentLoaded', function () {
+        var r = document.querySelector('.wl-root[autofocus]');
+        if (r) { r.classList.add('focus'); }
+      });
+    </script>
     <div class="harness">
 
       <!-- ================= CANVAS: active directive ================= -->
@@ -156,7 +166,7 @@
                     </span>
                   </button>
                 </div>
-                <div class="wl-nav-group">
+                <div class="wl-nav-group wl-nav-worldlines">
                   <div class="wl-nav-label">Active worldlines</div>
                   <div class="wl-worldline">
                     <div class="wl-worldline-top">
@@ -449,7 +459,7 @@
           <div class="wl-page">
             <div class="wl-page-head">
               <button class="wl-circle-btn wl-back" aria-label="Back to the line">
-                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l3 3" /></svg>
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
               </button>
               <h1 class="wl-page-title">Trajectory</h1>
             </div>
@@ -543,6 +553,31 @@
         </div>
       </figure>
 
+
+      <!-- ================= FOCUS RING REGRESSION =================
+           Reproduces the boot state: the canvas root carries
+           tabindex="0" and is focused programmatically so it can receive
+           ⌘+Enter and Escape. The `:focus` class stands in for the
+           real focus. The frame must show NO coral ring — the ring is for
+           controls, and this element is an event target. -->
+      <figure class="frame">
+        <figcaption>canvas · focused root (no ring)</figcaption>
+        <div class="phone">
+          <div class="wl-root" tabindex="0" autofocus>
+            <div class="wl-float-layer">
+              <button class="wl-circle-btn wl-float-menu" aria-label="Open navigation">
+                <svg class="wl-icon wl-icon-menu" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
+              </button>
+            </div>
+            <main class="wl-directive-container">
+              <div class="wl-directive-card">
+                <h1 class="wl-serif-title">No active directive.</h1>
+                <p class="wl-body-muted">Open the menu to create a goal or review settings.</p>
+              </div>
+            </main>
+          </div>
+        </div>
+      </figure>
     </div>
   </body>
 </html>

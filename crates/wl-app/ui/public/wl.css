@@ -28,12 +28,31 @@
       were three different-looking controls, and the provider was a native
       `<select>` that WebKitGTK painted as a near-white field with
       near-invisible text in it — `color-scheme` and `appearance: none`
-      do not reliably reach it. See §6.
+      do not reliably reach it. Settings now has no native form widget at
+      all. See §6.
 
    Preserved from the previous file: the single floating control, the
    bare compose field, the frictionful escape hatch, the cream CTA, the
    coral beacon's three sanctioned uses, and the readout-not-a-button
-   rule for Active Worldlines.
+   rule for Active worldlines.
+
+   ## 0. Verifying this file
+
+   Read the token LIST, not the rules:
+
+       grep -oE 'var\(--[a-z0-9-]+' public/wl.css | sort -u
+
+   Every name in that output needs a matching `--name:` definition. A
+   `var()` naming an undefined custom property is invalid at computed-value
+   time and **silently inherits**: the stylesheet still parses, the build
+   still passes, and the property quietly becomes whatever its parent had.
+   That is not hypothetical — `--wl-text-tertiary` was referenced thirteen
+   times, defined zero times, and inverted the control panel's hierarchy.
+
+   Then RENDER it. `../../preview.html` draws every screen's markup against
+   this file with no wasm and no Tauri shell. Reviewing a design by reading
+   a stylesheet is how the cascade-ordering bug in §11 shipped a
+   non-full-height control panel that looked like it belonged to nothing.
    ========================================================================== */
 
 
@@ -196,12 +215,32 @@ body {
   outline: none;
 }
 
-/* Strict programmatic focus ring (skill §1 Tab traversal). */
+/* Strict programmatic focus ring (skill §1 Tab traversal).
+
+   `:not(.wl-root)` is load-bearing, and it was a visible bug. The rule
+   used a bare `[tabindex]:focus-visible`, which has specificity (0,2,0)
+   and therefore beat `.wl-root`'s own `outline: none` at (0,1,0) — so the
+   canvas painted a 1px coral ring around the ENTIRE 420×747 frame on
+   every launch. The canvas root carries `tabindex="0"` and `autofocus`
+   precisely so it can receive the ⌘+Enter and Escape keydowns, which
+   means it is focused programmatically on every boot, which means the
+   ring was not an edge case but the first thing a user saw.
+
+   Those `tabindex` roots are EVENT TARGETS, not controls. A focus ring
+   exists to tell a keyboard user where they are among things they can
+   operate; a wrapper that is focused so it can observe a keystroke is
+   not one of them, and ringing it tells the user nothing actionable. So
+   the exclusion is explicit rather than deleting `[tabindex]` outright,
+   which would silently un-ring a future genuinely-focusable custom
+   control.
+
+   Note what this is NOT: the `tabindex` is still there and the element is
+   still focusable. Suppressing the ring does not suppress focus. */
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
-[tabindex]:focus-visible {
+[tabindex]:focus-visible:not(.wl-root) {
   outline: 1px solid var(--wl-accent-coral);
   outline-offset: 2px;
 }
@@ -1134,7 +1173,7 @@ button:disabled { cursor: not-allowed; }
    a progress bar on the same line. 312px (74%) matches the proportion of
    the sidebar this was modelled on and gives the readout room. */
 .wl-nav-backdrop {
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: flex-start;
   padding: 0;
   background: rgba(19, 19, 18, 0.72);
@@ -1149,13 +1188,19 @@ button:disabled { cursor: not-allowed; }
   padding: 22px 18px 18px;
   display: flex;
   flex-direction: column;
-  /* Hug the content, capped at the frame. The sheet is a CARD anchored to
-     the top-left, not a full-height drawer: a panel stretched to 747px
-     with two goals in it is ~300px of nothing, and no amount of internal
-     alignment makes an empty half a panel look deliberate. Capping rather
-     than fixing the height means the long case (six goals plus a long
-     entropy log) still scrolls inside the frame instead of overflowing. */
-  max-height: 100%;
+  /* Full height, top to bottom. The user asked for this directly after a
+     build where the sheet hugged its content and stopped halfway down the
+     frame: a panel that does not reach the bottom edge of a 747px window
+     reads as a card that failed to open, not as a deliberate choice. A
+     drawer that ends mid-air leaves the canvas visible beneath it and the
+     user cannot tell whether the tap missed or the surface is broken.
+
+     This reverses the "hug the content" rule the previous revision
+     encoded. That rule was not wrong about the VOID — a stretched sheet
+     with two goals in it does have ~300px of nothing — it was wrong about
+     the fix. The void is handled below, by letting the worldline readout
+     absorb the slack, not by shrinking the panel. */
+  height: 100%;
   box-shadow: var(--wl-raise-sheet);
   animation: wl-nav-slide var(--duration-modal) var(--ease-tactile);
 }
@@ -1210,29 +1255,36 @@ button:disabled { cursor: not-allowed; }
 .wl-nav-close svg { display: block; }
 
 .wl-nav-scroll {
-  flex: 0 1 auto;
+  /* Grows to fill the sheet, so the groups spread over the full 747px
+     instead of leaving the bottom third empty. */
+  flex: 1 1 auto;
   min-height: 0;
   margin: 18px 0 12px;
   display: flex;
   flex-direction: column;
   gap: 20px;
-  /* Content sits at the TOP of the scroll region and the leftover height
-     is simply left empty. The previous version had the groups centred,
-     which put a ~200px void between the worldline readout and the
-     Settings row and made the panel look like it had lost its contents.
-
-     That void is the same defect the module doc records having been fixed
-     once already: an earlier design pinned two buttons to the floor behind
-     a `flex: 1` spacer, and the spacer WAS the layout. A panel that
-     routes to other pages is a browser, and a browser with a hole in it
-     reads as broken. The honest shape is a top-aligned list that ends where
-     its content ends — short when there is little to say, which is the
-     normal case, because most installs have one or two goals. */
+  /* The fixed things (the action, the System rows) keep their rhythm at
+     the top; the LAST group absorbs the slack. `space-between` would
+     spread the gaps evenly instead, which pulls the primary action away
+     from the top of the sheet and reads as a broken layout. */
   justify-content: flex-start;
 }
-/* The gap is carried by the last group, not by the scroll region, so a
-   long list reaches the footer instead of stopping short of it. */
-.wl-nav-group:last-child { margin-bottom: 0; }
+/* The worldline group takes the leftover height.
+
+   This is what makes a full-height sheet not a full-height VOID. A panel
+   stretched to 747px whose content ends at 400px has 350px of nothing in
+   it, and that reads as a panel that failed to load rather than as a
+   deliberately tall one. Giving the slack to the readout means the empty
+   space sits INSIDE the list region — where a list is expected to have
+   room — instead of below the whole panel.
+
+   `.wl-nav-worldlines` is a class rather than `:last-child` so the
+   specificity is deliberate: it has to win against the `.wl-nav-group +
+   .wl-nav-group` margin rule below, which also targets it. */
+.wl-nav-worldlines {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 
 /* The primary action. The ONE filled surface in the panel, mirroring the
    reference sidebar's highlighted top row. */
