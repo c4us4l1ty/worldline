@@ -794,7 +794,7 @@ body {
   transition: width 200ms ease;
 }
 
-/* Idle / briefing states */
+/* Idle / resting states */
 .wl-serif-title {
   font-family: var(--font-serif);
   font-size: 30px;
@@ -1046,8 +1046,8 @@ body {
    directive and nothing else: completion is ⌘+Enter, the escape hatch is
    Escape, and the hamburger is the only control on the surface. The
    buttons themselves survive — `.wl-btn-primary` and `.wl-btn-escape` are
-   still the CTA and the frictionful bail on the compose, briefing and
-   dormant screens. `.wl-actions-row` is a different, unrelated class
+   still the CTA and the frictionful bail on the compose and dormant
+   screens. `.wl-actions-row` is a different, unrelated class
    (the compose screen's button pair) and is untouched. */
 .wl-btn-primary {
   width: 100%;
@@ -1389,16 +1389,6 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover { background-color: #45453F; }
 [data-theme="light"] ::-webkit-scrollbar-thumb:hover { background-color: #CFC8BA; }
-
-/* Morning brief greeting (Doppio One editorial) */
-.wl-brief-greeting {
-  font-family: var(--font-serif);
-  font-size: 38px;
-  font-weight: 400;
-  line-height: 1.15;
-  letter-spacing: -0.025em;
-  color: var(--wl-text-primary);
-}
 
 /* Toast */
 .wl-toast {

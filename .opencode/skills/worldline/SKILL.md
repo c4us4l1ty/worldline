@@ -15,7 +15,7 @@ description: Worldline Design System — Stackelberg single-directive 9:16 viewp
 
 ## When to use me
 Use this skill when:
-- Designing or coding any UI in Worldline (Stackelberg active directive canvas, daily briefing, evening audit, BIP-39 recovery screen).
+- Designing or coding any UI in Worldline (Stackelberg active directive canvas, the control panel, evening audit, BIP-39 recovery screen).
 - Styling the 9:16 desktop viewport container (`420px × 747px`), preventing maximization and full-screen layouts.
 - Implementing the single-command HUD, progressive disclosure steps, or the frictionful escape hatch modal.
 - Reviewing PRs for contrast compliance, zero-guilt feedback styling, and local-first typography performance.
@@ -290,7 +290,7 @@ Goal creation and Settings open with the same fixed header: a **centred** title 
 
 Two rules this section encodes:
 
-- **A page title is one plain serif line — no sub-heading, no accent.** Both titles ("Settings", "State the Objective") are the same weight, colour, and case treatment. A deck under a short heading restated the heading rather than adding anything, and `.wl-page-sub` was deleted with it. **The coral accent does not go in a title.** It was briefly applied to the word "objective", which made that heading read as a different kind of object from every other screen and spent the beacon on a decorative word rather than on something live. `.wl-italic-accent` remains correct for the *editorial* headings it was designed for — the morning greeting, the dormant line, the seed-phrase title.
+- **A page title is one plain serif line — no sub-heading, no accent.** Both titles ("Settings", "State the Objective") are the same weight, colour, and case treatment. A deck under a short heading restated the heading rather than adding anything, and `.wl-page-sub` was deleted with it. **The coral accent does not go in a title.** It was briefly applied to the word "objective", which made that heading read as a different kind of object from every other screen and spent the beacon on a decorative word rather than on something live. `.wl-italic-accent` remains correct for the *editorial* headings it was designed for — the dormant line, the seed-phrase title.
 - **`--font-serif` titles are 24px, not 26px**: the centred column is 40px narrower per side, and "State the Objective" is the longest title in the app.
 
 ### A3. Compose Screen (goal creation)
@@ -409,7 +409,7 @@ reason is the friction, and the friction did not move, only the trigger.
 ```
 
 `.wl-btn-primary` and `.wl-btn-escape` are still the CTA and the
-frictionful bail everywhere else — the compose, briefing and dormant
+frictionful bail everywhere else — the compose and dormant
 screens. Only the canvas footer is gone.
 ```css
 /* Warm Cream Primary CTA */
@@ -476,7 +476,7 @@ Tactile 12-word recovery display during cryptographic account initialization.
 ```css
 .wl-seed-vault { display: flex; flex-direction: column; gap: 20px; }
 .wl-serif-title {
-  font-family: var(--font-serif-briefing); font-size: 28px; font-weight: 400;
+  font-family: var(--font-serif); font-size: 28px; font-weight: 400;
   margin: 0 0 8px 0; color: var(--wl-text-primary);
 }
 .wl-italic-accent { font-style: italic; color: var(--wl-accent-coral); }
@@ -529,7 +529,7 @@ Tactile 12-word recovery display during cryptographic account initialization.
 ## 7. Quick Start Checklist
 1. Bind `:root` tokens: Canvas `#131312`, Card `#20201F`, CTA `#DAD5C7`, Accent Coral `#E26D52`. (The card token is `#20201F`; an older revision of this file said `#1C1C1B` while contradicting itself two sections earlier.)
 2. Restrict root viewport bounds to `420px × 747px` fixed portrait mode.
-3. Wire typography: `Doppio One` for morning greetings and page titles, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry.
+3. Wire typography: `Doppio One` for editorial headings and page titles, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry.
 4. Render exactly **one** primary directive card (`.wl-directive-card`) under exactly **one** floating control (the menu).
 5. Wire keyboard shortcuts: `⌘+Enter` triggers completion; `Escape` triggers the frictionful bailout drawer.
 6. Secondary pages centre their title over an absolutely-positioned back chevron; boolean preferences are switches that persist immediately.

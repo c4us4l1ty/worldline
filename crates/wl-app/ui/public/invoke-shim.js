@@ -211,15 +211,6 @@
       };
       return Promise.resolve('goal-ai-1');
     },
-    morning_briefing: function (args) {
-      var titles = ['Write 300 words on Section 2.1', "Review yesterday's test failures"];
-      mockDb.directive = {
-        directive_id: 'dir-brief-1', milestone_id: 'ms-mock-1',
-        title: titles[0], instruction: 'Draft the merge-semantics prose. Momentum only.',
-        phase: [1, 2], estimated_minutes: 25, state: 'active', milestone_title: 'Persistence Layer',
-      };
-      return Promise.resolve({ titles: titles, created_ids: ['dir-brief-1', 'dir-brief-2'] });
-    },
     set_always_on_top: function (args) { return Promise.resolve(null); },
     identity_restore: function (args) { return Promise.resolve('restored-' + (args.phrase || '').length); },
 

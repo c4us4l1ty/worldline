@@ -75,20 +75,6 @@ fn parse_plan_rejects_out_of_band_phase_minutes() {
 }
 
 #[test]
-fn parse_briefing_valid_and_bounded() {
-    let ok = r#"{"directives":[{"title":"Write 300 words on Section 2.1","estimated_minutes":45,"phases":[
-        {"title":"Open IDE, signature","minutes":5},{"title":"Core loop","minutes":25}]}]}"#;
-    let b = parse_briefing(ok).unwrap();
-    assert_eq!(b.directives.len(), 1);
-    assert!(parse_briefing(r#"{"directives":[]}"#).is_err());
-    let four: String = (0..4)
-        .map(|i| format!(r#"{{"title":"d{i}","estimated_minutes":10,"phases":[]}}"#))
-        .collect::<Vec<_>>()
-        .join(",");
-    assert!(parse_briefing(&format!("{{\"directives\":[{four}]}}")).is_err());
-}
-
-#[test]
 fn provider_request_shapes() {
     // One OpenAI-compatible shape serves all three approved providers
     // (openrouter | google | bytez.com) — only the base URL varies.
@@ -343,42 +329,6 @@ fn fallback_title_uses_the_first_non_empty_line_and_clips_on_a_word() {
 }
 
 #[test]
-fn morning_briefing_persists_into_next_milestone() {
-    let r = repos();
-    // Seed goal + milestone manually (manual fallback path).
-    let g = r.create_goal("Ship", None, None, None).unwrap();
-    r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
-    let provider = ProviderAdapter::OpenAiCompat {
-        base_url: "http://localhost".into(),
-        api_key: Zeroizing::new("k".into()),
-        model: "m".into(),
-        json_mode: true,
-    };
-    let brief_json = r#"{"directives":[{"title":"Write 300 words on Section 2.1","estimated_minutes":45,"phases":[
-        {"title":"Signature","minutes":5},{"title":"Core loop","minutes":25}]}]}"#;
-    let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
-        Ok::<String, String>(
-            serde_json::json!({"choices":[{"message":{"content": brief_json}}]}).to_string(),
-        )
-    };
-    let brief = AiDispatcher::morning_briefing(
-        &provider,
-        "2026-09-13",
-        "2h available",
-        "{}",
-        execute,
-        &r,
-        None,
-    )
-    .unwrap();
-    assert_eq!(brief.directives.len(), 1);
-    let runnable = r.runnable_directives("2026-09-13").unwrap();
-    assert_eq!(runnable.len(), 1);
-    assert_eq!(runnable[0].scheduled_for_date, "2026-09-13");
-    assert_eq!(runnable[0].progressive_total, 2);
-}
-
-#[test]
 fn http_failure_maps_to_error() {
     let r = repos();
     let provider = ProviderAdapter::OpenAiCompat {
@@ -437,19 +387,6 @@ fn validation_bounds_and_persistence_preflight() {
     plan.milestones[1].description = Some("x".repeat(16 * 1024 + 1));
     assert!(persist_plan(&r, None, &plan, None).is_err());
     assert!(r.active_goal().unwrap().is_none());
-
-    let goal = r.create_goal("Goal", None, None, None).unwrap();
-    r.create_milestone(&goal.id, "Milestone", None, 0, None)
-        .unwrap();
-    let mut brief = BriefingResult {
-        directives: parse_plan(PLAN_JSON).unwrap().milestones[0]
-            .directives
-            .clone(),
-        created_ids: Vec::new(),
-    };
-    brief.directives[1].title.clear();
-    assert!(persist_briefing(&r, &brief, "2026-09-13", None).is_err());
-    assert!(r.runnable_directives("2026-09-13").unwrap().is_empty());
 }
 
 #[test]
@@ -457,13 +394,6 @@ fn response_size_checked_before_parsing_and_persistence() {
     let raw = " ".repeat(256 * 1024 + 1);
     assert!(matches!(
         parse_plan(&raw),
-        Err(DispatchError::Invalid {
-            field: "response",
-            ..
-        })
-    ));
-    assert!(matches!(
-        parse_briefing(&raw),
         Err(DispatchError::Invalid {
             field: "response",
             ..
@@ -526,21 +456,6 @@ fn facades_reject_bad_input_before_any_http_call() {
         &provider,
         &"c".repeat(crate::domain::MAX_DESCRIPTION_CHARS + 1),
         None,
-        no_http,
-        &r,
-        None
-    )
-    .is_err());
-    // morning_briefing: bad date, over-budget constraints.
-    assert!(
-        AiDispatcher::morning_briefing(&provider, "yesterday", "c", "{}", no_http, &r, None)
-            .is_err()
-    );
-    assert!(AiDispatcher::morning_briefing(
-        &provider,
-        "2026-09-18",
-        &"c".repeat(8 * 1024 + 1),
-        "{}",
         no_http,
         &r,
         None

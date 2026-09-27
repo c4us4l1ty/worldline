@@ -1,8 +1,6 @@
-//! Prompt builders for Tier 1 (Master Architect) and Tier 2 (Tactical
-//! Dispatcher). Prompts are pure functions of local state — no
-//! secrets, no personal identifiers beyond what the user typed.
-
-use crate::store::repo::Repos;
+//! Prompt builders for Tier 1 (Master Architect). Prompts are pure
+//! functions of local state — no secrets, no personal identifiers
+//! beyond what the user typed.
 
 use super::dispatch::{DirectiveDraft, MilestoneDraft};
 
@@ -50,49 +48,6 @@ Phases array: empty for directives <= 30 minutes, otherwise 2-4 phases\
 totaling approximately estimated_minutes. 2-5 milestones. No prose outside JSON."
     ));
     s
-}
-
-/// System prompt for Tier 2: daily tactical dispatch.
-pub fn tier2_system() -> String {
-    "You are the Tactical Dispatcher of a Stackelberg productivity system.\
-You receive the active milestone, recent velocity data, and the user's\
-constraints for today.\
-Emit 1–3 non-negotiable directives for TODAY ONLY.\
-Each directive: action verb + quantifiable constraint, executable in one\
-sitting. Never reference future days. Never produce lists of backlog.\
-Respond ONLY with JSON matching the provided schema."
-        .into()
-}
-
-/// User prompt for Tier 2, restricted to: active milestone + past 48h
-/// check-in velocity + user constraints (PRD §4 context window rule).
-pub fn tier2_user(
-    repos: &Repos,
-    today: &str,
-    constraints: &str,
-    velocity_json: &str,
-) -> Result<String, crate::store::StoreError> {
-    let mut s = String::new();
-    if let Some(goal) = repos.active_goal()? {
-        if let Some(m) = repos.next_pending_milestone(&goal.id)? {
-            s.push_str(&format!("ACTIVE MILESTONE: {}\n", m.title));
-            if let Some(d) = &m.description {
-                s.push_str(&format!("MILESTONE DETAIL: {d}\n"));
-            }
-        }
-    }
-    s.push_str(&format!(
-        "VELOCITY DATA (recent check-ins, objective): {velocity_json}\n"
-    ));
-    s.push_str(&format!("TODAY: {today}\n"));
-    let schema = "{\"directives\":[{\"title\":string,\"execution_context\":string,\"estimated_minutes\":number,\"phases\":[{\"title\":string,\"instruction\":string,\"minutes\":number}]}]}";
-    s.push_str(&format!(
-        "USER CONSTRAINTS TODAY: {constraints}\n\n\
-Produce directives for today. JSON schema:\n{schema}\n\
-1-3 directives. Phases: empty if <= 30 minutes, else 2-4 progressive phases.\
-No prose outside JSON."
-    ));
-    Ok(s)
 }
 
 /// Serializes milestone drafts for persistence logging (Tier 1 output).

@@ -58,7 +58,6 @@ fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         commands::settings_save,
         commands::relay_authenticate,
         commands::sync_now,
-        commands::morning_briefing,
         commands::master_plan,
         commands::list_models,
         commands::set_always_on_top,

@@ -144,7 +144,7 @@ impl ProviderAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// Structured plan outputs (Tier 1 / Tier 2 shared shapes)
+// Structured plan outputs (the architect's draft shape)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -192,17 +192,6 @@ pub struct PlanResult {
     #[serde(default)]
     pub description: Option<String>,
     pub milestones: Vec<MilestoneDraft>,
-}
-
-/// Tier-2 result: 1–3 directives for today.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BriefingResult {
-    pub directives: Vec<DirectiveDraft>,
-    /// IDs of the directive rows this briefing persisted (empty when
-    /// persistence was skipped/failed upstream — B-005 honesty).
-    /// Not serialized on the wire contract; set by the dispatcher.
-    #[serde(default, skip_serializing)]
-    pub created_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,14 +246,6 @@ fn extract_json_block(s: &str) -> Option<&str> {
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_DIRECTIVES_PER_MILESTONE: usize = 32;
-/// Prompt-input budgets: fail fast BEFORE spending a BYOK call on a
-/// body the provider would truncate or bill absurdly.
-///
-/// Tier-1's input (the compose screen's free-text intent) is bounded by
-/// `domain::MAX_DESCRIPTION_CHARS` instead of a separate constant — it
-/// is one prose field now, so the store's own budget is the honest cap.
-/// Tier-2 still takes a distinct constraints argument, hence its own.
-const MAX_AI_CONSTRAINTS_CHARS: usize = 8 * 1024;
 
 fn validate_response_size(raw: &str) -> Result<(), DispatchError> {
     if raw.len() > MAX_RESPONSE_BYTES {
@@ -295,36 +276,6 @@ pub fn parse_plan(raw: &str) -> Result<PlanResult, DispatchError> {
         serde_json::from_str(block).map_err(|e| DispatchError::BadJson(e.to_string()))?;
     validate_plan(&plan)?;
     Ok(plan)
-}
-
-pub fn parse_briefing(raw: &str) -> Result<BriefingResult, DispatchError> {
-    validate_response_size(raw)?;
-    let cleaned = strip_fences(raw);
-    let block = extract_json_block(cleaned)
-        .ok_or_else(|| DispatchError::BadJson("no JSON object found".into()))?;
-    let b: BriefingResult =
-        serde_json::from_str(block).map_err(|e| DispatchError::BadJson(e.to_string()))?;
-    validate_briefing(&b)?;
-    Ok(b)
-}
-
-fn validate_briefing(b: &BriefingResult) -> Result<(), DispatchError> {
-    if b.directives.is_empty() {
-        return Err(DispatchError::Invalid {
-            field: "directives",
-            why: "must contain 1–3 directives".into(),
-        });
-    }
-    if b.directives.len() > 3 {
-        return Err(DispatchError::Invalid {
-            field: "directives",
-            why: "more than 3 directives for one day".into(),
-        });
-    }
-    for d in &b.directives {
-        validate_directive(d)?;
-    }
-    Ok(())
 }
 
 fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
@@ -579,50 +530,6 @@ pub fn persist_plan(
     Ok(goal_id)
 }
 
-/// Persists a Tier-2 briefing into the active goal's next milestone.
-pub fn persist_briefing(
-    repos: &Repos,
-    brief: &BriefingResult,
-    date: &str,
-    identity: Option<&Identity>,
-) -> Result<Vec<String>, DispatchError> {
-    validate_briefing(brief)?;
-    let goal = repos
-        .active_goal()?
-        .ok_or(StoreError::NotFound("no active goal".into()))?;
-    let ms = repos
-        .next_pending_milestone(&goal.id)?
-        .ok_or(StoreError::NotFound("no pending milestone".into()))?;
-    let mut ids = Vec::new();
-    for d in &brief.directives {
-        let phases = super::prompt::phases_of(d);
-        let total = if phases.is_empty() {
-            1
-        } else {
-            phases.len() as i64
-        };
-        let mins = if d.estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES
-            && !phases.is_empty()
-        {
-            phases.iter().map(|(_, _, m)| m).sum()
-        } else {
-            d.estimated_minutes
-        };
-        let dir = repos.create_directive(
-            &ms.id,
-            &d.title,
-            d.execution_context.as_deref(),
-            mins,
-            total,
-            date,
-            &phases,
-            identity,
-        )?;
-        ids.push(dir.id);
-    }
-    Ok(ids)
-}
-
 // ---------------------------------------------------------------------------
 // Dispatcher facade
 // ---------------------------------------------------------------------------
@@ -682,44 +589,5 @@ impl AiDispatcher {
         // goal, this is ignored.
         let goal_id = persist_plan(repos, Some((intent, None, target_date)), &plan, identity)?;
         Ok((goal_id, plan))
-    }
-
-    /// Tier 2 — Tactical Dispatcher. Returns created directive ids.
-    pub fn morning_briefing<
-        F: Fn(&str, &[(String, String)], &serde_json::Value) -> Result<String, String>,
-    >(
-        provider: &ProviderAdapter,
-        today: &str,
-        constraints: &str,
-        velocity_json: &str,
-        execute: F,
-        repos: &Repos,
-        identity: Option<&Identity>,
-    ) -> Result<BriefingResult, DispatchError> {
-        crate::domain::check_date("today", today).map_err(|why| DispatchError::Invalid {
-            field: "today",
-            why,
-        })?;
-        if constraints.chars().count() > MAX_AI_CONSTRAINTS_CHARS {
-            return Err(DispatchError::Invalid {
-                field: "constraints",
-                why: format!("constraints exceed {MAX_AI_CONSTRAINTS_CHARS} characters"),
-            });
-        }
-        let user_prompt = super::prompt::tier2_user(repos, today, constraints, velocity_json)?;
-        let (url, headers, body) = provider.request(&super::prompt::tier2_system(), &user_prompt);
-        let raw = execute(&url, &headers, &body).map_err(DispatchError::BadJson)?;
-        validate_response_size(&raw)?;
-        let resp: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|e| DispatchError::BadJson(e.to_string()))?;
-        let text = provider
-            .extract_text(&resp)
-            .ok_or_else(|| DispatchError::BadJson("no content in response".into()))?;
-        let brief = parse_briefing(&text)?;
-        let created_ids = persist_briefing(repos, &brief, today, identity)?;
-        Ok(BriefingResult {
-            directives: brief.directives,
-            created_ids,
-        })
     }
 }

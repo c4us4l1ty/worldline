@@ -275,16 +275,6 @@ pub struct VelocityView {
     pub estimate_adjustment: f64,
 }
 
-/// B-005: shell returns what the dispatcher AUTHORED and what it
-/// actually PERSISTED — the UI must not assume the two are equal
-/// (no key / offline / validation failure yield zero persisted).
-#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
-pub struct BriefingView {
-    pub titles: Vec<String>,
-    #[serde(default)]
-    pub created_ids: Vec<String>,
-}
-
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppSettingsView {
     pub theme: String,
@@ -413,7 +403,6 @@ pub enum Screen {
     GoalCreate,
     EveningCheckIn,
     Dormant,
-    MorningBrief,
     Settings,
     /// Control panel → System Telemetry. The escape-hatch ledger, read
     /// back: what was bailed out of, why, and which of those are still
@@ -701,7 +690,6 @@ fn App() -> Element {
                     Screen::GoalCreate => rsx! { crate::screens::GoalCreateScreen {} },
                     Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
                     Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
-                    Screen::MorningBrief => rsx! { crate::screens::MorningBriefScreen {} },
                     Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
                     Screen::EntropyLog => rsx! { crate::screens::EntropyLogScreen {} },
                     Screen::Trajectory => rsx! { crate::screens::TrajectoryScreen {} },

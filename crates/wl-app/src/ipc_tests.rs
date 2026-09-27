@@ -222,33 +222,32 @@ fn master_plan_binds_its_payload_before_touching_the_vault() {
 /// network call, and it must name the setting to fix rather than
 /// reporting "offline".
 ///
-/// This is the regression for the placeholders the compose screen used
-/// to send when nothing was configured: `"flagship"` and
-/// `"haiku-class"`, which are not model ids on any provider, so every
-/// AI request 400'd and the UI blamed the network.
+/// This is the regression for the placeholder the compose screen used to
+/// send when nothing was configured: `"flagship"`, which is not a model
+/// id on any provider, so every AI request 400'd and the UI blamed the
+/// network. (The Tier-2 sibling of this test went with the morning
+/// briefing; `master_plan` is the only AI command left that takes a
+/// model, so it is the only one that can hit this.)
 #[test]
 fn a_blank_model_is_refused_with_a_pointer_to_settings() {
     let (app, _scratch) = mock_app();
 
-    for cmd in ["master_plan", "morning_briefing"] {
-        let result = call(
-            &app,
-            cmd,
-            serde_json::json!({
-                "provider": "openrouter",
-                "model": "",
-                "intent": "in n out burger",
-                "constraints": "",
-                "target_date": serde_json::Value::Null,
-            }),
-        );
-        assert_bound(&result, cmd);
-        let err = result.expect_err("a blank model must be refused");
-        assert!(
-            err.contains("no model selected") && err.contains("Settings"),
-            "{cmd} must refuse a blank model and point at Settings, got: {err}"
-        );
-    }
+    let result = call(
+        &app,
+        "master_plan",
+        serde_json::json!({
+            "provider": "openrouter",
+            "model": "",
+            "intent": "in n out burger",
+            "target_date": serde_json::Value::Null,
+        }),
+    );
+    assert_bound(&result, "master_plan");
+    let err = result.expect_err("a blank model must be refused");
+    assert!(
+        err.contains("no model selected") && err.contains("Settings"),
+        "master_plan must refuse a blank model and point at Settings, got: {err}"
+    );
 }
 
 /// `list_models` is the one command whose argument is entirely optional

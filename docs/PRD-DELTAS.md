@@ -1689,3 +1689,47 @@ almost all its motion into the first ~30ms) and the canvas's
     would read as the same mark twice. The needle points at roughly two
     o'clock: a gauge resting in its low corner would itself read as
     failure.
+
+## Tier-2 and the morning briefing are gone (2026-09-27, user-directed)
+
+167. **The morning briefing and the Tier-2 Tactical Dispatcher are
+    deleted, whole.** The product owner's call, against my recommendation
+    to keep the engine: "i dont want a morning briefing page, the main
+    page should be 'No active directive. Open the menu to create a goal
+    or review settings.' with the hamburger menu." The canvas was already
+    exactly that; the brief was the thing being removed.
+
+    The brief was the **only** surface for Tier-2 — the 1–3 directives a
+    day, authored from the active milestone and 48h of velocity. With
+    delta 160's canvas reduced to the directive alone, there was nothing
+    left for a second AI tier to justify itself against, so the whole
+    path went rather than being left dormant. Same call as delta 119
+    (`Screen::ByokSetup`) and delta 157 (`create_manual_*`).
+
+    Removed: `screens/morning_brief.rs`, `Screen::MorningBrief` + its
+    dispatch arm, the `BriefingView` DTO, the module entry and re-export,
+    the shim mock, `.wl-brief-greeting`, the `morning_briefing` command
+    + `generate_handler!` entry, its half of the blank-model IPC test, and
+    in `wl-core`: `BriefingResult`, `parse_briefing`, `validate_briefing`,
+    `persist_briefing`, `AiDispatcher::morning_briefing`, the
+    `tier2_system`/`tier2_user` prompt builders, `MAX_AI_CONSTRAINTS_CHARS`,
+    the `BriefingResult` re-export, and three tests. Workspace 218 → 216.
+
+168. **Tier-1 kept its whole surface.** The Master Architect is still
+    reachable from the compose screen and still names the goal and builds
+    the milestone tree — the AI earns its place by producing the plan you
+    execute, not by producing a daily list on top of it. `parse_plan`,
+    `persist_plan`, `tier1_*` and their tests are untouched.
+
+169. **`AppSettings.tier2_model` stays, and is now inert.** It is a column
+    on the CRDT-synced `app_settings` row; removing it needs a schema
+    migration, and the settings UI still surfaces a "dispatcher model"
+    picker that no longer drives anything. This is the one knowingly
+    dead surface left by the cut, recorded here rather than hidden: if a
+    Tier-2 returns it must be rebuilt, and this column is where it
+    resumes. Everything else went.
+
+170. **The Dormant screen lost its second button.** It led to the brief
+    and to the canvas; with the brief gone it is a rest beat with one
+    affordance, "Return to the line", which is the honest shape for a
+    screen whose whole job is to say stop.

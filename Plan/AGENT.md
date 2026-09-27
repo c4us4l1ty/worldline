@@ -20,17 +20,17 @@
   ```bash
   export CARGO_BUILD_JOBS=4
   cargo check -p wl-core
-  cargo test --workspace            # 209 tests
+  cargo test --workspace            # 216 tests
   cargo clippy --workspace --all-targets   # must be warning-free
   cargo fmt --all -- --check
   # Shell (standalone workspace; needs webkit/gtk via scripts/setup-linux.sh;
   #  skip in restricted environments, cover logic via wl-core tests instead):
-  cargo test --manifest-path crates/wl-app/Cargo.toml      # 23 tests
+  cargo test --manifest-path crates/wl-app/Cargo.toml      # 24 tests
   cargo clippy --manifest-path crates/wl-app/Cargo.toml
   # UI (standalone workspace, Rust/Dioxus→wasm):
-  cd crates/wl-app/ui && cargo test -p wl-ui               # 26 tests
+  cd crates/wl-app/ui && cargo test -p wl-ui               # 43 tests
   cd crates/wl-app/ui && cargo check --target wasm32-unknown-unknown
-  # Total: 258 tests green (209 workspace + 23 shell + 26 UI).
+  # Total: 283 tests green (216 workspace + 24 shell + 43 UI).
   ```
 - Notes: `wl-app` is excluded from the root workspace (`Cargo.toml:15`
   `exclude`), so `cargo check -p wl-app --lib` never resolves — always use
