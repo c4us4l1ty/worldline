@@ -430,7 +430,7 @@ pub mod sqlite_backend {
             let mut used = 0usize;
             // `MappedRows::next` yields `Option<Result<T>>`, so the `?`
             // belongs on the item, not on the iteration step.
-            while let Some(row) = rows.next() {
+            for row in rows {
                 let op = row?;
                 used = used.saturating_add(stored_bytes(&op));
                 if used > max_bytes {

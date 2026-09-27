@@ -174,7 +174,10 @@ async fn defect_challenge_flood_grows_state_without_cap() {
         &app,
         "/auth/verify",
         serde_json::json!({"public_key": pk, "signature": hex::encode(sig)}).to_string(),
-        &[("x-nonce", nonce.as_str()), ("x-expires", &expires_at.to_string())],
+        &[
+            ("x-nonce", nonce.as_str()),
+            ("x-expires", &expires_at.to_string()),
+        ],
     )
     .await;
     assert_eq!(
@@ -689,8 +692,14 @@ async fn operation_id_collisions_stay_scoped_per_account() {
     let out = state.blobs.insert_ops(std::slice::from_ref(&a)).unwrap();
     assert_eq!(out.duplicates, vec![a.operation_id.clone()]);
     // ...and pulls return each account only its own row.
-    let rows_a = state.blobs.pull_ops(&a.account, "", "", 100, wl_protocol::MAX_PULL_BYTES).unwrap();
-    let rows_b = state.blobs.pull_ops(&b.account, "", "", 100, wl_protocol::MAX_PULL_BYTES).unwrap();
+    let rows_a = state
+        .blobs
+        .pull_ops(&a.account, "", "", 100, wl_protocol::MAX_PULL_BYTES)
+        .unwrap();
+    let rows_b = state
+        .blobs
+        .pull_ops(&b.account, "", "", 100, wl_protocol::MAX_PULL_BYTES)
+        .unwrap();
     assert_eq!(rows_a.len(), 1);
     assert_eq!(rows_b.len(), 1);
     assert_eq!(rows_a[0].hlc, a.hlc);

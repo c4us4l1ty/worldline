@@ -10,3 +10,8 @@ target/
 *.db
 .DS_Store
 dist
+# Python bytecode cache. `scripts/css-lint.py` is a gate that runs on
+every CSS change, and a .pyc for it was committed — a build artifact
+that will disagree with the source after the first edit.
+__pycache__/
+*.pyc

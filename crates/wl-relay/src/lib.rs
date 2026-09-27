@@ -389,7 +389,9 @@ fn push_op_json_bytes(op: &wl_protocol::PushOp) -> usize {
     // construction — a renamed or added field moves it — and the
     // exhaustive test below is what proves the mapping is the one
     // serde actually uses.
-    const PUNCTUATION: usize = 2 + 4 + 5
+    const PUNCTUATION: usize = 2
+        + 4
+        + 5
         + "\"operation_id\"".len()
         + "\"hlc\"".len()
         + "\"table\"".len()
@@ -578,5 +580,4 @@ mod tests {
             }
         }
     }
-
 }

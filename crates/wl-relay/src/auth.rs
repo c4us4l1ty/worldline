@@ -445,8 +445,7 @@ impl AuthState {
     ) -> Result<(String, i64), AuthError> {
         {
             let challenges = self.challenges.lock_recover();
-            let (expected_pk, stored_exp) =
-                challenges.get(nonce).ok_or(AuthError::BadChallenge)?;
+            let (expected_pk, stored_exp) = challenges.get(nonce).ok_or(AuthError::BadChallenge)?;
             if expected_pk != public_key || *stored_exp != expires_at {
                 return Err(AuthError::BadChallenge);
             }
@@ -698,7 +697,11 @@ mod tests {
             consistent(&auth.challenges.lock_recover());
         }
         assert_eq!(auth.live_challenges_for(&pk), MAX_CHALLENGES_PER_ACCOUNT);
-        assert!(!auth.challenges.lock_recover().by_nonce.contains_key(&mints[0]));
+        assert!(!auth
+            .challenges
+            .lock_recover()
+            .by_nonce
+            .contains_key(&mints[0]));
         // …and the survivors are the NEWEST, not an arbitrary subset.
         for n in mints.iter().skip(1) {
             assert!(auth.challenges.lock_recover().by_nonce.contains_key(n));
@@ -971,7 +974,12 @@ mod tests {
         let (pk, sk) = fresh_keypair();
         let (nonce, _) = auth.issue_challenge(&pk).unwrap();
         let expiry = now_secs();
-        auth.challenges.lock_recover().by_nonce.get_mut(&nonce).unwrap().1 = expiry;
+        auth.challenges
+            .lock_recover()
+            .by_nonce
+            .get_mut(&nonce)
+            .unwrap()
+            .1 = expiry;
         let sig = sk
             .sign(&wl_protocol::challenge_signing_payload(&nonce, expiry))
             .to_bytes();
