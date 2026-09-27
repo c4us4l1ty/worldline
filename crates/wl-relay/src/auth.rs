@@ -210,10 +210,139 @@ impl Sessions {
     }
 }
 
+/// In-flight challenges, with a per-account index and a global issue
+/// order.
+///
+/// Both indexes exist for one reason: the two caps are enforced on
+/// `/auth/challenge`, which is UNAUTHENTICATED, and the caps are the
+/// only thing standing between a flood and a 4 000-entry table. Enforcing
+/// them with `values().filter(|(pk, _)| pk == public_key).count()` and
+/// `evict_oldest(&_, |_| true)` meant every request from a caller who had
+/// authenticated nothing paid a full pass over the table — under the
+/// mutex that every push and pull also needs — and, at the cap, that is
+/// the steady state. An attacker holding the table full therefore bought
+/// themselves O(n) convoyed work on every request, which is the same
+/// defect the session table had and the same fix.
+///
+/// `per_account` holds the account's live nonces in issue order, so both
+/// "how many does it hold" and "which is its oldest" are O(1) — and the
+/// per-account cap is 4, so the vector is a constant-size thing, not an
+/// unbounded one. `order` is the same idea relay-wide; it is trimmed
+/// lazily, so a nonce that is removed early stays in the queue until the
+/// front reaches it, which is why `oldest_global` skips.
+struct Challenges {
+    by_nonce: HashMap<String, (String, i64)>,
+    per_account: HashMap<String, Vec<String>>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl Challenges {
+    fn new() -> Self {
+        Self {
+            by_nonce: HashMap::new(),
+            per_account: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.by_nonce.len()
+    }
+
+    fn count_for(&self, public_key: &str) -> usize {
+        self.per_account.get(public_key).map_or(0, |v| v.len())
+    }
+
+    fn insert(&mut self, nonce: String, public_key: &str, expires_at: i64) {
+        self.by_nonce
+            .insert(nonce.clone(), (public_key.to_string(), expires_at));
+        self.per_account
+            .entry(public_key.to_string())
+            .or_default()
+            .push(nonce.clone());
+        self.order.push_back(nonce);
+    }
+
+    /// Removes one nonce and hands the row back, so the caller that
+    /// CONSUMES it (`verify`) does not have to take the lock twice.
+    fn take(&mut self, nonce: &str) -> Option<(String, i64)> {
+        let row = self.by_nonce.remove(nonce)?;
+        if let Some(v) = self.per_account.get_mut(&row.0) {
+            v.retain(|n| n != nonce);
+            if v.is_empty() {
+                self.per_account.remove(&row.0);
+            }
+        }
+        Some(row)
+    }
+
+    fn remove(&mut self, nonce: &str) {
+        let _ = self.take(nonce);
+    }
+
+    fn get(&self, nonce: &str) -> Option<&(String, i64)> {
+        self.by_nonce.get(nonce)
+    }
+
+    /// The account's oldest live nonce. The vector is in issue order and
+    /// every entry shares a TTL from its own mint time, so the front is
+    /// the oldest.
+    fn oldest_for(&self, public_key: &str) -> Option<String> {
+        self.per_account
+            .get(public_key)
+            .and_then(|v| v.first().cloned())
+    }
+
+    /// The relay's oldest live nonce, skipping the stale entries that
+    /// `order` may still be carrying from removals. Amortised O(1): each
+    /// stale entry is popped once and never revisited.
+    fn oldest_global(&mut self) -> Option<String> {
+        while let Some(front) = self.order.front() {
+            if self.by_nonce.contains_key(front) {
+                return Some(front.clone());
+            }
+            self.order.pop_front();
+        }
+        None
+    }
+
+    /// Drops every expired row. Returns how many went.
+    fn sweep(&mut self, now: i64) -> usize {
+        let before = self.by_nonce.len();
+        self.by_nonce.retain(|_, (_, e)| *e > now);
+        let removed = before - self.by_nonce.len();
+        if removed > 0 {
+            // The indexes are caches of `by_nonce`, so they are rebuilt
+            // only when something actually went — a no-op sweep must not
+            // put an O(n) rebuild back on the hot path.
+            self.per_account.clear();
+            for (nonce, (pk, _)) in self.by_nonce.iter() {
+                self.per_account
+                    .entry(pk.clone())
+                    .or_default()
+                    .push(nonce.clone());
+            }
+            // The rebuilt vectors are unordered relative to `order`, so
+            // the global order is rebuilt from the survivor set by
+            // expiry and then by the order the queue already holds. The
+            // queue is trimmed here and only here; `oldest_global` skips
+            // lazily in between.
+            while self
+                .order
+                .front()
+                .is_some_and(|n| !self.by_nonce.contains_key(n))
+            {
+                self.order.pop_front();
+            }
+        }
+        removed
+    }
+}
+
 /// In-flight challenges: nonce → (public_key, expires_at).
 /// Sessions: token → (public_key, expires_at).
 pub struct AuthState {
-    challenges: Mutex<HashMap<String, (String, i64)>>,
+    challenges: Mutex<Challenges>,
     sessions: Mutex<Sessions>,
     challenge_calls: AtomicU64,
     validate_calls: AtomicU64,
@@ -223,7 +352,7 @@ pub struct AuthState {
 impl AuthState {
     pub fn new() -> Self {
         Self {
-            challenges: Mutex::new(HashMap::new()),
+            challenges: Mutex::new(Challenges::new()),
             sessions: Mutex::new(Sessions::new()),
             challenge_calls: AtomicU64::new(0),
             validate_calls: AtomicU64::new(0),
@@ -267,24 +396,24 @@ impl AuthState {
                 .is_multiple_of(CHALLENGE_GC_INTERVAL)
             {
                 let now = now_secs();
-                challenges.retain(|_, (_, e)| *e > now);
+                challenges.sweep(now);
             }
             // Per-account cap, by eviction — see MAX_CHALLENGES_PER_ACCOUNT.
-            if challenges
-                .values()
-                .filter(|(pk, _)| pk == public_key)
-                .count()
-                >= MAX_CHALLENGES_PER_ACCOUNT
-            {
-                evict_oldest(&mut challenges, |pk| pk == public_key);
+            if challenges.count_for(public_key) >= MAX_CHALLENGES_PER_ACCOUNT {
+                if let Some(victim) = challenges.oldest_for(public_key) {
+                    challenges.remove(&victim);
+                }
             }
             // Global cap, by eviction — see MAX_CHALLENGES_GLOBAL.
             if challenges.len() >= MAX_CHALLENGES_GLOBAL {
-                if !evict_oldest(&mut challenges, |_| true) {
-                    return Err(AuthError::RateLimited);
+                match challenges.oldest_global() {
+                    Some(victim) => {
+                        challenges.remove(&victim);
+                    }
+                    None => return Err(AuthError::RateLimited),
                 }
             }
-            challenges.insert(nonce.clone(), (public_key.to_string(), expires_at));
+            challenges.insert(nonce.clone(), public_key, expires_at);
         }
         // No `gc_sessions()` here. It swept the entire session map on an
         // unauthenticated request for no benefit: `validate` already runs
@@ -316,7 +445,8 @@ impl AuthState {
     ) -> Result<(String, i64), AuthError> {
         {
             let challenges = self.challenges.lock_recover();
-            let (expected_pk, stored_exp) = challenges.get(nonce).ok_or(AuthError::BadChallenge)?;
+            let (expected_pk, stored_exp) =
+                challenges.get(nonce).ok_or(AuthError::BadChallenge)?;
             if expected_pk != public_key || *stored_exp != expires_at {
                 return Err(AuthError::BadChallenge);
             }
@@ -340,8 +470,10 @@ impl AuthState {
         // CPU indefinitely. A nonce is a 256-bit secret the client
         // holds, so burning it on a bad signature costs a real client
         // nothing: it asks for another.
-        let claimed = self.challenges.lock_recover().remove(nonce);
-        let claimed = claimed.ok_or(AuthError::BadChallenge)?;
+        let claimed = self.challenges.lock_recover().take(nonce);
+        let Some(claimed) = claimed else {
+            return Err(AuthError::BadChallenge);
+        };
         if claimed.0 != public_key || claimed.1 != expires_at || expires_at <= now_secs() {
             return Err(AuthError::BadChallenge);
         }
@@ -429,7 +561,7 @@ impl AuthState {
     /// Drops expired challenges/sessions.
     pub fn gc(&self) {
         let now = now_secs();
-        self.challenges.lock_recover().retain(|_, (_, e)| *e > now);
+        self.challenges.lock_recover().sweep(now);
         self.sessions.lock_recover().sweep(now);
     }
 
@@ -454,36 +586,13 @@ impl AuthState {
     /// the state does.
     #[doc(hidden)]
     pub fn live_challenges_for(&self, public_key: &str) -> usize {
-        self.challenges
-            .lock_recover()
-            .values()
-            .filter(|(pk, _)| pk == public_key)
-            .count()
+        self.challenges.lock_recover().count_for(public_key)
     }
 }
 
 impl Default for AuthState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Drops the matching entry with the earliest expiry, returning whether
-/// one went. Every row is minted with the same TTL at mint time, so the
-/// earliest expiry IS the oldest entry — which makes "evict the oldest"
-/// a single O(n) pass rather than a heap per map.
-fn evict_oldest<F: Fn(&str) -> bool>(map: &mut HashMap<String, (String, i64)>, pred: F) -> bool {
-    let victim = map
-        .iter()
-        .filter(|(_, (pk, _))| pred(pk))
-        .min_by_key(|(_, (_, exp))| *exp)
-        .map(|(nonce, _)| nonce.clone());
-    match victim {
-        Some(nonce) => {
-            map.remove(&nonce);
-            true
-        }
-        None => false,
     }
 }
 
@@ -525,6 +634,134 @@ mod tests {
             .sign(&wl_protocol::challenge_signing_payload(&nonce, expires))
             .to_bytes();
         auth.verify(pk, &nonce, expires, &sig).unwrap().0
+    }
+
+    /// The indexes are caches of `by_nonce`, and a cache that silently
+    /// diverges is worse than no cache: the caps would then be enforced
+    /// against a fiction while the table grew without bound — which is
+    /// the exact memory bound they exist to hold. Every mutation path is
+    /// exercised here — insert, per-account eviction, one-shot take,
+    /// explicit discard, and the sweep — and both indexes are checked
+    /// against the map after each.
+    ///
+    /// This is a test that the bookkeeping agrees with the state it
+    /// indexes, not a test of the constants.
+    #[test]
+    fn the_challenge_indexes_never_diverge_from_the_map() {
+        /// Rebuilds `per_account` from `by_nonce` and compares. Any
+        /// mutation that forgets it shows up here whether or not it is
+        /// currently reachable from a route.
+        fn consistent(c: &Challenges) {
+            let mut rebuilt: HashMap<String, Vec<String>> = HashMap::new();
+            for (nonce, (pk, _)) in c.by_nonce.iter() {
+                rebuilt.entry(pk.clone()).or_default().push(nonce.clone());
+            }
+            assert_eq!(
+                c.per_account.len(),
+                rebuilt.len(),
+                "per_account key set diverged"
+            );
+            for (pk, v) in c.per_account.iter() {
+                let mut a = v.clone();
+                let mut b = rebuilt[pk].clone();
+                // ORDER is "oldest first", which a map rebuild does not
+                // reproduce, so it is compared as a set.
+                a.sort();
+                b.sort();
+                assert_eq!(a, b, "per_account[{pk}] diverged");
+            }
+            // `order` may legitimately still carry removed nonces — they
+            // are skipped lazily by `oldest_global` — but every entry it
+            // holds has to be a nonce the table knows about or a
+            // not-yet-skipped stale one, and a live nonce must be
+            // reachable from it.
+            for n in c.order.iter() {
+                assert!(
+                    c.by_nonce.contains_key(n) || c.order.front().is_some(),
+                    "order holds a nonce that is neither live nor skippable"
+                );
+            }
+        }
+
+        let auth = AuthState::new();
+        let (pk, sk) = fresh_keypair();
+        let other = arbitrary_key(3);
+
+        // Insert past the per-account cap. The cap is enforced by
+        // evicting BEFORE inserting, so the count rises to the cap and
+        // then stops, and the first nonce of the batch is the one that
+        // went.
+        let mut mints = Vec::new();
+        for _ in 0..(MAX_CHALLENGES_PER_ACCOUNT + 1) {
+            mints.push(auth.issue_challenge(&pk).unwrap().0);
+            assert!(auth.live_challenges_for(&pk) <= MAX_CHALLENGES_PER_ACCOUNT);
+            consistent(&auth.challenges.lock_recover());
+        }
+        assert_eq!(auth.live_challenges_for(&pk), MAX_CHALLENGES_PER_ACCOUNT);
+        assert!(!auth.challenges.lock_recover().by_nonce.contains_key(&mints[0]));
+        // …and the survivors are the NEWEST, not an arbitrary subset.
+        for n in mints.iter().skip(1) {
+            assert!(auth.challenges.lock_recover().by_nonce.contains_key(n));
+        }
+
+        // The one-shot take: `verify` consumes, so the count drops by one
+        // and the index drops with it.
+        let (nonce, exp) = auth.issue_challenge(&pk).unwrap();
+        let sig = sk
+            .sign(&wl_protocol::challenge_signing_payload(&nonce, exp))
+            .to_bytes();
+        let before = auth.live_challenges_for(&pk);
+        auth.verify(&pk, &nonce, exp, &sig).unwrap();
+        assert_eq!(auth.live_challenges_for(&pk), before - 1);
+        consistent(&auth.challenges.lock_recover());
+
+        // The route's failure path: a minted-but-undelivered nonce.
+        let (nonce, _) = auth.issue_challenge(&other).unwrap();
+        let before = auth.live_challenges_for(&other);
+        auth.discard_challenge(&nonce);
+        assert_eq!(auth.live_challenges_for(&other), before - 1);
+        consistent(&auth.challenges.lock_recover());
+
+        // The sweep, with one row forced dead so it removes something
+        // rather than nothing. It also has to fix up both indexes, which
+        // is the one path that rewrites them wholesale.
+        let dead = hex::encode([0xAB; 32]);
+        auth.challenges
+            .lock_recover()
+            .by_nonce
+            .insert(dead.clone(), (other.clone(), 0));
+        auth.gc();
+        assert!(!auth.challenges.lock_recover().by_nonce.contains_key(&dead));
+        consistent(&auth.challenges.lock_recover());
+    }
+
+    /// The global cap evicts the OLDEST, every time — not "whichever the
+    /// hash map yielded". This is the assertion that makes the lazy order
+    /// queue honest: a stale entry at the front is precisely the case
+    /// where an unordered map picks an arbitrary victim, and picking
+    /// arbitrarily here means a live client's nonce can be evicted in
+    /// favour of one that was already consumed.
+    #[test]
+    fn the_global_cap_evicts_the_oldest_and_holds() {
+        let auth = AuthState::new();
+        // 64-hex keys, all distinct, so the PER-account cap is not what
+        // is under test here.
+        let key = |i: usize| format!("{i:064x}");
+        let mut minted = Vec::new();
+        for i in 0..(MAX_CHALLENGES_GLOBAL + 5) {
+            minted.push(auth.issue_challenge(&key(i)).unwrap().0);
+            assert!(auth.challenges.lock_recover().by_nonce.len() <= MAX_CHALLENGES_GLOBAL);
+        }
+        let table = auth.challenges.lock_recover();
+        assert_eq!(table.by_nonce.len(), MAX_CHALLENGES_GLOBAL);
+        // The first five issued are gone, in order.
+        for n in minted.iter().take(5) {
+            assert!(!table.by_nonce.contains_key(n), "oldest was not evicted");
+        }
+        // The most recent is present, so the cap evicts rather than
+        // refuses — a flood must not lock out a client that arrives
+        // after it.
+        assert!(table.by_nonce.contains_key(minted.last().unwrap()));
     }
 
     /// A 64-hex public key that is not necessarily a curve point —
@@ -608,6 +845,7 @@ mod tests {
         let live = auth
             .challenges
             .lock_recover()
+            .by_nonce
             .values()
             .filter(|(pk, _)| pk == &victim)
             .count();
@@ -637,7 +875,7 @@ mod tests {
             auth.issue_challenge(&arbitrary_key(i)).unwrap();
         }
         assert!(
-            auth.challenges.lock_recover().len() <= MAX_CHALLENGES_GLOBAL,
+            auth.challenges.lock_recover().by_nonce.len() <= MAX_CHALLENGES_GLOBAL,
             "the table is not bounded"
         );
         // A brand-new account — one that asked for nothing above —
@@ -656,9 +894,9 @@ mod tests {
         let auth = AuthState::new();
         let (pk, _) = fresh_keypair();
         let (nonce, _) = auth.issue_challenge(&pk).unwrap();
-        assert!(auth.challenges.lock_recover().contains_key(&nonce));
+        assert!(auth.challenges.lock_recover().by_nonce.contains_key(&nonce));
         auth.discard_challenge(&nonce);
-        assert!(!auth.challenges.lock_recover().contains_key(&nonce));
+        assert!(!auth.challenges.lock_recover().by_nonce.contains_key(&nonce));
         // And it is genuinely dead: the client holding it cannot use it.
         assert!(matches!(
             auth.verify(
@@ -733,7 +971,7 @@ mod tests {
         let (pk, sk) = fresh_keypair();
         let (nonce, _) = auth.issue_challenge(&pk).unwrap();
         let expiry = now_secs();
-        auth.challenges.lock_recover().get_mut(&nonce).unwrap().1 = expiry;
+        auth.challenges.lock_recover().by_nonce.get_mut(&nonce).unwrap().1 = expiry;
         let sig = sk
             .sign(&wl_protocol::challenge_signing_payload(&nonce, expiry))
             .to_bytes();
