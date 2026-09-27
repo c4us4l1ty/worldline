@@ -960,6 +960,25 @@ pub fn repair_plan(plan: &mut PlanResult, intent: &str) -> RepairReport {
 /// Clamps one directive's numbers and titles, or drops it if it has no
 /// usable identity left.
 fn repair_directive(d: &mut DirectiveDraft, report: &mut RepairReport) {
+    // Clipped to the STORE's bound, like every other model-authored
+    // string in this file. It was not: the title was only trimmed and
+    // defaulted, and `validate_plan` applies the 16 KiB generic text cap
+    // rather than `MAX_TITLE_CHARS`. So a 600-character title — which
+    // models produce by putting a description in a title field, and
+    // which is ~150 tokens of a 4096-token completion — passed every
+    // gate, the user approved the preview, and `create_directive`
+    // refused it at the write boundary. `persist_plan` has no
+    // transaction, so by then the new goal was committed, the previous
+    // goal archived, and the first milestone written.
+    //
+    // The pass's own invariant is "repaired means the store accepts
+    // this", and these two fields were the ones that broke it.
+    if let Some(clipped) = clip(&d.title, crate::domain::MAX_TITLE_CHARS) {
+        report.note(format!(
+            "A task title was too long and was shortened to “{clipped}”."
+        ));
+        d.title = clipped.to_string();
+    }
     d.title = repair_text(d.title.trim(), "A task", report);
     if let Some(clipped) = clip(
         d.execution_context.as_deref().unwrap_or(""),
@@ -1000,6 +1019,14 @@ fn repair_directive(d: &mut DirectiveDraft, report: &mut RepairReport) {
             before - d.phases.len()
         ));
     }
+    // Bounded to what the store accepts, like the title above. The
+    // instruction was the one model-authored field this loop never
+    // touched, and `create_directive` enforces `MAX_CONTEXT_CHARS` on
+    // it — so a 5 000-character phase instruction survived repair,
+    // survived validation, and failed the write. It is bounded in
+    // CHARACTERS by the store, so it is clipped in characters here;
+    // clipping in bytes (what `validate_text` does) would let a
+    // multi-byte instruction through at a third of the budget.
     for p in d.phases.iter_mut() {
         if let Some(clipped) = clip(&p.title, crate::domain::MAX_TITLE_CHARS) {
             p.title = clipped.to_string();
@@ -1007,6 +1034,31 @@ fn repair_directive(d: &mut DirectiveDraft, report: &mut RepairReport) {
         if p.title.trim().is_empty() {
             p.title = "Continue".into();
         }
+        if let Some(clipped) = clip(
+            p.instruction.as_deref().unwrap_or(""),
+            crate::domain::MAX_CONTEXT_CHARS,
+        ) {
+            if clipped != p.instruction.as_deref().unwrap_or("") {
+                p.instruction = Some(clipped.to_string());
+            }
+        }
+    }
+    // And bounded in COUNT. Every other list the model supplies is
+    // capped here — milestones to `MAX_MILESTONES`, directives to
+    // `MAX_DIRECTIVES_PER_MILESTONE` — but phases were only filtered by
+    // minute validity, and `reconcile_phases` only ever GROWS toward 4
+    // and stops, so a five-phase directive passed straight through
+    // repair and was then rejected wholesale by `validate_directive`'s
+    // 2..=4 band. That is the exact all-or-nothing failure this pass
+    // was written to remove, reproduced one list over.
+    if d.phases.len() > MAX_SYNTHESIS_PHASES as usize {
+        let dropped = d.phases.len() - MAX_SYNTHESIS_PHASES as usize;
+        d.phases.truncate(MAX_SYNTHESIS_PHASES as usize);
+        report.note(format!(
+            "“{}” listed {dropped} more steps than a task can have; the \
+             extras were folded into the last one.",
+            d.title
+        ));
     }
     if d.phases.is_empty() {
         if d.estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES {

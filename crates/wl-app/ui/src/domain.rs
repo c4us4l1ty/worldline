@@ -17,6 +17,17 @@
 /// directive. Mirrors `wl_core::domain::MAX_MINUTES`.
 pub const MAX_MINUTES: i64 = 1440;
 
+/// The *Estimated Complexity* a goal gets when nothing says otherwise.
+/// Mirrors `wl_core::domain::COMPLEXITY_DEFAULT` (1–5).
+///
+/// The rating is what the difficulty estimator trains on, so a default
+/// is a permanent statement about a goal's difficulty. It is stated
+/// here rather than reached for through a minute count, which is how
+/// the compose screen used to pick it: `MAX_MINUTES.min(25)` is 25,
+/// `clamp(1, 5)` turns that into 5, and every preview that omitted the
+/// field wrote a "deep" goal.
+pub const COMPLEXITY_DEFAULT: i64 = 3;
+
 /// A task title's budget. Mirrors `wl_core::domain::MAX_TITLE_CHARS`.
 ///
 /// Longer is not *rejected* by the store — it is clipped — so this is a
@@ -46,6 +57,9 @@ mod tests {
         // is the thing that has to be updated deliberately.
         assert_eq!(MAX_MINUTES, 1440);
         assert_eq!(MAX_TITLE_CHARS, 500);
+        assert_eq!(COMPLEXITY_DEFAULT, 3);
+        // The rating is a 1–5 scale, so the default has to be ON it.
+        assert!((1..=5).contains(&COMPLEXITY_DEFAULT));
     }
 
     #[test]

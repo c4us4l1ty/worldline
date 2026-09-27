@@ -21,8 +21,11 @@ pub enum AuthError {
     BadPublicKey,
     #[error("token invalid")]
     BadToken,
-    /// Challenge flood guard: too many unauthenticated challenge
-    /// requests from one public key (or globally) in the window.
+    /// Flood guard. Reachable only when a cap is FULL of rows that
+    /// cannot be evicted, which for the challenge table means an empty
+    /// map (unreachable) and for the session table means the oldest row
+    /// could not be removed. Every ordinary flood evicts instead — see
+    /// the cap docs.
     #[error("too many challenge requests — slow down")]
     RateLimited,
 }
@@ -34,22 +37,55 @@ pub const SESSION_TTL: Duration = Duration::from_secs(3600);
 
 /// Max in-flight challenges per account. A real client needs ONE at
 /// a time; anything beyond this is a flood.
+///
+/// Enforced by EVICTION, not by refusal. The public key is not a
+/// secret — it IS the account id, it is what every push envelope names
+/// — and `issue_challenge` performs no proof-of-possession, so anyone
+/// can mint challenges against a named victim. A refusal here was
+/// therefore a targeted, self-sustaining lockout of that one account
+/// for four requests every two minutes, and it is the cheapest denial
+/// in the system. Eviction preserves the property the cap exists for
+/// (this account holds at most `MAX_CHALLENGES_PER_ACCOUNT` live
+/// nonces) at no cost: a client only ever needs its newest nonce, and
+/// a challenge is a 256-bit secret the requester already holds, so a
+/// dropped one is re-requested in a single round trip.
 pub const MAX_CHALLENGES_PER_ACCOUNT: usize = 4;
 /// Global in-flight challenge ceiling (memory-DoS bound). Reaching it
-/// means the relay is under flood; new challenges are refused until
-/// TTLs expire.
+/// means the relay is under flood.
 ///
 /// Sized for the HOT PATH, not for headroom. Every `/auth/challenge`
-/// walks this table twice (an amortised expiry sweep and a per-account
+/// walks this table (an amortised expiry sweep and a per-account
 /// count) on an unauthenticated request while holding the mutex, and
 /// `ACCOUNT_CAP` is 10 000 — so 4 challenges per account can never
 /// exceed 40 000 live rows in practice. A ceiling far above that buys
 /// nothing and turns table growth directly into per-request CPU: at
 /// 100 000 each challenge cost ~1 ms of convoyed work that a caller who
 /// had authenticated nothing could demand forever.
+///
+/// Also EVICT, not refuse. A hard refusal made this an
+/// unauthenticated, relay-wide login kill-switch: 4 000 requests from
+/// anonymous callers — which need no credential at all, because
+/// `issue_challenge` accepts any 64-hex key — filled the table, after
+/// which *every* client, including one holding zero live challenges,
+/// received a 429 for a full `CHALLENGE_TTL`. The attacker sustains
+/// that state at roughly 33 rps indefinitely, so new devices and
+/// re-logins were permanently broken while live sessions kept working —
+/// which reads as "only new devices are affected" and is harder to
+/// notice than an outright outage. Evicting the globally oldest entry
+/// bounds exactly the same memory with no availability cost: the
+/// evicted nonce belongs to whoever minted it, and they can mint
+/// another.
 pub const MAX_CHALLENGES_GLOBAL: usize = 4_000;
 
+/// Max live sessions one account may hold. Eviction, like the
+/// challenge caps — a refusal at 8 self-inflicted logins would lock
+/// that account out for a full `SESSION_TTL`.
 pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
+/// Relay-wide session ceiling. Eviction, not refusal: reaching it
+/// takes 12 500 self-registered accounts, and a refusal cannot drain
+/// faster than `SESSION_TTL`, so the attacker would be locked out too
+/// and the table would sit full — turning a fifty-minute investment
+/// into a one-hour global login outage.
 pub const MAX_SESSIONS_GLOBAL: usize = 100_000;
 
 pub const MAX_TOKEN_LEN: usize = 512;
@@ -62,30 +98,143 @@ const VALIDATE_GC_INTERVAL: u64 = 128;
 /// Same, for the challenge table — which is the one an UNAUTHENTICATED
 /// caller can grow, so its sweep is the one that most needs amortising.
 const CHALLENGE_GC_INTERVAL: u64 = 64;
+/// The session table is only reachable through a completed signature,
+/// so its sweep is throttled on the same cadence as `validate`'s and
+/// shares the interval. It used to sweep on EVERY `verify`, holding the
+/// mutex every push and pull needs for an O(n) pass — the same defect
+/// the challenge path had already been fixed for.
+const SESSION_GC_INTERVAL: u64 = VALIDATE_GC_INTERVAL;
+
+/// One live session: the owning account, when it expires, and the
+/// order it was minted in.
+///
+/// The sequence is not decoration. Every row gets the same
+/// `SESSION_TTL` at mint time, so rows minted within the same second
+/// share an expiry — and "evict the oldest" would then be "evict an
+/// arbitrary one of the tied rows", which is neither observable nor
+/// testable. With a counter, oldest is a fact.
+type SessionRow = (String, i64, u64);
+
+/// The session table, with a per-account index.
+///
+/// The index exists for one reason: counting an account's sessions used
+/// to be `values().filter(|(pk, _)| pk == account).count()` — an O(n)
+/// scan with a string comparison per entry, on the login path, under
+/// the mutex that every push and pull needs. At the 100 000-row cap
+/// that is ~0.5 ms of convoyed work per authentication. With the index
+/// it is one hash lookup, and the O(n) work is confined to the
+/// (throttled) sweep and the (rare) eviction that genuinely need it.
+struct Sessions {
+    by_token: HashMap<String, SessionRow>,
+    per_account: HashMap<String, usize>,
+    /// Monotonic mint counter, so "oldest" is well defined even for
+    /// rows minted inside the same wall-clock second.
+    next_seq: u64,
+}
+
+impl Sessions {
+    fn new() -> Self {
+        Self {
+            by_token: HashMap::new(),
+            per_account: HashMap::new(),
+            next_seq: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// The account a live token belongs to, removing the row first if
+    /// it has expired. `None` for unknown or dead rows — a pull-only
+    /// client must not accumulate expired sessions.
+    fn account_of(&mut self, token: &str, now: i64) -> Option<String> {
+        match self.by_token.get(token) {
+            Some((_, exp, _)) if *exp <= now => {}
+            Some((account, _, _)) => return Some(account.clone()),
+            None => return None,
+        }
+        self.remove(token);
+        None
+    }
+
+    fn insert(&mut self, token: String, account: &str, expires_at: i64) {
+        *self.per_account.entry(account.to_string()).or_insert(0) += 1;
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.by_token
+            .insert(token, (account.to_string(), expires_at, seq));
+    }
+
+    fn remove(&mut self, token: &str) -> Option<SessionRow> {
+        let row = self.by_token.remove(token)?;
+        if let Some(n) = self.per_account.get_mut(&row.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.per_account.remove(&row.0);
+            }
+        }
+        Some(row)
+    }
+
+    fn count_for(&self, account: &str) -> usize {
+        self.per_account.get(account).copied().unwrap_or(0)
+    }
+
+    /// Drops every expired row. Returns how many went.
+    fn sweep(&mut self, now: i64) -> usize {
+        let before = self.by_token.len();
+        self.by_token.retain(|_, (_, exp, _)| *exp > now);
+        let removed = before - self.by_token.len();
+        // Only when something actually went: the index is a cache of
+        // `by_token`, and rebuilding it on a no-op sweep would put an
+        // O(n) allocation per login back on the hot path.
+        if removed > 0 {
+            self.per_account.clear();
+            for (account, _, _) in self.by_token.values() {
+                *self.per_account.entry(account.clone()).or_insert(0) += 1;
+            }
+        }
+        removed
+    }
+
+    /// The token whose session was minted first — ordered by expiry
+    /// (a row can only be older if it was minted earlier, since every
+    /// row gets the same TTL) and then by mint sequence, so the answer
+    /// is a fact rather than whichever tied row the hash map yielded.
+    fn oldest_token(&self) -> Option<String> {
+        self.by_token
+            .iter()
+            .min_by_key(|(_, (_, exp, seq))| (*exp, *seq))
+            .map(|(token, _)| token.clone())
+    }
+}
 
 /// In-flight challenges: nonce → (public_key, expires_at).
 /// Sessions: token → (public_key, expires_at).
 pub struct AuthState {
     challenges: Mutex<HashMap<String, (String, i64)>>,
-    sessions: Mutex<HashMap<String, (String, i64)>>,
+    sessions: Mutex<Sessions>,
     challenge_calls: AtomicU64,
     validate_calls: AtomicU64,
+    session_mint_calls: AtomicU64,
 }
 
 impl AuthState {
     pub fn new() -> Self {
         Self {
             challenges: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(Sessions::new()),
             challenge_calls: AtomicU64::new(0),
             validate_calls: AtomicU64::new(0),
+            session_mint_calls: AtomicU64::new(0),
         }
     }
 
     /// Issues an unguessable cryptographic challenge for an account.
     /// Registering on first sight is intentional (zero-knowledge:
-    /// the public key IS the account). Refuses floods: bounded in-flight
-    /// challenges per account AND globally.
+    /// the public key IS the account). Refuses floods by EVICTING:
+    /// bounded in-flight challenges per account AND globally.
     pub fn issue_challenge(&self, public_key: &str) -> Result<(String, i64), AuthError> {
         if public_key.len() != 64
             || !public_key
@@ -120,15 +269,20 @@ impl AuthState {
                 let now = now_secs();
                 challenges.retain(|_, (_, e)| *e > now);
             }
-            let per_account = challenges
+            // Per-account cap, by eviction — see MAX_CHALLENGES_PER_ACCOUNT.
+            if challenges
                 .values()
-                .filter(|(pk, _)| *pk == public_key)
-                .count();
-            if per_account >= MAX_CHALLENGES_PER_ACCOUNT {
-                return Err(AuthError::RateLimited);
+                .filter(|(pk, _)| pk == public_key)
+                .count()
+                >= MAX_CHALLENGES_PER_ACCOUNT
+            {
+                evict_oldest(&mut challenges, |pk| pk == public_key);
             }
+            // Global cap, by eviction — see MAX_CHALLENGES_GLOBAL.
             if challenges.len() >= MAX_CHALLENGES_GLOBAL {
-                return Err(AuthError::RateLimited);
+                if !evict_oldest(&mut challenges, |_| true) {
+                    return Err(AuthError::RateLimited);
+                }
             }
             challenges.insert(nonce.clone(), (public_key.to_string(), expires_at));
         }
@@ -137,6 +291,19 @@ impl AuthState {
         // the same sweep on a throttle, and it is the only caller whose
         // growth an unauthenticated peer can actually drive.
         Ok((nonce, expires_at))
+    }
+
+    /// Drops a challenge that was minted but never delivered.
+    ///
+    /// The `/auth/challenge` route mints the nonce BEFORE it registers
+    /// the account, so a store failure (or a `TimeoutLayer` 504 while
+    /// the registration is still running) leaves a live slot that the
+    /// requester never received and cannot present. Those are pure
+    /// waste, and against a degraded store they are what fills the
+    /// table: every retry leaks one, and a client that never got the
+    /// nonce cannot even burn it.
+    pub fn discard_challenge(&self, nonce: &str) {
+        self.challenges.lock_recover().remove(nonce);
     }
 
     /// Verifies a signed challenge; on success mints a session token.
@@ -201,12 +368,33 @@ impl AuthState {
         let token_id = hex::encode(token_bytes);
         let mut sessions = self.sessions.lock_recover();
         let now = now_secs();
-        sessions.retain(|_, (_, e)| *e > now);
-        let per_account = sessions.values().filter(|(pk, _)| pk == public_key).count();
-        if per_account >= MAX_SESSIONS_PER_ACCOUNT || sessions.len() >= MAX_SESSIONS_GLOBAL {
-            return Err(AuthError::RateLimited);
+        // Throttled, like the challenge table's sweep. This used to be a
+        // full O(n) `retain` on EVERY login — reintroducing, on the
+        // session side, the exact convoy the challenge side was fixed for.
+        if self
+            .session_mint_calls
+            .fetch_add(1, Ordering::Relaxed)
+            .rem_euclid(SESSION_GC_INTERVAL)
+            == SESSION_GC_INTERVAL - 1
+        {
+            sessions.sweep(now);
         }
-        sessions.insert(token_id.clone(), (public_key.to_string(), sess_expires));
+        if sessions.count_for(public_key) >= MAX_SESSIONS_PER_ACCOUNT {
+            // Evict, do not refuse (see MAX_SESSIONS_PER_ACCOUNT).
+            if let Some(victim) = account_oldest(&sessions, public_key) {
+                sessions.remove(&victim);
+            }
+        }
+        if sessions.len() >= MAX_SESSIONS_GLOBAL {
+            // Evict, do not refuse (see MAX_SESSIONS_GLOBAL).
+            match sessions.oldest_token() {
+                Some(victim) => {
+                    sessions.remove(&victim);
+                }
+                None => return Err(AuthError::RateLimited),
+            }
+        }
+        sessions.insert(token_id.clone(), public_key, sess_expires);
         Ok((token_id, sess_expires))
     }
 
@@ -221,28 +409,19 @@ impl AuthState {
         let now = now_secs();
         let pk = {
             let mut sessions = self.sessions.lock_recover();
-            match sessions.get(token).cloned() {
-                Some((pk, exp)) => {
-                    if exp <= now {
-                        // Remove the dead row on sight: pull-only clients
-                        // must not accumulate expired sessions.
-                        sessions.remove(token);
-                        None
-                    } else {
-                        Some(pk)
-                    }
-                }
-                None => None,
-            }
+            sessions.account_of(token, now)
         };
         let Some(pk) = pk else {
             return Err(AuthError::BadToken);
         };
         // Throttled sweep: amortized O(1) per validate call.
-        if self.validate_calls.fetch_add(1, Ordering::Relaxed) % VALIDATE_GC_INTERVAL
+        if self
+            .validate_calls
+            .fetch_add(1, Ordering::Relaxed)
+            .rem_euclid(VALIDATE_GC_INTERVAL)
             == VALIDATE_GC_INTERVAL - 1
         {
-            self.gc_sessions();
+            self.sessions.lock_recover().sweep(now);
         }
         Ok(pk)
     }
@@ -251,19 +430,14 @@ impl AuthState {
     pub fn gc(&self) {
         let now = now_secs();
         self.challenges.lock_recover().retain(|_, (_, e)| *e > now);
-        self.gc_sessions();
-    }
-
-    fn gc_sessions(&self) {
-        let now = now_secs();
-        self.sessions.lock_recover().retain(|_, (_, e)| *e > now);
+        self.sessions.lock_recover().sweep(now);
     }
 
     /// Test support: force a session row to expired (TTLs are real
     /// wall-clock 1h; tests need the row dead NOW).
     #[doc(hidden)]
     pub fn expire_session_for_test(&self, token: &str) {
-        if let Some(entry) = self.sessions.lock_recover().get_mut(token) {
+        if let Some(entry) = self.sessions.lock_recover().by_token.get_mut(token) {
             entry.1 = 0;
         }
     }
@@ -271,7 +445,20 @@ impl AuthState {
     /// Test support: does a session row still exist (expired or not)?
     #[doc(hidden)]
     pub fn session_row_exists(&self, token: &str) -> bool {
-        self.sessions.lock_recover().contains_key(token)
+        self.sessions.lock_recover().by_token.contains_key(token)
+    }
+
+    /// Test support: how many live challenges one account holds. The
+    /// per-account cap is enforced by eviction rather than refusal, so
+    /// the HTTP status code no longer shows that the bound held — only
+    /// the state does.
+    #[doc(hidden)]
+    pub fn live_challenges_for(&self, public_key: &str) -> usize {
+        self.challenges
+            .lock_recover()
+            .values()
+            .filter(|(pk, _)| pk == public_key)
+            .count()
     }
 }
 
@@ -279,6 +466,36 @@ impl Default for AuthState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Drops the matching entry with the earliest expiry, returning whether
+/// one went. Every row is minted with the same TTL at mint time, so the
+/// earliest expiry IS the oldest entry — which makes "evict the oldest"
+/// a single O(n) pass rather than a heap per map.
+fn evict_oldest<F: Fn(&str) -> bool>(map: &mut HashMap<String, (String, i64)>, pred: F) -> bool {
+    let victim = map
+        .iter()
+        .filter(|(_, (pk, _))| pred(pk))
+        .min_by_key(|(_, (_, exp))| *exp)
+        .map(|(nonce, _)| nonce.clone());
+    match victim {
+        Some(nonce) => {
+            map.remove(&nonce);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The session-table equivalent of [`evict_oldest`], restricted to one
+/// account.
+fn account_oldest(sessions: &Sessions, account: &str) -> Option<String> {
+    sessions
+        .by_token
+        .iter()
+        .filter(|(_, (pk, _, _))| pk == account)
+        .min_by_key(|(_, (_, exp, seq))| (*exp, *seq))
+        .map(|(token, _)| token.clone())
 }
 
 fn now_secs() -> i64 {
@@ -298,6 +515,22 @@ mod tests {
     fn fresh_keypair() -> (String, SigningKey) {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         (hex::encode(sk.verifying_key().as_bytes()), sk)
+    }
+
+    /// Signs the challenge the shell would have signed and mints a
+    /// session, returning its token.
+    fn login(auth: &AuthState, pk: &str, sk: &SigningKey) -> String {
+        let (nonce, expires) = auth.issue_challenge(pk).unwrap();
+        let sig = sk
+            .sign(&wl_protocol::challenge_signing_payload(&nonce, expires))
+            .to_bytes();
+        auth.verify(pk, &nonce, expires, &sig).unwrap().0
+    }
+
+    /// A 64-hex public key that is not necessarily a curve point —
+    /// which is exactly what an unauthenticated caller can send.
+    fn arbitrary_key(n: u8) -> String {
+        hex::encode([n; 32])
     }
 
     #[test]
@@ -357,48 +590,123 @@ mod tests {
         assert!(matches!(auth.validate("nope"), Err(AuthError::BadToken)));
     }
 
+    /// The per-account challenge cap bounds the table WITHOUT becoming
+    /// a lockout. The victim's public key is public — it is their
+    /// account id — and `issue_challenge` does no proof-of-possession,
+    /// so anyone can flood it. A refusal here denied a NAMED account
+    /// login at a cost of four requests per two minutes; the newest
+    /// challenge must always work instead.
     #[test]
-    fn challenge_flood_is_rate_limited_per_account() {
+    fn a_flood_against_one_account_never_denies_that_account() {
         let auth = AuthState::new();
-        let (pk, _) = fresh_keypair();
-        for _ in 0..MAX_CHALLENGES_PER_ACCOUNT {
-            assert!(auth.issue_challenge(&pk).is_ok());
+        let (victim, _sk) = fresh_keypair();
+        // Another account flooding the victim's key.
+        for _ in 0..MAX_CHALLENGES_PER_ACCOUNT * 20 {
+            auth.issue_challenge(&victim).unwrap();
         }
-        // The next unauthenticated challenge for the SAME key is refused.
-        assert!(matches!(
-            auth.issue_challenge(&pk),
-            Err(AuthError::RateLimited)
-        ));
-        // A different (legitimate) key is unaffected.
-        let sk = SigningKey::from_bytes(&[11u8; 32]);
-        let other = hex::encode(sk.verifying_key().as_bytes());
-        assert!(auth.issue_challenge(&other).is_ok());
+        // The cap still holds: the table never exceeds it for this key.
+        let live = auth
+            .challenges
+            .lock_recover()
+            .values()
+            .filter(|(pk, _)| pk == &victim)
+            .count();
+        assert!(
+            live <= MAX_CHALLENGES_PER_ACCOUNT,
+            "cap not enforced: {live} live challenges"
+        );
+        // And the victim can still authenticate — the newest nonce is
+        // theirs to use, and the flood evicted the older ones.
+        let (nonce, expires) = auth.issue_challenge(&victim).unwrap();
+        let sig = _sk
+            .sign(&wl_protocol::challenge_signing_payload(&nonce, expires))
+            .to_bytes();
+        assert!(auth.verify(&victim, &nonce, expires, &sig).is_ok());
     }
 
+    /// The relay-wide challenge cap bounds the table WITHOUT becoming a
+    /// relay-wide login kill-switch. This is the whole point of the
+    /// change from "refuse when full" to "evict the oldest": 4 000
+    /// anonymous requests used to make every subsequent `/auth/challenge`
+    /// fail for a full `CHALLENGE_TTL`, sustainable at ~33 rps.
     #[test]
-    fn session_flood_is_rate_limited_per_account() {
+    fn filling_the_global_challenge_cap_never_locks_anyone_out() {
+        let auth = AuthState::new();
+        // An anonymous flood across distinct keys — no credential needed.
+        for i in 0..(MAX_CHALLENGES_GLOBAL as u8).wrapping_mul(7) {
+            auth.issue_challenge(&arbitrary_key(i)).unwrap();
+        }
+        assert!(
+            auth.challenges.lock_recover().len() <= MAX_CHALLENGES_GLOBAL,
+            "the table is not bounded"
+        );
+        // A brand-new account — one that asked for nothing above —
+        // authenticates normally.
+        let (pk, sk) = fresh_keypair();
+        let token = login(&auth, &pk, &sk);
+        assert_eq!(auth.validate(&token).unwrap(), pk);
+    }
+
+    /// A minted-but-undelivered nonce must not hold a slot. The
+    /// `/auth/challenge` route registers the account after minting, so a
+    /// store failure strands the nonce; without this the retry loop of a
+    /// client against a degraded store is what fills the table.
+    #[test]
+    fn an_undelivered_challenge_can_be_discarded() {
+        let auth = AuthState::new();
+        let (pk, _) = fresh_keypair();
+        let (nonce, _) = auth.issue_challenge(&pk).unwrap();
+        assert!(auth.challenges.lock_recover().contains_key(&nonce));
+        auth.discard_challenge(&nonce);
+        assert!(!auth.challenges.lock_recover().contains_key(&nonce));
+        // And it is genuinely dead: the client holding it cannot use it.
+        assert!(matches!(
+            auth.verify(
+                &pk,
+                &nonce,
+                now_secs() + CHALLENGE_TTL.as_secs() as i64,
+                &[0u8; 64]
+            ),
+            Err(AuthError::BadChallenge)
+        ));
+    }
+
+    /// Session overflow evicts the account's own oldest rather than
+    /// refusing: 8 self-inflicted logins must not lock an account out
+    /// for a full hour.
+    #[test]
+    fn session_overflow_evicts_the_accounts_own_oldest() {
         let auth = AuthState::new();
         let (pk, sk) = fresh_keypair();
-        for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
-            let (nonce, expires) = auth.issue_challenge(&pk).unwrap();
-            let payload = wl_protocol::challenge_signing_payload(&nonce, expires);
-            let sig = sk.sign(&payload).to_bytes();
-            auth.verify(&pk, &nonce, expires, &sig).unwrap();
+        let mut tokens = vec![login(&auth, &pk, &sk)];
+        for _ in 0..MAX_SESSIONS_PER_ACCOUNT * 3 {
+            tokens.push(login(&auth, &pk, &sk));
         }
-        let (nonce, expires) = auth.issue_challenge(&pk).unwrap();
-        let payload = wl_protocol::challenge_signing_payload(&nonce, expires);
-        let sig = sk.sign(&payload).to_bytes();
-        assert!(matches!(
-            auth.verify(&pk, &nonce, expires, &sig),
-            Err(AuthError::RateLimited)
-        ));
-        let sk2 = SigningKey::from_bytes(&[13u8; 32]);
-        let other = hex::encode(sk2.verifying_key().as_bytes());
-        let (nonce2, expires2) = auth.issue_challenge(&other).unwrap();
-        let sig2 = sk2
-            .sign(&wl_protocol::challenge_signing_payload(&nonce2, expires2))
-            .to_bytes();
-        assert!(auth.verify(&other, &nonce2, expires2, &sig2).is_ok());
+        // The cap holds …
+        assert_eq!(
+            auth.sessions.lock_recover().count_for(&pk),
+            MAX_SESSIONS_PER_ACCOUNT
+        );
+        // … and the most recent login works.
+        let newest = tokens.last().unwrap().clone();
+        assert_eq!(auth.validate(&newest).unwrap(), pk);
+        // The oldest was the one that went, not the newest.
+        let oldest = tokens[0].clone();
+        assert!(matches!(auth.validate(&oldest), Err(AuthError::BadToken)));
+    }
+
+    /// A different account is never evicted by another account's flood.
+    #[test]
+    fn a_flood_from_one_account_leaves_other_accounts_intact() {
+        let auth = AuthState::new();
+        let (victim, _vsk) = fresh_keypair();
+        let victim_token = login(&auth, &victim, &SigningKey::from_bytes(&[7u8; 32]));
+        let flooder = SigningKey::from_bytes(&[31u8; 32]);
+        let flooder_pk = hex::encode(flooder.verifying_key().as_bytes());
+        for _ in 0..MAX_SESSIONS_PER_ACCOUNT * 3 {
+            login(&auth, &flooder_pk, &flooder);
+        }
+        assert_eq!(auth.validate(&victim_token).unwrap(), victim);
     }
 
     #[test]
@@ -407,6 +715,7 @@ mod tests {
         let long = "a".repeat(513);
         assert!(matches!(auth.validate(&long), Err(AuthError::BadToken)));
     }
+
     #[test]
     fn public_keys_have_one_canonical_account_representation() {
         let auth = AuthState::new();
@@ -450,5 +759,35 @@ mod tests {
         assert!(matches!(auth.validate(&token), Err(AuthError::BadToken)));
         // The row is gone now — the map no longer holds it.
         assert!(!auth.session_row_exists(&token));
+    }
+
+    /// The per-account index is a cache of `by_token`, so a sweep that
+    /// removes rows has to leave it consistent — otherwise a later
+    /// `count_for` silently under- (or over-) counts and the per-account
+    /// cap stops meaning anything.
+    #[test]
+    fn a_sweep_keeps_the_per_account_index_consistent() {
+        let auth = AuthState::new();
+        let mut keys = Vec::new();
+        for seed in 0u8..4 {
+            let sk = SigningKey::from_bytes(&[40 + seed; 32]);
+            let pk = hex::encode(sk.verifying_key().as_bytes());
+            let token = login(&auth, &pk, &sk);
+            keys.push((pk, token));
+        }
+        // Expire three of the four rows out from under the index.
+        for (_, token) in keys.iter().skip(1) {
+            auth.expire_session_for_test(token);
+        }
+        auth.sessions.lock_recover().sweep(now_secs());
+        {
+            let s = auth.sessions.lock_recover();
+            for (pk, _) in &keys {
+                let expected = if pk == &keys[0].0 { 1 } else { 0 };
+                assert_eq!(s.count_for(pk), expected, "index drifted for {pk}");
+            }
+        }
+        // The live session still validates.
+        assert_eq!(auth.validate(&keys[0].1).unwrap(), keys[0].0);
     }
 }

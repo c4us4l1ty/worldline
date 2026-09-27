@@ -92,6 +92,21 @@ impl Vault {
             .map_err(|_| VaultError::Stronghold("stored mnemonic is not valid UTF-8".into()))
     }
 
+    /// Removes the stored phrase entirely.
+    ///
+    /// Only needed to UNDO a write: `save_mnemonic` has to run before
+    /// the SQLite row does (so a persistence failure cannot publish an
+    /// identity whose secret was never stored), which means a failed
+    /// store write has to be able to take the phrase back out. Without
+    /// this, one failed write left the vault holding a mnemonic no row
+    /// described, and every path back from that state refuses.
+    pub fn delete_mnemonic(&self) -> Result<(), VaultError> {
+        if self.del(b"mnemonic")? {
+            self.commit()?;
+        }
+        Ok(())
+    }
+
     pub fn has_mnemonic(&self) -> bool {
         self.get(b"mnemonic").map(|o| o.is_some()).unwrap_or(false)
     }

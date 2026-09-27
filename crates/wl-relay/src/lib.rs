@@ -15,8 +15,9 @@ pub mod store;
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, State};
+use axum::http::request::Parts;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -57,9 +58,30 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Requests served at once. Bounds task count, per-request buffers, and
 /// the blast radius of a burst; excess requests queue at the layer
-/// instead of each allocating a task. Above the real concurrency of any
-/// honest deployment, below what a connection flood can open.
-const MAX_INFLIGHT_REQUESTS: usize = 256;
+/// instead of each allocating a task.
+///
+/// Sized to the storage backends, not in the abstract. It used to be
+/// 256 against a 16-connection Postgres pool, so a brief database stall
+/// parked 240 of the 256 permits *waiting* for a connection and the
+/// 30 s deadline fired — turning backpressure into 504s. 64 keeps a
+/// healthy margin over the pool (so real concurrency is served) while
+/// still leaving a ceiling a stalled database cannot exhaust.
+const MAX_INFLIGHT_REQUESTS: usize = 64;
+
+/// Concurrent TCP connections. Separate from [`MAX_INFLIGHT_REQUESTS`]
+/// because a connection that has not finished its request head is not
+/// yet a request: it holds a tokio task and hyper's read buffer without
+/// ever acquiring a service permit, so the per-request limit does not
+/// see it at all. A client that opens a socket and dribbles one byte of
+/// header every 29 s is parked in the header phase forever. Dropping
+/// the excess at accept time is what actually bounds the memory.
+pub const MAX_CONNECTIONS: usize = 128;
+
+/// Deadline for reading a request head (method, URI, headers) after a
+/// connection is accepted. Only applies until the head is complete, so
+/// a long-lived keep-alive connection is not cut off — but a partial
+/// head is dropped rather than parked.
+pub const HEADER_READ_DEADLINE: Duration = Duration::from_secs(15);
 
 pub struct AppState {
     pub auth: AuthState,
@@ -85,6 +107,42 @@ pub fn router(state: SharedState) -> Router {
 
 fn err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(json!({"error": msg}))).into_response()
+}
+
+/// The account a request is acting for, resolved from the bearer token.
+///
+/// A `FromRequestParts` extractor, not a call at the top of the handler,
+/// and that is the whole point. axum runs `FromRequestParts` extractors
+/// before `FromRequest` ones, and `Json` is the latter — so a check
+/// written in the handler body ran *after* the entire body had been
+/// buffered and deserialised. A 2 MiB push body is roughly 31 800
+/// `PushOp` structs (≈4 MB of live heap, since every field is a
+/// `String`) and the per-request op-count check that would reject it
+/// lives in the handler too, so 256 such requests saturate the whole
+/// concurrency limit on JSON parsing that no credential was ever
+/// allowed to start. Anonymous clients, the full body limit, and the
+/// CPU of a full parse — for nothing.
+pub struct Account(pub String);
+
+impl FromRequestParts<SharedState> for Account {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &SharedState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
+        let account = state
+            .auth
+            .validate(token)
+            .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
+        Ok(Account(account))
+    }
 }
 
 /// Runs a blocking store call off the async executor (the SQLite
@@ -134,6 +192,12 @@ async fn challenge(
             let key = req.public_key.clone();
             let owned = state.clone();
             if let Err(resp) = blocking(move || owned.blobs.register_account(&key)).await {
+                // The nonce is already in the auth table and the client
+                // never received it: anyone retrying against a degraded
+                // store would leak one slot per attempt, and a slot for a
+                // nonce nobody holds is exactly the waste that fills the
+                // challenge table. Give it back before answering.
+                state.auth.discard_challenge(&nonce);
                 return resp;
             }
             (
@@ -155,7 +219,7 @@ async fn challenge(
 
 async fn verify(
     State(state): State<SharedState>,
-    headers: HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(req): Json<wl_protocol::VerifyRequest>,
 ) -> axum::response::Response {
     // The client re-sends the challenge parts it signed via headers
@@ -214,22 +278,6 @@ async fn verify(
 // Sync routes (bearer-token gated; blind blobs)
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::result_large_err)]
-fn bearer_account(
-    state: &SharedState,
-    headers: &HeaderMap,
-) -> Result<String, axum::response::Response> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-    state
-        .auth
-        .validate(token)
-        .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid or expired token"))
-}
-
 /// Validates one pushed op's routing envelope. The relay can never
 /// read the ciphertext, but malformed headers have broken clients
 /// before (unpadded HLC text inverts TEXT ordering; unknown tables
@@ -257,13 +305,9 @@ fn validate_push_op(op: &wl_protocol::PushOp) -> Result<(), &'static str> {
 
 async fn push(
     State(state): State<SharedState>,
-    headers: HeaderMap,
+    Account(account): Account,
     Json(req): Json<wl_protocol::PushRequest>,
 ) -> axum::response::Response {
-    let account = match bearer_account(&state, &headers) {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
     if req.ops.len() > MAX_OPS_PER_PUSH {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "too many ops in one push");
     }
@@ -304,15 +348,66 @@ async fn push(
     }
 }
 
+/// Serialized size of one string, as `serde_json` emits it, without
+/// materialising anything.
+///
+/// serde escapes `"` and `\` to two bytes, the five short escapes
+/// (`\b \f \n \r \t`) to two, and every other C0 control to six
+/// (`\u00XX`). Everything else — including every multi-byte UTF-8
+/// sequence and `/` — is emitted verbatim, because `serde_json` does
+/// not escape non-ASCII by default. Counting bytes, not chars, is
+/// therefore exact, and so is the mapping from a byte to its escaped
+/// width.
+fn json_string_bytes(s: &str) -> usize {
+    // 2 for the opening and closing quote.
+    s.bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | 0x08 | 0x0c | b'\n' | b'\r' | b'\t' => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
+        + 2
+}
+
+/// Serialized size of a `PushOp` exactly as `serde_json::to_string`
+/// would produce it.
+///
+/// The pull budget used to MEASURE the op by serialising it —
+/// `to_string(&op).map(|j| j.len())` — which allocates a complete copy of
+/// every op (up to ~341 KiB for a max-sealed one) purely to count it,
+/// and then `Json(PullResponse { .. })` serialised the same bytes a
+/// second time. A full 8 MiB page therefore cost two complete
+/// serialisations plus one transient allocation per op on the
+/// authenticated hot path, for a number that is a pure function of the
+/// five string lengths.
+fn push_op_json_bytes(op: &wl_protocol::PushOp) -> usize {
+    // Derived from the field names rather than counted by hand: the
+    // scaffolding is two braces, four `,` field separators, and the
+    // five `:` that follow the five quoted keys. Writing the key
+    // lengths as string literals makes the term correct by
+    // construction — a renamed or added field moves it — and the
+    // exhaustive test below is what proves the mapping is the one
+    // serde actually uses.
+    const PUNCTUATION: usize = 2 + 4 + 5
+        + "\"operation_id\"".len()
+        + "\"hlc\"".len()
+        + "\"table\"".len()
+        + "\"record_id\"".len()
+        + "\"sealed_b64\"".len();
+    PUNCTUATION
+        + json_string_bytes(&op.operation_id)
+        + json_string_bytes(&op.hlc)
+        + json_string_bytes(&op.table)
+        + json_string_bytes(&op.record_id)
+        + json_string_bytes(&op.sealed_b64)
+}
+
 async fn pull(
     State(state): State<SharedState>,
-    headers: HeaderMap,
+    Account(account): Account,
     Json(req): Json<wl_protocol::PullRequest>,
 ) -> axum::response::Response {
-    let account = match bearer_account(&state, &headers) {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
     let limit = req.limit.clamp(1, PULL_HARD_CAP);
     if !wl_protocol::valid_cursor(&req.since_hlc, &req.since_op_id) {
         return err(StatusCode::BAD_REQUEST, "bad pull cursor");
@@ -321,14 +416,24 @@ async fn pull(
     let since_op_id = req.since_op_id.clone();
     let owned = state.clone();
     match blocking(move || {
-        owned
-            .blobs
-            .pull_ops(&account, &since_hlc, &since_op_id, limit)
+        // The byte budget goes ALL THE WAY DOWN. It used to be applied
+        // here, after the store had already run
+        // `SELECT … LIMIT 500` and collected every row into a `Vec` —
+        // so a single authenticated account holding 500 max-sealed ops
+        // made one pull materialise ~125 MiB, times 64 concurrent pulls.
+        // The store now stops accumulating at the budget itself.
+        owned.blobs.pull_ops(
+            &account,
+            &since_hlc,
+            &since_op_id,
+            limit,
+            wl_protocol::MAX_PULL_BYTES,
+        )
     })
     .await
     {
         Ok(stored) => {
-            // SYNC-4: enforce the pull byte budget here, at the only
+            // SYNC-4: enforce the pull byte budget here, at the last
             // place that can. `limit` alone cannot bound the response:
             // 500 ops of 256 KiB each is ~167 MiB, so an op-count cap
             // alone is not a size limit. Ops are appended until the
@@ -346,7 +451,7 @@ async fn pull(
             for o in &stored {
                 // Measure the op AS SERIALIZED, not as a sum of raw
                 // field lengths. serde_json escapes a control character
-                // as six bytes (``), so a header of 128 such
+                // as six bytes (``), so a header of 128 such
                 // characters is 128 bytes of `str::len()` and 768 bytes
                 // on the wire — and `operation_id`/`record_id` are
                 // attacker-chosen up to `MAX_HEADER_LEN` each. The old
@@ -358,16 +463,14 @@ async fn pull(
                 // never sync again. `MAX_OP_ENVELOPE_BYTES` is kept as
                 // the punctuation/comma allowance on top of the exact
                 // field costs.
-                let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&o.sealed);
                 let op = wl_protocol::PushOp {
                     operation_id: o.operation_id.clone(),
                     hlc: o.hlc.clone(),
                     table: o.table.clone(),
                     record_id: o.record_id.clone(),
-                    sealed_b64,
+                    sealed_b64: base64::engine::general_purpose::STANDARD.encode(&o.sealed),
                 };
-                let cost = serde_json::to_string(&op).map(|j| j.len()).unwrap_or(0)
-                    + wl_protocol::MAX_OP_ENVELOPE_BYTES;
+                let cost = push_op_json_bytes(&op) + wl_protocol::MAX_OP_ENVELOPE_BYTES;
                 if used + cost > wl_protocol::MAX_PULL_BYTES {
                     break;
                 }
@@ -375,8 +478,8 @@ async fn pull(
                 last_included = Some(o);
                 ops.push(op);
             }
-            // `exhausted` means "nothing remains after this batch", so the
-            // client can stop pulling. It is true only when we included
+            // `exhausted` means "nothing remains after this batch", so
+            // the client can stop pulling. It is true only when we included
             // everything the store returned AND the store returned fewer
             // ops than we asked for. Byte-truncation (`ops.len() <
             // stored.len()`) and a full page both mean "keep going".
@@ -424,4 +527,56 @@ pub type AppStateForTest = AppState;
 
 pub fn router_for_test(state: SharedState) -> Router {
     router(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(operation_id: &str, record_id: &str, sealed: &[u8]) -> wl_protocol::PushOp {
+        wl_protocol::PushOp {
+            operation_id: operation_id.to_string(),
+            hlc: "00000000000000000001.00000.00001".to_string(),
+            table: "goals".to_string(),
+            record_id: record_id.to_string(),
+            sealed_b64: base64::engine::general_purpose::STANDARD.encode(sealed),
+        }
+    }
+
+    /// The point of computing the serialized length instead of
+    /// measuring it: the two must agree EXACTLY, on every input the
+    /// attacker controls. A one-byte disagreement is a one-byte
+    /// under-count of the pull budget, and the budget's whole job is to
+    /// be an upper bound.
+    #[test]
+    fn the_measured_op_size_is_exactly_what_serde_emits() {
+        // Hostile header content: the escape classes that make a raw
+        // `str::len()` under-count by up to 5x, plus multi-byte UTF-8
+        // and every C0 control serde escapes as `\u00XX`.
+        let nasty = [
+            "plain",
+            "quote\"inside",
+            "back\\slash",
+            "new\nline\ttab\rcr\x08bs\x0cff",
+            "\u{0}\u{1}\u{1f}controls",
+            "emoji 🚀 and ünïcödé",
+            "sl/ash/is/not/escaped",
+            "",
+        ];
+        for operation_id in nasty {
+            for record_id in nasty {
+                for sealed in [b"".as_slice(), b"\x00\x01\xff", &[0x41; 300]] {
+                    let o = op(operation_id, record_id, sealed);
+                    let actual = serde_json::to_string(&o).unwrap().len();
+                    assert_eq!(
+                        push_op_json_bytes(&o),
+                        actual,
+                        "size mismatch for {operation_id:?}/{record_id:?}: measured {} vs serde {actual}",
+                        push_op_json_bytes(&o)
+                    );
+                }
+            }
+        }
+    }
+
 }

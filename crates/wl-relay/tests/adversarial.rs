@@ -26,6 +26,24 @@ async fn post(
         .unwrap()
 }
 
+/// `post` plus request headers — `/auth/verify` carries the signed
+/// challenge parts as headers rather than in the body.
+async fn post_with_headers(
+    app: &Router,
+    path: &str,
+    body: String,
+    headers: &[(&str, &str)],
+) -> axum::http::Response<Body> {
+    let mut req = Request::post(path).header("content-type", "application/json");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    app.clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
 async fn body_text(resp: axum::http::Response<Body>) -> String {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -114,10 +132,16 @@ async fn defect_challenge_flood_grows_state_without_cap() {
         blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
     });
     let app = wl_relay::router_for_test(state.clone());
-    let pk = format!("{:064x}", 42u64);
-    // Flood: all requests past the per-account cap are refused with 429.
+    use ed25519_dalek::Signer;
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let pk = hex::encode(sk.verifying_key().as_bytes());
+    // A flood against ONE account, whose public key is public and needs
+    // no proof of possession to mint challenges against. Every request
+    // is served — the cap is enforced by EVICTING the account's oldest
+    // live challenge, because refusing here is a lockout of a named
+    // account that costs the attacker four requests per two minutes.
     let mut ok = 0;
-    let mut limited = 0;
+    let mut last: Option<(String, i64)> = None;
     for _ in 0..100 {
         let resp = post(
             &app,
@@ -126,16 +150,39 @@ async fn defect_challenge_flood_grows_state_without_cap() {
             None,
         )
         .await;
-        match resp.status().as_u16() {
-            200 => ok += 1,
-            429 => limited += 1,
-            other => panic!("unexpected status {other}"),
-        }
+        assert_eq!(resp.status().as_u16(), 200, "a challenge was refused");
+        let body: wl_protocol::Challenge =
+            serde_json::from_str(&body_text(resp).await).expect("challenge body");
+        last = Some((body.nonce, body.expires_at));
+        ok += 1;
     }
-    assert!(ok <= wl_relay::auth::MAX_CHALLENGES_PER_ACCOUNT);
-    assert!(limited > 0, "flood never hit the per-account cap");
+    assert_eq!(ok, 100);
+    // The flood did not grow the state past the cap …
+    assert!(
+        state.auth.live_challenges_for(&pk) <= wl_relay::auth::MAX_CHALLENGES_PER_ACCOUNT,
+        "the per-account cap stopped holding"
+    );
+    // … and the newest nonce is still the client's to use, which is the
+    // whole difference between a flood guard and a lockout.
+    // The newest nonce is still the client's to use, which is the whole
+    // difference between a flood guard and a lockout.
+    let (nonce, expires_at) = last.expect("at least one challenge");
+    let sig = sk
+        .sign(&wl_protocol::challenge_signing_payload(&nonce, expires_at))
+        .to_bytes();
+    let resp = post_with_headers(
+        &app,
+        "/auth/verify",
+        serde_json::json!({"public_key": pk, "signature": hex::encode(sig)}).to_string(),
+        &[("x-nonce", nonce.as_str()), ("x-expires", &expires_at.to_string())],
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a flooded account must still be able to authenticate"
+    );
     // Then prove a full auth+pull still functions (legitimate client).
-    use ed25519_dalek::Signer;
     let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
     let real_pk = hex::encode(sk.verifying_key().as_bytes());
     let ch_resp = post(
@@ -359,7 +406,9 @@ async fn defect_push_holds_global_mutex_across_whole_batch() {
     assert_eq!(b.accepted.len(), exact, "no op lost at a chunk boundary");
 
     // (4) Everything is actually durable and pullable.
-    let pulled = blobs.pull_ops(&account, "", "", 10_000).unwrap();
+    let pulled = blobs
+        .pull_ops(&account, "", "", 10_000, wl_protocol::MAX_PULL_BYTES)
+        .unwrap();
     assert_eq!(pulled.len(), n + exact);
 }
 
@@ -640,8 +689,8 @@ async fn operation_id_collisions_stay_scoped_per_account() {
     let out = state.blobs.insert_ops(std::slice::from_ref(&a)).unwrap();
     assert_eq!(out.duplicates, vec![a.operation_id.clone()]);
     // ...and pulls return each account only its own row.
-    let rows_a = state.blobs.pull_ops(&a.account, "", "", 100).unwrap();
-    let rows_b = state.blobs.pull_ops(&b.account, "", "", 100).unwrap();
+    let rows_a = state.blobs.pull_ops(&a.account, "", "", 100, wl_protocol::MAX_PULL_BYTES).unwrap();
+    let rows_b = state.blobs.pull_ops(&b.account, "", "", 100, wl_protocol::MAX_PULL_BYTES).unwrap();
     assert_eq!(rows_a.len(), 1);
     assert_eq!(rows_b.len(), 1);
     assert_eq!(rows_a[0].hlc, a.hlc);

@@ -220,7 +220,14 @@ pub fn parse_openrouter(body: &str) -> Result<Vec<ModelInfo>, CatalogError> {
         return Err(CatalogError::Shape);
     };
     let mut out: Vec<ModelInfo> = Vec::with_capacity(entries.len().min(MAX_MODELS));
+    // Stops as soon as the cap is reached rather than walking a whole
+    // hostile list: `entries` is already materialised by `from_str`, but
+    // building a 400 000-element output Vec before truncating it was
+    // pure amplification of a hostile body.
     for e in entries {
+        if out.len() >= MAX_MODELS {
+            break;
+        }
         let Some(id) = e.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -291,6 +298,9 @@ pub fn parse_openai_list(body: &str) -> Result<Vec<ModelInfo>, CatalogError> {
     let entries = list.data.or(list.models).ok_or(CatalogError::Shape)?;
     let mut out: Vec<ModelInfo> = Vec::with_capacity(entries.len().min(MAX_MODELS));
     for e in entries {
+        if out.len() >= MAX_MODELS {
+            break;
+        }
         let raw =
             e.id.as_deref()
                 .or(e.name.as_deref())
@@ -337,18 +347,26 @@ pub fn parse_for(provider: &str, body: &str) -> Result<Vec<ModelInfo>, CatalogEr
     }
 }
 
-fn dedupe(mut v: Vec<ModelInfo>) -> Vec<ModelInfo> {
-    let mut seen: Vec<String> = Vec::with_capacity(v.len());
-    v.retain(|m| {
-        if seen.iter().any(|s| s == &m.id) {
-            false
-        } else {
-            seen.push(m.id.clone());
-            true
-        }
-    });
-    v.truncate(MAX_MODELS);
-    v
+/// Drops duplicate ids, keeping the first, and caps the result.
+///
+/// The cap is applied *while* de-duplicating, not after it. The old
+/// shape was `Vec<String>` + linear scan per element, with the truncate
+/// last: so a 4 MiB `/models` body (inside the shell's read ceiling,
+/// which is the only bound on this path) of ~400 000 well-formed
+/// entries cost ~8 × 10¹⁰ string comparisons — minutes of pinned CPU on
+/// a UI thread — after both the entry list and the output had been
+/// fully materialised. The legitimate 458-model OpenRouter catalog
+/// never showed it, which is why a two-entry test could not.
+///
+/// A `HashSet` keyed on the id gives O(n) overall, and taking only the
+/// first `MAX_MODELS` distinct ids means the loop stops early too.
+fn dedupe(v: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(v.len().min(MAX_MODELS));
+    v.into_iter()
+        .filter(|m| seen.insert(m.id.clone()))
+        .take(MAX_MODELS)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +425,53 @@ pub fn recommended<'a>(provider: &str, catalog: &'a [ModelInfo]) -> Vec<&'a Mode
 /// own sentence, short enough for a single-line toast.
 const MAX_ERROR_CHARS: usize = 240;
 
+/// Strips anything shaped like a credential out of a string that is
+/// about to be shown to a person.
+///
+/// Two classes, because providers quote the key back in two shapes:
+/// the real one, which is `sk-`/`sk-or-v1-`/`AIza`-prefixed with a long
+/// opaque body, and a truncation of it. Long enough that an ordinary
+/// word or a model id cannot match, short enough to catch the
+/// `sk-or-v1-1a2b3c…` prefixes and suffixes gateways quote.
+fn redact_credentials(s: &str) -> String {
+    const PREFIXES: [&str; 5] = ["sk-", "sk-or-", "AIza", "gsk_", "xai-"];
+    const MIN_BODY: usize = 8;
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let rest = &s[i..];
+        let hit = PREFIXES
+            .iter()
+            .filter_map(|p| rest.strip_prefix(*p))
+            .find(|after| {
+                after
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                    .count()
+                    >= MIN_BODY
+            });
+        match hit {
+            Some(after) => {
+                let run = after
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                    .count();
+                let prefix_len = rest.len() - after.len();
+                out.push_str(&rest[..prefix_len]);
+                out.push_str("[redacted]");
+                i += prefix_len + run;
+            }
+            None => {
+                let ch = rest.chars().next().expect("non-empty by construction");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// Turns a failed AI/provider call into an actionable sentence.
 ///
 /// This exists because the previous behaviour returned
@@ -419,6 +484,18 @@ pub fn provider_error_message(provider: &str, status: u16, body: &str) -> String
     let detail = error_message_of(body)
         .or_else(|| non_json_detail(body))
         .unwrap_or_default();
+    // Redacted before it is put anywhere, not after. A wrong-key 401
+    // from an OpenAI-compatible gateway is literally
+    // `{"error":{"message":"Incorrect API key provided: sk-or-v1-1a2b3c…  "}}`
+    // — the key's own prefix and suffix — and this string crosses the
+    // IPC boundary into the webview, where it is rendered in a toast.
+    // `AGENTS.md` forbids secrets reaching the DOM, and the BYOK key is
+    // the one secret a provider is guaranteed to quote back at us. So
+    // the credential shape is stripped here, at the place that first
+    // holds a provider's raw body, and the diagnosis itself survives
+    // (which half of the key is wrong is not useful to a user anyway —
+    // regenerate it).
+    let detail = redact_credentials(&detail);
     let lead = match status {
         400 => "bad request",
         401 => "key rejected",

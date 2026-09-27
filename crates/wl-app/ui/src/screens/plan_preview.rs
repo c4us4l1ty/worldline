@@ -155,20 +155,28 @@ pub fn PlanPreviewScreen() -> Element {
         let date = crate::app::date_plus_days(&crate::app::today_local(), 0);
         spawn(async move {
             #[derive(serde::Serialize)]
-            struct Commit<'a> {
-                /// The shell's own `PlanPreview`, so a field this build
-                /// does not know about crosses intact rather than being
-                /// dropped by a DTO that went stale.
-                preview: &'a PlanDraft,
+            struct Commit {
+                // The shell's own `PlanPreview`, translated by
+                // `PlanDraft::to_preview`. It used to be the `PlanDraft`
+                // itself, on the reasoning that a field this build does
+                // not know about would cross intact — but the shell
+                // binds a DIFFERENT type, and the two disagree on
+                // `steps`/`directives`, `instruction`/`execution_context`
+                // and a flat `repair` list versus `{ notes }`. Since
+                // `PlanPreview.plan` has no `#[serde(default)]`, the
+                // mismatch failed argument binding outright and no plan
+                // could ever be committed.
+                preview: crate::app::PlanPreviewWire,
                 target_date: Option<String>,
                 intent: Option<String>,
             }
             // `preview` is a STRUCT parameter, so the shell needs it
             // wrapped — see the `rename_all` note at the top of
             // commands.rs. Sending it flat fails deserialisation loudly;
-            // sending the wrong inner shape would not.
+            // sending the wrong inner shape did not, which is what
+            // happened.
             let req = Commit {
-                preview: &plan,
+                preview: plan.to_preview(),
                 target_date: date,
                 intent: None,
             };

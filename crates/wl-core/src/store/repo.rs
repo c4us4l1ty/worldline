@@ -27,6 +27,22 @@ use super::StoreError;
 /// Public only for that assert; not part of `wl-core`'s API surface.
 pub const MAX_SEALED_OP_BYTES: usize = 256 * 1024;
 
+/// Longest routing-header id the relay will accept on a push.
+///
+/// Mirrors `wl_protocol::MAX_HEADER_LEN` (128) on the write boundary,
+/// stated here because `wl-core` cannot depend on `wl-protocol` (the
+/// dependency runs the other way) and because the bound has to hold
+/// INSIDE the enqueue path, not only at its two public entry points:
+/// `emit_on` builds ids the caller never sees, and a phase record id
+/// is `"{directive_id}:{step}"` — up to 148 bytes for a legal
+/// 128-byte directive id. The relay rejects an over-long id with a
+/// 400 for the WHOLE batch, so an op that slipped through here would
+/// sit in the outbox forever, failing every drain attempt and wedging
+/// sync with no local remedy. Failing the write rolls the caller's
+/// transaction back instead, so the store never holds state it cannot
+/// replicate.
+pub const MAX_RECORD_ID_BYTES: usize = 128;
+
 /// Repository handle. The SQLite connection lives behind a mutex so
 /// `Repos` is `Send + Sync` (rusqlite `Connection` is `Send` but not
 /// `Sync`) — required for sharing across Tauri's async runtime and
@@ -43,7 +59,11 @@ pub struct Repos {
 /// a replicated op writes with no schema constraint, and
 /// `ensure_phases` sizes a `Vec` and a loop from it on a path the
 /// engine hits on every canvas load. The planner emits 2-4.
-const MAX_PROGRESSIVE_PHASES: i64 = 64;
+// Public so the engine's phase-closing loop is bounded by the same
+// number the store rebuilds under. They were two independent constants
+// (the engine's was 8), so a replicated directive with 10..=64 phases
+// could be marked `completed` with phase rows still `pending`/`active`.
+pub const MAX_PROGRESSIVE_PHASES: i64 = 64;
 
 fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
@@ -292,7 +312,7 @@ impl Repos {
     pub fn active_goal(&self) -> Result<Option<Goal>, StoreError> {
         self.lock_conn()
             .query_row(
-                &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE status = 'active' ORDER BY hlc_timestamp LIMIT 1"),
+                &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE status = 'active' ORDER BY hlc_timestamp, id LIMIT 1"),
                 [],
                 goal_row,
             )
@@ -398,11 +418,22 @@ impl Repos {
     }
 
     /// All milestones of a goal, ordered.
+    ///
+    /// The `id` tail on the ORDER BY is load-bearing, not decoration.
+    /// `order_index` is caller-supplied and unconstrained, and a merge
+    /// can land two milestones on the same index — two devices that ran
+    /// the planner for one goal while offline both number from
+    /// `enumerate()`, so both first milestones land at 0. Without the
+    /// tail SQLite's tie order is unspecified and can change with the
+    /// query plan, so the rail could reorder between renders.
+    /// `next_pending_milestone` carries the same tail because the engine
+    /// acts on that `LIMIT 1` pick. Every other ordered read in this
+    /// file is tied.
     pub fn milestones_for_goal(&self, goal_id: &str) -> Result<Vec<Milestone>, StoreError> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
-             FROM milestones WHERE goal_id = ?1 ORDER BY order_index",
+             FROM milestones WHERE goal_id = ?1 ORDER BY order_index, id",
         )?;
         let rows = stmt
             .query_map([goal_id], milestone_row)?
@@ -426,22 +457,30 @@ impl Repos {
         {
             return Err(StoreError::NotFound(format!("milestone {id}")));
         }
-        if identity.is_some() {
-            let m = tx.query_row(
-                "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
-                 FROM milestones WHERE id = ?1",
-                [id],
-                milestone_row,
-            )?;
-            Self::emit_on(
-                &tx,
-                identity,
-                crate::crdt::CrdtTable::Milestones,
-                &m.id,
-                &Self::milestone_json(&m),
-                ts,
-            )?;
-        }
+        // NOT gated on `identity.is_some()`. `emit_on` advances the
+        // record's merge head even when there is no outbox op to write
+        // (it falls back to the tick as the operation id), and the head
+        // is the record's true merge position — a local write moves it
+        // whether or not it replicates. The gate meant an edit made
+        // while the vault was locked left the head behind, and a peer op
+        // stamped between the two then won arbitration and blind-upsert
+        // its value over the newer local one. Permanent divergence, on
+        // the two paths that run on every canvas load and every ledger
+        // tick.
+        let m = tx.query_row(
+            "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
+             FROM milestones WHERE id = ?1",
+            [id],
+            milestone_row,
+        )?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::Milestones,
+            &m.id,
+            &Self::milestone_json(&m),
+            ts,
+        )?;
         self.persist_head_on(&tx)?;
         tx.commit()?;
         Ok(())
@@ -469,21 +508,21 @@ impl Repos {
         {
             return Err(StoreError::NotFound(format!("goal {id}")));
         }
-        if identity.is_some() {
-            let g = tx.query_row(
-                &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE id = ?1"),
-                [id],
-                goal_row,
-            )?;
-            Self::emit_on(
-                &tx,
-                identity,
-                crate::crdt::CrdtTable::Goals,
-                &g.id,
-                &Self::goal_json(&g),
-                ts,
-            )?;
-        }
+        // Merge head advances whether or not an outbox op is written
+        // (see `set_milestone_status`).
+        let g = tx.query_row(
+            &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE id = ?1"),
+            [id],
+            goal_row,
+        )?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::Goals,
+            &g.id,
+            &Self::goal_json(&g),
+            ts,
+        )?;
         self.persist_head_on(&tx)?;
         tx.commit()?;
         Ok(())
@@ -520,7 +559,7 @@ impl Repos {
             .query_row(
                 "SELECT id, goal_id, title, description, order_index, status, hlc_timestamp
                  FROM milestones WHERE goal_id = ?1 AND status = 'pending'
-                 ORDER BY order_index LIMIT 1",
+                 ORDER BY order_index, id LIMIT 1",
                 [goal_id],
                 milestone_row,
             )
@@ -796,16 +835,16 @@ impl Repos {
                     ts.to_string()
                 ],
             )?;
-            if identity.is_some() {
-                Self::emit_on(
-                    &tx,
-                    identity,
-                    crate::crdt::CrdtTable::DirectivePhases,
-                    &crate::crdt::phase_record_id(directive_id, p.step),
-                    &Self::phase_json(&p),
-                    ts,
-                )?;
-            }
+            // Merge head advances whether or not an outbox op is
+            // written (see `set_milestone_status`).
+            Self::emit_on(
+                &tx,
+                identity,
+                crate::crdt::CrdtTable::DirectivePhases,
+                &crate::crdt::phase_record_id(directive_id, p.step),
+                &Self::phase_json(&p),
+                ts,
+            )?;
             rebuilt.push(p);
         }
         self.persist_head_on(&tx)?;
@@ -1078,21 +1117,24 @@ impl Repos {
             "UPDATE directives SET state = ?2, hlc_timestamp = ?3 WHERE id = ?1",
             params![id, state.as_str(), ts.to_string()],
         )?;
-        if let Some(identity) = identity {
-            let d = conn.query_row(
-                &format!("SELECT {DIRECTIVE_COLUMNS} FROM directives WHERE id = ?1"),
-                [id],
-                directive_row,
-            )?;
-            Self::emit_on(
-                conn,
-                Some(identity),
-                crate::crdt::CrdtTable::Directives,
-                id,
-                &Self::directive_json(&d),
-                ts,
-            )?;
-        }
+        // Merge head advances whether or not an outbox op is written
+        // (see `set_milestone_status`). This is the whole body of the
+        // directive state write, so the gate that used to wrap it
+        // covered every activation, completion and ledger tick made
+        // while the vault was locked.
+        let d = conn.query_row(
+            &format!("SELECT {DIRECTIVE_COLUMNS} FROM directives WHERE id = ?1"),
+            [id],
+            directive_row,
+        )?;
+        Self::emit_on(
+            conn,
+            identity,
+            crate::crdt::CrdtTable::Directives,
+            id,
+            &Self::directive_json(&d),
+            ts,
+        )?;
         Ok(())
     }
 
@@ -2008,6 +2050,23 @@ impl Repos {
         payload_json: &serde_json::Value,
         ts: HlcTimestamp,
     ) -> Result<String, StoreError> {
+        // The sealed cap below has a twin in the header length, and it
+        // matters for the same reason: the relay refuses an over-long
+        // routing id with a 400 for the WHOLE batch, so an op that
+        // slipped through is undrainable and wedges sync permanently.
+        // `emit_on` is the only producer of ids the caller never sees —
+        // a phase record id is `"{directive_id}:{step}"`, so a legal
+        // 128-byte directive id produces a 148-byte phase id — which is
+        // why the bound has to be here and not only at the two public
+        // entry points that do check it.
+        if record_id.is_empty() || record_id.len() > MAX_RECORD_ID_BYTES {
+            return Err(StoreError::Invalid(format!(
+                "CRDT record id for {table_name} is {} bytes, outside 1..={MAX_RECORD_ID_BYTES} — \
+                 the write was rolled back rather than enqueueing an op the relay \
+                 will reject for the whole batch",
+                record_id.len()
+            )));
+        }
         let op_id = new_id("op");
         let aad = crate::crdt::routing_aad(table_name, record_id, &op_id, &ts.to_string());
         let plaintext = zeroize::Zeroizing::new(

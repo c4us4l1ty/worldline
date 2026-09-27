@@ -83,7 +83,62 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Worldline relay listening on {addr} (blind blob drop box)");
-        axum::serve(listener, app).await?;
-        Ok::<_, anyhow::Error>(())
+        // The accept loop, not `axum::serve`, because the two ceilings
+        // this relay needs both sit BELOW the service layer.
+        //
+        // `TimeoutLayer` and `ConcurrencyLimitLayer` are tower layers:
+        // they run after hyper has accepted the socket, spawned a task
+        // and parsed a complete request head. A client that opens a
+        // connection and dribbles one byte of header every 29 s never
+        // completes a head, so it never reaches the service, never
+        // acquires a permit and is never subject to the 30 s deadline —
+        // it just parks a task and hyper's read buffer for as long as it
+        // likes. Memory therefore grew with the number of open sockets,
+        // and nothing in the process could see it. The per-request
+        // limits stay exactly where they were; these two bound what
+        // they cannot reach.
+        let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        loop {
+            let (stream, _peer) = match listener.accept().await {
+                Ok(pair) => pair,
+                // A failed accept (fd exhaustion, a peer that vanished
+                // between SYN and accept) must not take the listener
+                // down with it.
+                Err(e) => {
+                    tracing::warn!("relay accept failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+            };
+            if open.load(std::sync::atomic::Ordering::Relaxed) >= wl_relay::MAX_CONNECTIONS {
+                // At the ceiling: refuse at the socket. The client sees
+                // a closed connection and retries, which is honest
+                // backpressure — the alternative is accepting and then
+                // holding, which is the memory growth this exists to
+                // stop.
+                drop(stream);
+                continue;
+            }
+            open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let app = app.clone();
+            let open = Arc::clone(&open);
+            tokio::spawn(async move {
+                let service = hyper_util::service::TowerToHyperService::new(app);
+                let mut builder = hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                );
+                // Only the request HEAD is bounded. The whole connection
+                // is not, so a long-lived keep-alive connection and a
+                // 30 s upload both still work; a partial head is simply
+                // dropped instead of parked.
+                builder
+                    .http1()
+                    .header_read_timeout(wl_relay::HEADER_READ_DEADLINE);
+                let _ = builder
+                    .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+                open.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        }
     })
 }

@@ -218,10 +218,16 @@ pub fn to_draft(preview: &serde_json::Value) -> Option<PlanDraft> {
             .unwrap_or_default()
             .to_string(),
         milestones,
+        // The DEFAULT complexity (3), not a minute count. This read
+        // `MAX_MINUTES.min(25)` — 1440 clamped down to 25, then
+        // `clamp(1, 5)` — so a preview that omitted the field was
+        // written as a 5/5 "deep" goal, and the rating is what the
+        // difficulty estimator trains on, so one missing field would
+        // have poisoned that bucket permanently.
         complexity: preview
             .get("complexity")
             .and_then(|v| v.as_i64())
-            .unwrap_or(crate::domain::MAX_MINUTES.min(25))
+            .unwrap_or(crate::domain::COMPLEXITY_DEFAULT)
             .clamp(1, 5),
         fallback: preview
             .get("fallback")

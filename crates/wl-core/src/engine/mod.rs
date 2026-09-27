@@ -15,15 +15,17 @@ use crate::domain::*;
 use crate::store::repo::Repos;
 use crate::store::StoreError;
 
-/// The most steps a progressive directive is allowed to have.
-///
-/// Mirrors the planner's own ceiling (`2..=4`, PRD §5.2) with a little
-/// headroom, and exists so the phase-closing loop in `mark_complete` has a
-/// bound that does not come from a replicated integer. `progressive_total`
-/// arrives from a sealed payload with no cross-field check, so a step past
-/// the total is possible in principle and a loop that trusted it would be
-/// a spin on the ledger's one write.
-const MAX_PROGRESSIVE_STEPS: i64 = 8;
+// The phase-closing loop in `mark_complete` is bounded by the STORE's
+// ceiling, not by a private copy of it. The engine used to carry its
+// own `8` while the store rebuilt phases under `64`, so a replicated
+// directive with 10..=64 phases could be marked `completed` with phase
+// rows still `pending`/`active`: the tick reported success, those rows'
+// outbox ops replicated, and the corruption converged across the whole
+// account. Two constants for one invariant is the bug; there is now
+// one. The clamp is also what stops the loop trusting a replicated
+// `progressive_total`, which arrives from a sealed payload with no
+// cross-field check.
+use crate::store::repo::MAX_PROGRESSIVE_PHASES;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -240,7 +242,7 @@ impl<'a> Engine<'a> {
             // body: the loop is driven by the store returning `true`, and a
             // `progressive_total` a peer inflated would otherwise make
             // "cannot spin" an argument rather than a fact.
-            for _ in 0..d.progressive_total.clamp(0, MAX_PROGRESSIVE_STEPS) {
+            for _ in 0..d.progressive_total.clamp(0, MAX_PROGRESSIVE_PHASES) {
                 // `false` means the row moved under us (a concurrent sync
                 // merge). Stop rather than spin; the directive still gets
                 // marked complete, which is what the user asked for.
@@ -328,9 +330,18 @@ impl<'a> Engine<'a> {
         if d.progressive_step > d.progressive_total {
             self.repos.reset_progressive_step(&d.id, self.identity)?;
         }
+        // The step the caller is actually ON, not step 1. The clamp
+        // covers both broken states a replicated payload can produce:
+        // `step > total` (handled by the reset above, so the answer is
+        // the first phase) and `step < 1`, which nothing writes and
+        // nothing rejects. On the ordinary self-heal path — the phase
+        // row for the step the directive is on went missing — looking
+        // up step 1 returned a DIFFERENT phase's duration, so the
+        // canvas rendered "Phase 2 of 3" with phase 1's minutes.
+        let step = d.progressive_step.clamp(1, d.progressive_total);
         rebuilt
             .into_iter()
-            .find(|p| p.step == 1)
+            .find(|p| p.step == step)
             .map(|p| p.minutes)
             .ok_or_else(|| {
                 StoreError::Invalid(format!(

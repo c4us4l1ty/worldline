@@ -20,6 +20,13 @@ wl-protocol = { path = "../wl-protocol" }
 axum.workspace = true
 tower.workspace = true
 tower-http = { version = "0.6", features = ["timeout"] }
+# The binary drives its own accept loop rather than `axum::serve`, so
+# that a connection which never finishes its request head can be
+# bounded: tower layers only run once hyper holds a complete request,
+# and a header-dribbling client never gets there. `hyper-util` is
+# already in the tree as an axum dependency — this makes the existing
+# crate direct rather than adding one.
+hyper-util = { version = "0.1", features = ["server", "server-auto", "service", "tokio"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

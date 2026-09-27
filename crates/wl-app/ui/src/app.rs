@@ -612,6 +612,126 @@ pub struct PlanDraft {
     pub repair: Vec<String>,
 }
 
+/// The shell's `PlanPreview`, mirrored for `commit_plan`.
+///
+/// `PlanDraft` is the PREVIEW's own shape: `steps`, `instruction`, and
+/// a flat `repair: Vec<String>` are the vocabulary of the screen that
+/// draws it. The shell binds `preview: PlanPreview`, whose shape is
+/// different in every one of those places — `directives`,
+/// `execution_context`, and a `RepairReport { notes }` object — plus a
+/// `plan` wrapper the draft does not have.
+///
+/// Sending the draft straight across is what `commit_plan` used to do,
+/// and the whole two-phase AI flow was dead in the packaged app: the
+/// shell's `PlanPreview.plan` is not `#[serde(default)]`, so Tauri
+/// rejected the payload with `missing field 'plan'` and the user got an
+/// error toast after paying for the plan. The browser mock hid it,
+/// because the mock's own check (`no plan in preview`) happens to be
+/// the one field the draft really is missing — so the failure looked
+/// plausible and the seam test in `ipc_tests.rs` never fired, since it
+/// hand-writes correct JSON rather than serialising this type.
+///
+/// A separate type, not a rename: the two shapes genuinely differ, and
+/// collapsing them would lose either the screen's vocabulary or the
+/// shell's. `PlanDraft::to_preview` is the one place the translation
+/// happens, and `plan_payload_matches_the_shell_contract` (in the
+/// shell's `ipc_tests.rs`) is what keeps the mirror honest.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct PlanPreviewWire {
+    pub plan: PlanResultWire,
+    pub repair: RepairReportWire,
+    pub complexity: i64,
+    pub fallback: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct PlanResultWire {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub milestones: Vec<MilestoneDraftWire>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct MilestoneDraftWire {
+    pub title: String,
+    pub description: Option<String>,
+    pub directives: Vec<DirectiveDraftWire>,
+    pub rationale: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct DirectiveDraftWire {
+    pub title: String,
+    pub execution_context: Option<String>,
+    pub estimated_minutes: i64,
+    pub phases: Vec<PhaseDraftWire>,
+    pub after: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct PhaseDraftWire {
+    pub title: String,
+    pub instruction: Option<String>,
+    pub minutes: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct RepairReportWire {
+    pub notes: Vec<String>,
+}
+
+impl PlanDraft {
+    /// The wire form `commit_plan` expects.
+    ///
+    /// Field-for-field the shell's `PlanPreview`:
+    /// `plan` (required, so never defaulted away), `repair.notes`,
+    /// `complexity`, `fallback`. The draft has no goal `description`,
+    /// and inventing one would put text in the database the user never
+    /// wrote — so it stays `None` and the shell falls back the same way
+    /// it does for a model that returned a plan without one.
+    pub fn to_preview(&self) -> PlanPreviewWire {
+        PlanPreviewWire {
+            plan: PlanResultWire {
+                title: Some(self.title.clone()),
+                description: None,
+                milestones: self
+                    .milestones
+                    .iter()
+                    .map(|m| MilestoneDraftWire {
+                        title: m.title.clone(),
+                        description: None,
+                        rationale: m.rationale.clone(),
+                        directives: m
+                            .steps
+                            .iter()
+                            .map(|s| DirectiveDraftWire {
+                                title: s.title.clone(),
+                                execution_context: s.instruction.clone(),
+                                estimated_minutes: s.estimated_minutes,
+                                phases: s
+                                    .phases
+                                    .iter()
+                                    .map(|p| PhaseDraftWire {
+                                        title: p.title.clone(),
+                                        instruction: None,
+                                        minutes: p.minutes,
+                                    })
+                                    .collect(),
+                                after: s.after,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            },
+            repair: RepairReportWire {
+                notes: self.repair.clone(),
+            },
+            complexity: self.complexity,
+            fallback: self.fallback.clone(),
+        }
+    }
+}
+
 impl PlanDraft {
     /// Flattened step order, which is what an `after` index refers to.
     pub fn steps(&self) -> impl Iterator<Item = &PlanStep> {
@@ -1415,6 +1535,135 @@ mod tests {
             phase: Some((1, 2)),
             ..Default::default()
         }
+    }
+
+    /// The wire `commit_plan` sends has to be the shell's `PlanPreview`,
+    /// key for key. The UI cannot import the shell's type (own
+    /// workspace, wasm-only, no SQLite in the bundle), so the mirror is
+    /// pinned here against the shape the shell actually binds:
+    /// `plan` is a REQUIRED field, so an absent one fails argument
+    /// binding outright — which is exactly what happened for the whole
+    /// two-phase AI flow, with the browser mock's "no plan in preview"
+    /// rejection making the failure look plausible instead of
+    /// structural.
+    ///
+    /// The shell side of the same contract is
+    /// `commit_plan_writes_the_edited_plan_and_its_edges` in
+    /// `crates/wl-app/src/ipc_tests.rs`, which feeds these exact keys.
+    #[test]
+    fn the_commit_payload_has_the_shells_plan_preview_shape() {
+        let draft = PlanDraft {
+            title: "Ship the relay".into(),
+            milestones: vec![PlanMilestone {
+                title: "Wire the protocol".into(),
+                rationale: Some("nothing downstream is testable".into()),
+                steps: vec![
+                    PlanStep {
+                        title: "Draft the outline".into(),
+                        instruction: Some("on paper".into()),
+                        estimated_minutes: 20,
+                        after: None,
+                        phases: vec![PlanPhase {
+                            title: "Section one".into(),
+                            minutes: 20,
+                        }],
+                        edited: false,
+                    },
+                    PlanStep {
+                        title: "Write the draft".into(),
+                        instruction: None,
+                        estimated_minutes: 25,
+                        after: Some(0),
+                        phases: vec![],
+                        edited: false,
+                    },
+                ],
+            }],
+            complexity: 4,
+            fallback: None,
+            repair: vec!["a title was shortened".into()],
+        };
+        let json = serde_json::to_value(draft.to_preview()).expect("serialises");
+
+        // Every key the shell's `PlanPreview` requires, spelled the way
+        // it spells them.
+        for key in ["plan", "repair", "complexity", "fallback"] {
+            assert!(
+                json.get(key).is_some(),
+                "the shell binds `preview.{key}`; it must be present, and it is not"
+            );
+        }
+        let plan = &json["plan"];
+        for key in ["title", "description", "milestones"] {
+            assert!(plan.get(key).is_some(), "PlanResult.{key} is missing");
+        }
+        let milestone = &plan["milestones"][0];
+        for key in ["title", "description", "directives", "rationale"] {
+            assert!(
+                milestone.get(key).is_some(),
+                "MilestoneDraft.{key} is missing — the shell requires it"
+            );
+        }
+        let directive = &milestone["directives"][0];
+        for key in ["title", "execution_context", "estimated_minutes", "phases", "after"] {
+            assert!(
+                directive.get(key).is_some(),
+                "DirectiveDraft.{key} is missing — the shell requires it"
+            );
+        }
+        assert!(
+            directive.get("steps").is_none(),
+            "`steps` is the PREVIEW's vocabulary, not the shell's; \
+             sending it is what broke the commit"
+        );
+        let phase = &directive["phases"][0];
+        for key in ["title", "instruction", "minutes"] {
+            assert!(phase.get(key).is_some(), "PhaseDraft.{key} is missing");
+        }
+        // The repair report is an OBJECT on the wire, not the preview's
+        // flat list — the other half of the same mismatch.
+        assert!(
+            json["repair"].is_object(),
+            "the shell binds `repair: RepairReport`, so it must be an object"
+        );
+        assert_eq!(json["repair"]["notes"][0], "a title was shortened");
+    }
+
+    /// The whole point of the mirror: what the user edited on the preview
+    /// is what gets written. A translation that dropped the edge or the
+    /// rating would pass a shape check and silently lose the user's
+    /// plan.
+    #[test]
+    fn the_translation_preserves_everything_the_user_edited() {
+        let mut draft = PlanDraft {
+            title: "t".into(),
+            complexity: 2,
+            ..Default::default()
+        };
+        draft.milestones.push(PlanMilestone {
+            title: "m".into(),
+            rationale: None,
+            steps: vec![PlanStep {
+                title: "a".into(),
+                instruction: Some("ctx".into()),
+                estimated_minutes: 30,
+                after: None,
+                phases: vec![PlanPhase {
+                    title: "p".into(),
+                    minutes: 30,
+                }],
+                edited: false,
+            }],
+        });
+        let wire = draft.to_preview();
+        assert_eq!(wire.complexity, 2);
+        assert_eq!(wire.plan.title.as_deref(), Some("t"));
+        let d = &wire.plan.milestones[0].directives[0];
+        assert_eq!(d.title, "a");
+        assert_eq!(d.execution_context.as_deref(), Some("ctx"));
+        assert_eq!(d.estimated_minutes, 30);
+        assert_eq!(d.phases[0].minutes, 30);
+        assert_eq!(d.after, None);
     }
 
     /// `elapsed_secs` backs the sync-freshness label, not a timer: it must

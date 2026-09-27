@@ -173,9 +173,51 @@ fn persist_identity(
         .vault
         .save_mnemonic(identity.phrase())
         .map_err(|e| ShellError::Vault(e.to_string()))?;
-    state
+    // …and the other way round too. `insert_identity` is a real
+    // DELETE+INSERT transaction and can fail (disk full, corruption,
+    // I/O error), and the vault keeps whatever it was last given. A
+    // vault that holds a mnemonic no SQLite row describes, for an
+    // identity that was never returned to the caller, is unrecoverable
+    // from the UI: `identity_status` reports `has: false,
+    // vault_has_mnemonic: true`, `identity_generate` refuses on the
+    // third disjunct, and `identity_restore` refuses any other phrase.
+    // The only control the page shows in that state is "Generate a new
+    // identity", which always fails — so a single failed store write
+    // on first run wedged onboarding permanently. Put the vault back
+    // the way it was, then report the store's error.
+    if let Err(e) = state
         .repos
-        .insert_identity(&identity, verified, verify_indices)?;
+        .insert_identity(&identity, verified, verify_indices)
+    {
+        match state.vault.get_mnemonic() {
+            Ok(previous) if previous != *identity.phrase() => {
+                if let Err(rollback) = state.vault.save_mnemonic(&previous) {
+                    // Nothing left to do but be loud: the store said no
+                    // and the vault could not be put back, so both
+                    // halves are now suspect and the user has to be
+                    // told which error is the real one.
+                    return Err(ShellError::Vault(format!(
+                        "{e}; and the vault could not be restored: {rollback}"
+                    )));
+                }
+            }
+            // No previous phrase: the vault must go back to holding
+            // nothing, or `identity_generate` will refuse forever.
+            Ok(_) => {
+                if let Err(rollback) = state.vault.delete_mnemonic() {
+                    return Err(ShellError::Vault(format!(
+                        "{e}; and the vault could not be cleared: {rollback}"
+                    )));
+                }
+            }
+            Err(rollback) => {
+                return Err(ShellError::Vault(format!(
+                    "{e}; and the vault could not be inspected: {rollback}"
+                )));
+            }
+        }
+        return Err(e.into());
+    }
     *current = Some(Arc::new(identity));
     Ok(())
 }
@@ -1012,6 +1054,17 @@ fn require_model(provider: &str, model: &str) -> ShellResult<()> {
         return Err(ShellError::Invalid(format!(
             "no model selected — choose an architect model for {provider} in Settings"
         )));
+    }
+    // The same bound `save_settings` applies to `tier1_model`, so the
+    // two entry points cannot disagree about what a model id is. The
+    // value reaches an HTTP body, a log line and (via the catalog
+    // cache) an in-memory map, so a control character or a newline in
+    // it is a hygiene problem, not a cosmetic one.
+    if !wl_core::ai::catalog::valid_model_id(model.trim()) {
+        return Err(ShellError::Invalid(
+            "that model id is not one a provider could serve — pick one from the list"
+                .into(),
+        ));
     }
     Ok(())
 }
