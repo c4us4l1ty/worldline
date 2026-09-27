@@ -1062,8 +1062,7 @@ fn require_model(provider: &str, model: &str) -> ShellResult<()> {
     // it is a hygiene problem, not a cosmetic one.
     if !wl_core::ai::catalog::valid_model_id(model.trim()) {
         return Err(ShellError::Invalid(
-            "that model id is not one a provider could serve — pick one from the list"
-                .into(),
+            "that model id is not one a provider could serve — pick one from the list".into(),
         ));
     }
     Ok(())

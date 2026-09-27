@@ -60,7 +60,7 @@ key at all.
 
 ### Core, relay, sync (any machine)
 ```bash
-cargo test --workspace        # 218 tests: crypto vectors, HLC, CRDT convergence,
+cargo test --workspace        # 283 tests: crypto vectors, HLC, CRDT convergence,
                               # engine invariants, relay auth/pull, two-device sync
 cargo run -p wl-relay         # blind relay on 127.0.0.1:8080 (SQLite backend)
 ```
@@ -147,9 +147,9 @@ and needs no API key.
 
 | Scope              | Command                                            | Status |
 |--------------------|----------------------------------------------------|--------|
-| Core/relay/sync    | `cargo test --workspace`                            | 218 pass |
+| Core/relay/sync    | `cargo test --workspace`                            | 283 pass |
 | Lints              | `cargo clippy --workspace --all-targets`           | clean  |
 | Formatting         | `cargo fmt --all -- --check`                        | clean  |
-| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 53 pass, clean |
-| Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 24 pass, clean (live-relay handshake, vault round-trip, real-IPC arg-binding tests) |
+| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 76 pass, clean |
+| Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 32 pass, clean (live-relay handshake, vault round-trip, real-IPC arg-binding tests) |
 | Desktop bundle     | `cd crates/wl-app && cargo tauri build` (after setup script) | by user |

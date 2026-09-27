@@ -107,6 +107,20 @@
   --wl-cta-hover:       #E7E2D4;
   --wl-accent-coral:    #E26D52;  /* beacon — see the three uses below */
 
+  /* Alpha derivations of the beacon, so a border or a hairline follows
+     the theme. Three hard-coded `rgba(226, 109, 82, …)` values sat in
+     the focus and hover rules and in the compose field's hairline: the
+     light theme substitutes `#D8583B`, so those rules were drawing the
+     DARK accent on parchment — a different colour rather than the same
+     colour at a different strength. */
+  --wl-accent-coral-30: rgba(226, 109, 82, 0.30);
+  --wl-accent-coral-45: rgba(226, 109, 82, 0.45);
+  --wl-accent-coral-50: rgba(226, 109, 82, 0.50);
+  /* The beacon read as TEXT — the step badge, the `· MOCK` markers, the
+     seed-vault inline accent. 5.08:1 on `--wl-surface-card`, so this one
+     value serves both themes as text. */
+  --wl-accent-coral-text: #E26D52;
+
   /* Text. Three steps, descending, all legible on `--wl-surface-card`. */
   --wl-text-primary:   #E5E2E0;   /* 12.6:1 — headlines, values, rows   */
   --wl-text-secondary: #CAC6BC;   /*  9.9:1 — instruction, row labels   */
@@ -178,7 +192,7 @@
   /* The beacon read as TEXT — the step badge, the two `· MOCK` markers,
      the seed-vault inline accent — is 3.14:1 on the light card in the
      theme's own `#D8583B`, and WCAG AA below 18px wants 4.5:1. The dark
-     theme's `#E26D52` clears 5:1, so only light mode failed; the fix is
+     theme's `#E26D52` measures 5.08:1, so only light mode failed; the fix is
      a separate text value rather than darkening the beacon, which is
      also a fill (the create-goal button) where the surface weight is
      what it needs. */
@@ -892,12 +906,14 @@ button:disabled { cursor: not-allowed; }
   outline: none;
 }
 .wl-textarea { resize: none; min-height: 84px; }
-/* Placeholder text is TEXT and WCAG 1.4.3 covers it. The two `opacity`
+/* Placeholder text is TEXT and WCAG 1.4.3 covers it. The `opacity`
    multipliers that used to be here composited `--wl-text-muted` down to
-   ≈2.95:1 on the dark elevated surface and ≈3.15:1 on the compose
-   canvas — a field you can read the label of but not the hint in. The
-   second step down the ladder is the correct one; there is no step below
-   it that is still text. */
+   2.97:1 on the dark elevated surface and 3.16:1 on the compose canvas,
+   and in the light theme to 1.91:1 and 2.03:1 — a field whose label you
+   can read and whose hint you cannot. The second step down the ladder
+   measures 8.43:1 (dark) and 6.67:1 (light) on the same surfaces, and
+   the compose field 10.90:1 and 8.15:1. The second step is the correct
+   one; there is no step below it that is still text. */
 .wl-input::placeholder,
 .wl-textarea::placeholder {
   color: var(--wl-text-secondary);
@@ -2118,12 +2134,12 @@ button:disabled { cursor: not-allowed; }
    a verdict, and this product does not deliver them. */
 /* A finished row is quieter, and the mechanism used to be a whole-row
    `opacity: 0.62` — which composites the SUBTREE, taking the
-   instruction line's `--wl-text-muted` from 5.1:1 to ≈2.8:1. "Quieter,
-   never struck through" was implemented as "less readable than the
-   rows above it", which is not the same property and is not what a
-   finished row should be. Dimmed by token per element instead: the
-   title loses its weight, the secondary line steps down the ladder one
-   stop, and both stay above 5:1. */
+   instruction line's `--wl-text-muted` from 5.12:1 (dark) and 5.52:1
+   (light) down to 2.82:1 and 2.58:1. "Quieter, never struck through"
+   was implemented as "less readable than the rows above it", which is
+   not the same property and is not what a finished row should be.
+   Dimmed by token per element instead: the title loses its weight, the
+   secondary line uses the muted step, and both stay above 5:1. */
 .wl-task-row--done .wl-task-title { font-weight: 400; }
 .wl-task-row--done .wl-task-instruction,
 .wl-task-row--done .wl-task-meta {

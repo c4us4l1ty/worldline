@@ -2786,3 +2786,158 @@ over it.**
     and there is nothing to make a browser re-fetch it eagerly. **When
     the browser and the Tauri window disagree, establish which is stale
     before believing either.**
+245. **The compose field never grew, and the estimate field never
+    recorded.** Two independent dead-input defects on the same screen,
+    both of which type fine and silently discard:
+
+    * `.wl-compose` was `flex: 1`, which is `flex: 1 1 0%`. The flex BASE
+      SIZE is what lays a flex item out, not `height` — so the inline
+      `height` that `app::autogrow_compose` sets from `scrollHeight` was
+      never consulted. The field scrolled inside itself, which is the
+      exact thing the autogrow exists to prevent. Now `flex: 1 1 auto`;
+      verified in the browser at `flexBasis: "auto"`, `height` 398px
+      against `scrollHeight` 397px.
+    * The per-step estimate input in the plan preview had **no
+      `oninput` at all** — it rendered `value: "{draft_minutes}"` and
+      nothing wrote back, so `save_edit` parsed the ORIGINAL number and
+      the typed estimate was discarded with no error. The title field two
+      nodes up had had an `oninput` all along, which is what made the
+      omission visible on inspection.
+
+246. **The escape ladder had no top rung.** The provider and model
+    pickers are full-screen `wl-picker-backdrop` dialogs with a close
+    button and a backdrop tap — and neither had a keydown handler, so
+    `Escape` could not reach them at all, because the handler is on the
+    app root. A keyboard user with a sheet open had no dismissal path.
+    Worse, `Ctrl+,` was still allowed through: it mounted the telemetry
+    drawer at `z-index: 40` UNDER the sheet's `z-index: 80`, so the
+    drawer was live and invisible, and the next `Escape` closed the
+    drawer the user could not see while the sheet they could see stayed
+    open. `Overlay` gained a `Picker` variant, the sheets report their
+    state up through a `sheet_open` signal, and
+    `toggle_telemetry_allowed` now refuses over a sheet as well as over
+    the control panel. The rule stays a pure function so it stays
+    testable without a DOM, a webview, or a keyboard.
+
+247. **A boot retry could be marked successful by the attempt before
+    it.** The watchdog settled one component-scoped `boot_settled` flag
+    that every attempt shared, and it latched on the first `await`
+    inside the effect — which is `sane()` or `load_head()`, not the boot
+    itself. A retry that failed fast therefore left `boot_attempt`
+    incremented and `boot_settled` already true, so the splash never
+    came back and the app was frozen on the failure screen with no
+    Retry. Each attempt now owns its own settled flag and the previous
+    attempt's task is dropped on re-entry, so a retry is a state change
+    that genuinely re-runs.
+
+248. **A token defined in only one theme is invisible to a token
+    linter.** `--wl-accent-coral-text` and the three
+    `--wl-accent-coral-NN` alphas were added to the
+    `[data-theme="light"]` block and missed in `:root`. `check_tokens`
+    takes the union of every `--x:` in the file, so it passed; so did
+    every other check. In the DEFAULT theme each of the nine use sites
+    resolved against a missing definition and — per CSS Variables §3 —
+    computed to `currentColor`/`inherit` instead: the compose focus
+    hairline rendered in the *text* colour rather than the beacon, and
+    the step badge, both `· MOCK` markers, the danger button and every
+    focus border inherited instead of using the accent.
+
+    `scripts/css-lint.py` gained **1b `theme-scoped-token`**: a
+    `var(--x)` used outside a theme block must be defined in `:root`.
+    The reverse stays legal — a token defined and used only inside the
+    light block resolves there. Fault-injected to prove it fires: with
+    the dark copies removed it reports all nine sites and exits 1;
+    restored, it is clean. This is the second dark-mode bug
+    `css-lint.py` has shipped through, and the same shape as the first —
+    a check that cannot see a rule get *narrower*.
+
+249. **Reading a stylesheet cannot find a token that resolves to the
+    wrong colour.** Every fix above was invisible in the source: the
+    `:root` block "looked" fine next to the light block, because one of
+    them defined the token and the other did not. It took rendering the
+    app, reading `getComputedStyle(...).borderBottomColor` and getting
+    `rgb(229, 226, 224)` — the text colour — where the rule said
+    `var(--wl-accent-coral-50)`. Measured, not eyeballed:
+
+    | surface | before | after |
+    |---|---|---|
+    | input placeholder, dark (elevated) | 2.97:1 | 8.43:1 |
+    | input placeholder, light (elevated) | 1.91:1 | 6.67:1 |
+    | compose placeholder, dark (canvas) | 3.16:1 | 10.90:1 |
+    | compose placeholder, light (canvas) | 2.03:1 | 8.15:1 |
+    | coral as text, light (card) | 3.14:1 | 5.05:1 |
+    | done-row instruction, dark (card) | 2.82:1 | 5.12:1 |
+    | done-row instruction, light (card) | 2.58:1 | 5.52:1 |
+    | horizon chevron, light (elevated) | 2.29:1 | 3.43:1 |
+
+250. **Three theme-tied colours were pinned to the dark palette.** The
+    input focus border, the verify slot and the compose hairline were
+    hard-coded `rgba(226, 109, 82, …)` — the DARK beacon — so light mode
+    drew the dark accent on parchment, which is a different colour
+    rather than the same colour at a different strength. The horizon
+    chevron was worse: a data-URI SVG with the dark theme's `#949087`
+    baked into the file, at 2.29:1 on the light elevated surface. All
+    four are tokens now, and the chevron is a `currentColor` mask so one
+    asset is correct in both themes and cannot drift from them.
+
+251. **A finished row was made illegible by being made quiet.** The
+    "quieter, never struck through" rule was implemented as a whole-row
+    `opacity: 0.62`, which composites the SUBTREE — taking the
+    instruction line's `--wl-text-muted` from 5.12:1 to 2.82:1 in dark
+    and 5.52:1 to 2.58:1 in light. Dimmed by token per element instead:
+    the title loses its weight, the secondary line uses the muted step,
+    and both stay above 5:1.
+
+252. **The shared press response was not shipping on any control.** The
+    invariant is documented on `button { transition }`: every pressable
+    surface shares a 1.5% squash and a 1px settle. But
+    `button:active:not(:disabled)` is (0,2,1) and both
+    `.wl-circle-btn:active` and `.wl-btn-primary:active` were (0,2,0)
+    while their `:hover` rules were (0,3,0) — and `:hover` is still
+    true while `:active` holds on a desktop webview. Measured before
+    and after, holding the pointer down:
+
+    | control | hover | active (after) |
+    |---|---|---|
+    | `.wl-btn-ghost` | `none` | `matrix(0.985,0,0,0.985,0,0.985)` |
+    | `.wl-circle-btn` | `translateY(-1px)` | `matrix(0.985,0,0,0.985,0,0.985)` |
+
+    A ticked ledger tick had the mirror defect: `.wl-task-tick--on` is
+    (0,1,0) and shares its element with `.wl-circle-btn`, whose
+    `:hover` is (0,3,0), so a TICKED row's tick went cream → grey the
+    moment the pointer landed on it — which reads as "the tick did not
+    take" for exactly the state a tick exists to show. Cream, not coral:
+    a finished task is neither live nor an alarm. Verified that the
+    unticked tick still hovers (`#2A2A29` → `#353533`) while the ticked
+    one holds `#DAD5C7`.
+
+253. **An over-tall directive card was clipped at both ends with no
+    scroll.** The canvas centred the card in a fixed-height column and
+    `body { overflow: hidden }` cut off whatever did not fit, so a long
+    instruction put its top ~800px AND its bottom ~800px outside the
+    frame with no scrollbar and nothing to reveal either end. Not
+    synthetic: "Create manually" splits a multi-line intent at the first
+    line and stores the rest as the goal description, which
+    `seed_first_steps` copies into the seeded directive's
+    `execution_context`, and the store accepts 4 000 characters of it —
+    roughly three times the frame at 15px/1.6 in a 336px column. The
+    container is `flex-start` + `overflow-y: auto` and the instruction is
+    line-clamped to six, so the scroll is a chore rather than a trap.
+
+254. **The relay's challenge caps cost O(n) on an unauthenticated
+    request.** Both caps were enforced with
+    `values().filter(|(pk, _)| pk == public_key).count()` and an O(n)
+    `evict_oldest` — under the mutex that every push and pull also
+    needs. The caps are the only thing between a flood and a 4 000-entry
+    table, so filling the table bought the attacker O(n) convoyed work on
+    every subsequent request from a caller who had authenticated
+    nothing. This is the same defect the session table had already been
+    fixed for, and it now has the same fix: a `Challenges` struct with a
+    per-account index (a `Vec` of that account's live nonces in issue
+    order, so "how many" and "which is oldest" are both O(1)) and a
+    relay-wide issue queue trimmed lazily, so "oldest globally" is
+    amortised O(1). A regression test rebuilds both indexes from
+    `by_nonce` after every mutation path — insert, per-account eviction,
+    one-shot take, explicit discard, sweep — because a cache that
+    silently diverges is worse than no cache: the caps would then be
+    enforced against a fiction while the table grew without bound.

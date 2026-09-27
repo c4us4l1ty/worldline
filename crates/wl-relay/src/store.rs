@@ -418,7 +418,7 @@ pub mod sqlite_backend {
                 )
             };
             let mut stmt = conn.prepare(sql)?;
-            let mut rows = stmt.query_map(params.as_slice(), op_row)?;
+            let rows = stmt.query_map(params.as_slice(), op_row)?;
             // Streamed against a running byte total rather than
             // `collect()`-ed. The budget used to be applied by the HTTP
             // layer AFTER this returned, so one pull materialised

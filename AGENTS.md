@@ -3,10 +3,10 @@
 ## Commands
 
 ```bash
-cargo test --workspace        # THE verification gate (218 tests; 295 total with shell+UI)
+cargo test --workspace        # THE verification gate (283 tests; 391 total with shell+UI)
 cargo clippy --workspace      # must be warning-free
 cargo fmt --all               # run before committing
-scripts/css-lint.py           # THE gate for any wl.css change (7 checks)
+scripts/css-lint.py           # THE gate for any wl.css change (8 checks)
 ```
 
 - Desktop shell (`crates/wl-app`) is EXCLUDED from the workspace because it
@@ -55,7 +55,7 @@ unless `dx serve --port 1420` is already up.
   is how a dead `--wl-text-tertiary` inverted the control panel's hierarchy
   and how a cascade-ordering bug shipped a non-full-height sheet — both
   invisible in the source, both obvious rendered.
-- **`scripts/css-lint.py` gates every `wl.css` change** (7 checks, ~1s).
+- **`scripts/css-lint.py` gates every `wl.css` change** (8 checks, ~1s).
   Run it before committing CSS; `--against <ref>` diffs the selector set
   against a known-good baseline. Its `dangling-theme-prefix` and
   `themed-shadowed` checks exist because a class-existence lint cannot
@@ -63,6 +63,37 @@ unless `dx serve --port 1420` is already up.
   `[data-theme="light"]` prefix into the following rule, `.wl-section` is
   still defined, still used, still unique and still not dead. Every other
   check passes and dark mode loses the card entirely (PRD delta 241).
+- **A token defined in ONE theme and not the other passes every other
+  check.** `check_tokens` takes the union of all `--x:` definitions, so
+  `--wl-accent-coral-text` present only under `[data-theme="light"]`
+  reads as defined — and at each use site outside that block `var()`
+  resolves to nothing, so the property computes to
+  `currentColor`/`inherit` (CSS Variables §3), silently.
+  `theme-scoped-token` is the check for it (PRD delta 248), and it fired
+  on a bug introduced minutes earlier, in this very file, by a token
+  added to one theme block and not the other. **Adding a token means
+  adding it to BOTH theme blocks**, and the lint cannot tell you the
+  definition you are looking at is the wrong one — only rendering the app
+  can, via `getComputedStyle`.
+- **The browser harness and the Tauri window show DIFFERENT DATA, and
+  that is the design.** `invoke-shim.js` falls back to fixtures when
+  `window.__TAURI_INTERNALS__` is absent, so `:1420` renders fabricated
+  goals, a fabricated ledger and "no identity on this install", while the
+  window renders real SQLite. `app::transport()` reports which, and the
+  nav drawer prints `· MOCK` under the System label when it is the mock
+  (PRD delta 148) — so a `· MOCK` in the browser and its absence in the
+  window is the indicator working, not a divergence. Neither surface
+  announces it, so you must open the drawer to learn which world you are
+  in. **Use the Tauri window to review behaviour; use the browser only
+  for CSS and layout in both themes.**
+- **Reading a `window` global from browser automation here is not
+  evidence.** The harness runs `page.evaluate` in an ISOLATED world, so
+  its `window` is a different global from the page's: a global set from
+  `evaluate` is invisible to a script the page runs, and a page global
+  reads as `undefined`. This produced a false "the shim never loaded"
+  finding. `xd://eval/browser` does not document it. **Read the RENDERED
+  DOM instead** — the DOM is shared, so `getComputedStyle` and
+  `innerText` on real elements are sound and globals are not.
 - **A browser tab open on `:1420` is not evidence about the current
   build.** `cargo tauri dev` starts `dx serve`; the tab is a *separate*
   WebView loading the same URL, and it does not hot-reload. The debug wasm

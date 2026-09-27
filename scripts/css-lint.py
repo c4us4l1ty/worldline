@@ -11,8 +11,8 @@ is squarely a linter's job.
 
 Why the baseline diff is the important part
 ------------------------------------------
-This file was shipped with a real dark-mode bug that four other checks all
-passed over. A stray ``[data-theme="light"] `` prefix sat on a line of its
+This file has shipped two real dark-mode bugs that every other check passed
+over. A stray ``[data-theme="light"] `` prefix sat on a line of its
 own; the CSS parser bound it to the *next* rule, so ``.wl-section`` — the
 card container behind every Settings section — silently became a
 light-mode-only rule. In dark mode those cards lost their background,
@@ -30,7 +30,7 @@ Usage
 -----
     scripts/css-lint.py                    # diff against HEAD
     scripts/css-lint.py --against main     # diff against a branch
-    scripts/css-lint.py --against ''       # skip the diff; checks 1-4, 6-7
+    scripts/css-lint.py --against ''       # skip the diff; the non-diff checks
 
 Exit code 0 = clean, 1 = at least one finding.
 """
@@ -108,6 +108,92 @@ def check_tokens(clean: str) -> list[Finding]:
     for token in sorted(used - defined):
         found.append(
             Finding("undefined-token", "wl.css", f"var({token}) is used but never defined")
+        )
+    return found
+
+
+def _block_bodies(clean: str, selector_prefix: str) -> list[tuple[int, int]]:
+    """Byte ranges of the bodies of every rule whose selector starts
+    with ``selector_prefix``.
+
+    Brace-matched from the opening ``{`` so a nested at-rule (a media
+    query, a keyframe step) cannot truncate the range.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(re.escape(selector_prefix) + r"[^{}]*\{", clean):
+        depth = 1
+        i = match.end()
+        while i < len(clean) and depth:
+            if clean[i] == "{":
+                depth += 1
+            elif clean[i] == "}":
+                depth -= 1
+            i += 1
+        spans.append((match.end(), i))
+    return spans
+
+
+def check_theme_scoped_tokens(clean: str) -> list[Finding]:
+    """1b. A token used OUTSIDE a theme block is defined in ``:root``.
+
+    Check 1 takes the union of every ``--x:`` in the file, so a token
+    defined only inside ``[data-theme="light"]`` reads as defined. That
+    is the wrong answer for every use site outside that block: there,
+    the light override does not apply, ``var(--x)`` resolves against a
+    missing definition, and per CSS Variables §3 the property computes
+    to its *inherited or initial* value instead — silently.
+
+    That is not hypothetical. ``--wl-accent-coral-text`` and the three
+    ``--wl-accent-coral-NN`` alphas were added to the light block and
+    missed in ``:root``, so in the DEFAULT theme the compose focus
+    hairline fell back to ``currentColor`` (the text colour, not the
+    beacon) and the step badge, the ``· MOCK`` markers and the danger
+    button all inherited instead of using the accent. Check 1 passed,
+    every other check passed, and reading the stylesheet showed a
+    definition; only rendering the app in dark mode showed the wrong
+    colour.
+
+    The reverse is legal and must not be reported: a token defined and
+    used only inside the light block resolves fine there.
+    """
+    root_spans = _block_bodies(clean, ":root")
+    light_spans = _block_bodies(clean, '[data-theme="light"]')
+    if not root_spans:
+        return [
+            Finding("theme-scoped-token", "wl.css", "no :root block; cannot scope tokens")
+        ]
+
+    def inside_any(index: int, spans: list[tuple[int, int]]) -> bool:
+        return any(start <= index < end for start, end in spans)
+
+    root_defined = {
+        token
+        for start, end in root_spans
+        for token in re.findall(r"(--[a-z0-9-]+)\s*:", clean[start:end])
+    }
+    light_defined = {
+        token
+        for start, end in light_spans
+        for token in re.findall(r"(--[a-z0-9-]+)\s*:", clean[start:end])
+    }
+
+    found = []
+    for match in re.finditer(r"var\(\s*(--[a-z0-9-]+)", clean):
+        token = match.group(1)
+        if inside_any(match.start(), light_spans):
+            # Inside the light block the light definitions apply too.
+            if token in root_defined or token in light_defined:
+                continue
+        else:
+            if token in root_defined:
+                continue
+        found.append(
+            Finding(
+                "theme-scoped-token",
+                "wl.css",
+                f"var({token}) at line {line_of(clean, match.start())} is used where"
+ f" :root does not define it; it computes to currentColor/inherit, not the token",
+            )
         )
     return found
 
@@ -261,6 +347,7 @@ def main() -> int:
 
     findings: list[Finding] = []
     findings += check_tokens(clean)
+    findings += check_theme_scoped_tokens(clean)
     findings += check_duplicate_selectors(clean)
     findings += check_dangling_prefix(raw)
     findings += check_banned_tokens(clean)
