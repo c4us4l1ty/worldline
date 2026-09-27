@@ -305,7 +305,7 @@ panel, the panel has no hierarchy — which is precisely what the dead
 
 ```html
 <div class="wl-float-layer">
-  <button class="wl-float-btn wl-float-menu" aria-label="Open navigation">
+  <button class="wl-circle-btn" aria-label="Open navigation">
     <svg class="wl-icon-menu wl-icon" view_box="0 0 18 18" fill="none"
          stroke="currentColor" stroke_width="1.6" stroke_linecap="round"
          aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
@@ -339,7 +339,7 @@ only glyph in the app.
 
 ```html
 <div class="wl-float-layer">
-  <button class="wl-circle-btn wl-float-menu" aria-label="Open navigation">
+  <button class="wl-circle-btn" aria-label="Open navigation">
     <svg class="wl-icon-menu wl-icon" view_box="0 0 18 18" fill="none"
          stroke="currentColor" stroke_width="1.6" stroke_linecap="round"
          aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
@@ -354,9 +354,48 @@ different offsets, so the two controls that occupy the same corner on the
 same screen did not line up — which is most of what "the hamburger looks
 inconsistent" meant in practice. One class, both call sites.
 
-The canvas's button also carried a `wl-float-menu` modifier with no rule
-anywhere in the stylesheet, so its specificity was a mirage. The modifier
-now exists and does exactly one thing: un-absolutise it for the page header.
+The canvas's button carried a `wl-float-menu` modifier. It had no rule
+anywhere in the stylesheet, and when one was finally written for it
+(`position: static`) it changed nothing — `.wl-circle-btn` is already
+`position: relative` and the control is never used inside a page header
+(those go through `.wl-back`). **The modifier is deleted.** A class that
+cannot change a declaration is a lie the next reader has to disprove, and
+it sits in the markup looking like a specificity override that matters.
+
+**The floating layer is positioned against the SCREEN, never the frame.**
+`.wl-float-layer` is `position: absolute`, so its containing block is the
+nearest positioned ancestor, and `.wl-canvas-screen` is what provides one on
+the canvas. Without it the layer resolved against `#main` — the app frame —
+and the measurement in the real WebKitGTK webview showed the cost: the
+hamburger's rect was `x=16 y=12` in a viewport whose content box starts at
+`x=18`, so the one control the canvas has sat 2px *outside* the content it
+floats over and 8px above its top edge, because the layer's own padding was
+being spent inside the frame's padding. It also meant the control's position
+was decided by an ancestor that also hosts the drawer, the toast and the
+error screen: any future `transform`, `filter` or `contain` on `#main` would
+have moved the hamburger. A control belongs to the surface it floats over.
+
+```css
+.wl-canvas-screen { position: relative; }
+.wl-float-layer {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: flex-start; justify-content: flex-start;
+  padding: 12px 0 0;           /* no horizontal padding: `left: 0` is already the content edge */
+  pointer-events: none;        /* the layer is not a target; controls opt back in */
+}
+```
+
+**`Escape` closes exactly one layer, and the layers have an order.** The
+escape hatch's categorisation sheet is above the control panel, which is
+above the `Ctrl+,` telemetry drawer, which is above nothing. This is data
+(`topmost_overlay` / `dismiss_topmost` in `app.rs`), not a chain of `if`s,
+because it used to be implicit and wrong: the canvas and the app root each
+ran an `Escape` handler and both fired on the same bubbled keydown, so one
+press could open the bailout modal *and* dismiss a panel. From outside that
+is indistinguishable from a menu that does not open. `Ctrl+,` is likewise
+refused while another layer is up — the telemetry drawer is a later sibling
+with a higher z-index, so summoning it over the control panel buried the
+panel rather than failing visibly, which is the same symptom again.
 
 ```css
 .wl-circle-btn {

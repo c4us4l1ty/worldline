@@ -41,15 +41,39 @@ pub fn CanvasScreen() -> Element {
 
     rsx! {
         div {
-            class: "wl-root",
+            // `wl-canvas-screen` and not a bare `wl-root`: `.wl-float-layer` is
+            // `position: absolute`, and with no positioned ancestor on
+            // this subtree its containing block was `#main` -- the APP
+            // FRAME, not the screen. Two consequences, both invisible in
+            // the source: the control's `left: 0` was measured from the
+            // frame's padding box, so the hamburger sat 2px OUTSIDE the
+            // content box on which the directive card is laid out and
+            // 8px above its top edge; and the control's position was
+            // decided by an ancestor that also hosts the drawer, the
+            // toast and the error screen, so anything that ever gave
+            // `#main` a transform, a filter or a `contain` would move the
+            // one control the canvas has. Anchoring the layer to the
+            // screen it floats over is what makes it a property of the
+            // canvas rather than of the frame.
+            class: "wl-root wl-canvas-screen",
             tabindex: "0",
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
                 if e.is_auto_repeating() {
                     return;
                 }
-                // Telemetry drawer takes precedence on Escape.
-                if *ctx.telemetry_open.read() {
+                // A panel that is already up takes precedence on Escape,
+                // and the panel is what Escape belongs to.
+                //
+                // Only the TELEMETRY drawer used to be checked. With the
+                // control panel open, Escape therefore did two things at
+                // once: this handler opened the bailout sheet, and the
+                // app-root handler (which runs afterwards, on the same
+                // bubbled keydown) closed the panel. The user pressed one
+                // key to dismiss a menu and got a modal instead, on top
+                // of a canvas that had not changed -- which reads, from
+                // the outside, exactly like "the menu does not open".
+                if *ctx.telemetry_open.read() || *ctx.nav_open.read() {
                     return;
                 }
                 // ⌘+Enter / Ctrl+Enter completes; Escape toggles bailout (skill §7.5).
@@ -93,10 +117,17 @@ pub fn CanvasScreen() -> Element {
             // chevron uses — one definition for one control language, so
             // this and the button at the top of Settings cannot drift apart.
             button {
-                class: "wl-circle-btn wl-float-menu",
+                class: "wl-circle-btn",
                 aria_label: "Open navigation",
                 title: "Navigation",
-                onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } },
+                // `open_nav`, not a raw write: the panel's open/closed
+                // flag has one owner (`AppCtx::open_nav` / `close_nav`),
+                // and this is its only opener. `wl-float-menu` is gone
+                // with its dead rule -- the modifier set
+                // `position: static`, which is what a non-positioned
+                // button already is, so the class bought nothing and its
+                // "specificity" was a mirage.
+                onclick: move |_| ctx.open_nav(),
                 crate::icons::IconMenu {}
             }
         }

@@ -2289,3 +2289,79 @@ that had stopped quarantining.
     (`cargo tauri dev`, which starts the server; and a `custom-protocol`
     build, which embeds the bundle). Diagnostics only — no blocking, no
     fallback, no behaviour change.
+
+## The control panel had no owner, and the canvas's control had no surface (2026-09-27, user-reported: "the hamburger menu icon doesnt works")
+
+**Reported as:** tapping the canvas's hamburger does nothing.
+
+**What was measured, before anything was changed.** The failure was
+reproduced-or-not inside the real WebKitGTK webview of the real shell —
+not in a browser, and not against a hand-written mock. The hamburger was
+found at rect `x=16 y=12 w=38 h=38` in a 420×700 viewport, hit-tested
+correctly (`document.elementFromPoint` at its centre returns the `<path>`
+inside the button), carrying `pointer-events: auto` inside a layer with
+`pointer-events: none`, and a `click` on either the button or that `<path>`
+mounted `.wl-nav-backdrop` and `.wl-nav-sheet` with real content. So the
+*state write* and the *drawer render* were both healthy, and a mock could
+not have told us that — every earlier screenshot of this bug was of
+`preview.html`, whose DOM is not the app's.
+
+**What was actually wrong** was the two things a screenshot of a mock can
+never show, because both are relationships between elements rather than
+appearances:
+
+1. **The control was positioned against the frame, not the screen.**
+   `.wl-float-layer` is `position: absolute`, and no ancestor inside the
+   canvas was positioned, so its containing block was `#main` — the app
+   frame. Two measured consequences: the button's `x=16` sat 2px *outside*
+   the content box (which starts at `x=18`) and 8px above its top edge,
+   because the layer's `padding: 12px 16px 0` was being spent inside the
+   frame's padding; and the control's position was decided by an ancestor
+   that also hosts the drawer, the toast and the error screen, so any
+   `transform`, `filter` or `contain` on `#main` would move the one control
+   the canvas has. `.wl-canvas-screen { position: relative }` makes the
+   screen that owns the control the box the control is positioned against,
+   and the layer's horizontal padding goes with it (`left: 0` is already
+   the content edge).
+
+2. **The panel had five writers and no owner.** `nav_open` was written by
+   bare `*s.write() = …` from the hamburger, the backdrop, the close
+   button, four rows and `App`'s `Escape` handler. A bare write has no
+   polarity, so "open the panel" and "flip the panel" were
+   indistinguishable at the point of writing, and nothing made the opener
+   and the closer agree. They are now `AppCtx::open_nav` / `close_nav` /
+   `toggle_nav`, the hamburger is the only caller of the first, and the
+   verbs' polarity is pinned by a test rather than by a comment.
+
+3. **`Escape` was handled twice, on one keydown.** The canvas's handler
+   (bailout sheet) and `App`'s (close the drawers) are on different
+   elements of the same bubbling chain, so both ran. With the control panel
+   open, one press opened the bailout modal *and* closed the panel — a
+   modal the user never asked for, on a canvas that had not changed, which
+   from the outside is exactly "the menu does not open". The layers now
+   have a declared order (`topmost_overlay` / `dismiss_topmost`: escape
+   sheet → control panel → telemetry drawer) and `Escape` closes one.
+
+4. **`Ctrl+,` could bury the panel.** The chord toggled the telemetry
+   drawer unconditionally, and the drawer is a later sibling with a higher
+   z-index, so summoning it over the control panel made the panel vanish
+   rather than fail visibly — the same symptom a third time. It is now
+   refused while any layer is up (`toggle_telemetry_allowed`).
+
+5. **`.wl-float-menu` is deleted.** Its only rule was
+   `position: static`, on a class that also carried `position: relative`
+   from `.wl-circle-btn` and is never used inside a page header. A modifier
+   that cannot change a declaration is a lie the next reader has to
+   disprove. The same section of `SKILL.md` carried a second, older markup
+   snippet naming a `wl-float-btn` class that has never existed; both are
+   gone, and the skill now states the layer's containing-block rule.
+
+**What was NOT wrong**, and is recorded so the next person does not go
+looking for it again: Dioxus's event binding. `click` is a bubbling event
+(`dioxus-core-types/src/bubbles.rs`), so the listener lives on `#main` and
+the handler is found by walking up from the target — which is why an
+inline `<svg>` child, carrying no `data-dioxus-id` of its own, still
+reaches the button two levels up. The `dioxus-signals` "Copy Value created
+in ScopeId(3) … used in ScopeId(0)" warning that fires on every boot is
+also not it: `ScopeId(0)` is the runtime root wrapper, it is an *ancestor*
+of the owning scope, and it outlives it.

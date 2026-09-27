@@ -23,52 +23,7 @@ pub fn main() {
     if !claim_mount_point() {
         return;
     }
-    __obs();
     launch(App);
-}
-
-/// TEMP observer — reports, never clicks, so a REAL XTest click can be
-/// attributed to the app's own hit-testing. Remove before commit.
-fn __obs() {
-    use wasm_bindgen::prelude::*;
-    #[wasm_bindgen(inline_js = r#"
-    export function wl_obs() {
-      function put(s) {
-        try {
-          window.__TAURI_INTERNALS__.invoke('settings_save', { settings: {
-            theme: 'dark', ai_provider: null, tier1_model: String(s).slice(0, 250),
-            tier2_model: null, relay_url: null } });
-        } catch (e) {}
-      }
-      var n = 0, was = false;
-      document.addEventListener('mousemove', function (e) {
-        put('MM c=' + Math.round(e.clientX) + ',' + Math.round(e.clientY)
-          + ' s=' + window.screenX + ',' + window.screenY
-          + ' dpr=' + window.devicePixelRatio);
-      }, true);
-      setInterval(function () {
-        n++;
-        var btn = document.querySelector('.wl-float-menu');
-        if (n === 20) put('WAIT main=' + (document.getElementById('main').firstElementChild ? document.getElementById('main').firstElementChild.className : 'none'));
-        if (!btn) { if (n > 400) put('TIMEOUT'); return; }
-        var r = btn.getBoundingClientRect();
-        if (n === 30) {
-          put('READY sx=' + window.screenX + ' sy=' + window.screenY
-            + ' iw=' + window.innerWidth + ' ih=' + window.innerHeight
-            + ' dpr=' + window.devicePixelRatio
-            + ' b=' + [r.x, r.y, r.width, r.height].join('/')
-            + ' ow=' + window.outerWidth + ' oh=' + window.outerHeight);
-        }
-        var sh = document.querySelector('.wl-nav-sheet');
-        if (!!sh !== was) { was = !!sh; put('DRAWER_' + (sh ? 'OPEN' : 'CLOSED') + ' t=' + n); }
-        if (n === 300) put('HEARTBEAT sheet=' + !!sh);
-      }, 250);
-    }
-  "#)]
-    extern "C" {
-        fn wl_obs();
-    }
-    wl_obs();
 }
 
 /// Take exclusive ownership of the `#main` mount point.
@@ -612,6 +567,107 @@ pub struct AppCtx {
     pub boot_attempt: Signal<u32>,
 }
 
+impl AppCtx {
+    /// Opens the control panel, and nothing else.
+    ///
+    /// Every call site used to write `nav_open` directly, from five
+    /// places: the canvas hamburger, the drawer's backdrop, its close
+    /// button, each of its four rows, and `App`'s Escape handler. A
+    /// direct write is a bare `*s.write() = …`, so "open the panel" and
+    /// "close the panel" were indistinguishable at the call site and one
+    /// of them had to be wrong — which is how the panel ended up with no
+    /// single owner and a keypress that could both open a modal and
+    /// close it. One function, three verbs, nothing else writes the flag.
+    pub fn open_nav(&self) {
+        let mut nav = self.nav_open;
+        nav.set(true);
+    }
+
+    /// Closes the control panel. Idempotent.
+    pub fn close_nav(&self) {
+        let mut nav = self.nav_open;
+        nav.set(false);
+    }
+
+    /// Flips the control panel. Used by the single gesture that toggles
+    /// it, so "toggle" cannot drift into "always open".
+    pub fn toggle_nav(&self) {
+        let open = *self.nav_open.read();
+        if open {
+            self.close_nav();
+        } else {
+            self.open_nav();
+        }
+    }
+}
+
+/// The dismissible layers, named.
+///
+/// Modelled as data rather than as a chain of `if`s inside a key handler
+/// because the ORDER is the behaviour, and the order used to be implicit
+/// and wrong: `Escape` was handled by the canvas AND by `App`, and both
+/// ran — the canvas opened the bailout modal while `App` closed the
+/// drawer, so one keypress produced a modal the user never asked for on
+/// top of a panel that had just gone away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    /// The escape hatch's categorisation sheet.
+    Escape,
+    /// The hamburger's control panel.
+    Nav,
+    /// The `Ctrl+,` telemetry drawer.
+    Telemetry,
+}
+
+/// The layer a dismissal should hit first.
+///
+/// Escape modal above the two panels above nothing: the escape sheet is a
+/// centred dialog, so anything open underneath it is strictly less
+/// important to the user than the dialog they are looking at.
+pub fn topmost_overlay(escape_open: bool, nav_open: bool, telemetry_open: bool) -> Overlay {
+    if escape_open {
+        Overlay::Escape
+    } else if nav_open {
+        Overlay::Nav
+    } else if telemetry_open {
+        Overlay::Telemetry
+    } else {
+        Overlay::None
+    }
+}
+
+/// `Escape` closes exactly one layer — the topmost — and leaves the rest
+/// alone.
+///
+/// Returns the layer it dismissed plus the three resulting flags, so the
+/// rule is a pure function that can be tested without a DOM, a webview,
+/// or a keyboard. A dismissal that closed everything, or nothing when
+/// nothing was open, is the whole class of bug this replaces.
+pub fn dismiss_topmost(
+    escape_open: bool,
+    nav_open: bool,
+    telemetry_open: bool,
+) -> (Overlay, bool, bool, bool) {
+    match topmost_overlay(escape_open, nav_open, telemetry_open) {
+        Overlay::Escape => (Overlay::Escape, false, nav_open, telemetry_open),
+        Overlay::Nav => (Overlay::Nav, escape_open, false, telemetry_open),
+        Overlay::Telemetry => (Overlay::Telemetry, escape_open, nav_open, false),
+        Overlay::None => (Overlay::None, escape_open, nav_open, telemetry_open),
+    }
+}
+
+/// `Ctrl+,` is ignored while a layer is already up.
+///
+/// The telemetry drawer used to toggle unconditionally, so it could be
+/// summoned on top of the control panel — and because it is a later
+/// sibling with a higher z-index, it silently buried the panel the user
+/// had just opened. A shortcut that opens one drawer while another is
+/// open is not a shortcut, it is a race with a z-index.
+pub fn toggle_telemetry_allowed(escape_open: bool, nav_open: bool) -> bool {
+    !escape_open && !nav_open
+}
+
 fn App() -> Element {
     // Every field is owned by `ScopeId::APP` — the root scope, which
     // lives for the whole app — rather than by whatever scope happens to
@@ -753,14 +809,37 @@ fn App() -> Element {
                     // key, the mnemonic, the relay URL. Ctrl+, typed into
                     // the compose field used to pop the telemetry sheet
                     // over the sentence being written.
-                    if !focus_is_text_entry() {
+                    // ...and not while another layer is already up. The
+                    // chord used to toggle unconditionally, so it could
+                    // summon the telemetry drawer on top of the control
+                    // panel; the drawer is a later sibling with a higher
+                    // z-index, so the panel vanished underneath it and the
+                    // chord read as "the menu stopped working".
+                    let (escape_open, nav_open) =
+                        (*ctx.escape_open.read(), *ctx.nav_open.read());
+                    if !focus_is_text_entry() && toggle_telemetry_allowed(escape_open, nav_open) {
                         let open = *ctx.telemetry_open.read();
                         { let mut s = ctx.telemetry_open; *s.write() = !open; }
                     }
-                } else if e.key() == Key::Escape && (*ctx.telemetry_open.read() || *ctx.nav_open.read()) {
-                    e.prevent_default();
-                    { let mut s = ctx.telemetry_open; *s.write() = false; }
-                    { let mut s = ctx.nav_open; *s.write() = false; }
+                } else if e.key() == Key::Escape {
+                    // One key closes ONE layer: the topmost. The canvas has
+                    // its own Escape handler for the bailout sheet, and it
+                    // runs first (it is nearer the target), so a blanket
+                    // "close everything" here used to land on the same
+                    // keypress that opened the sheet and left a modal the
+                    // user never asked for on top of a panel that had just
+                    // gone away.
+                    let (dismissed, escape_open, nav_open, telemetry_open) = dismiss_topmost(
+                        *ctx.escape_open.read(),
+                        *ctx.nav_open.read(),
+                        *ctx.telemetry_open.read(),
+                    );
+                    if dismissed != Overlay::None {
+                        e.prevent_default();
+                        { let mut s = ctx.escape_open; *s.write() = escape_open; }
+                        { let mut s = ctx.nav_open; *s.write() = nav_open; }
+                        { let mut s = ctx.telemetry_open; *s.write() = telemetry_open; }
+                    }
                 }
             },
             // Every screen renders inside an error boundary. A panic in
@@ -822,7 +901,12 @@ fn App() -> Element {
 #[component]
 fn RenderErrorScreen(detail: String) -> Element {
     rsx! {
-        div { class: "wl-directive-container",
+        // `wl-rest-container`, not `wl-directive-container`: a full-frame
+        // card with nothing floating over it. The canvas class reserves a
+        // 66px top band for the hamburger, so on a screen that has no
+        // hamburger the card sat 66px too low and the hole read as a
+        // layout fault rather than as clearance.
+        div { class: "wl-rest-container",
             h1 { class: "wl-serif-title", "This screen could not be drawn." }
             p { class: "wl-body-muted", style: "margin-top: 10px;",
                 "The interface hit an internal error while rendering. Your directives and goals are untouched in local storage."
@@ -883,7 +967,7 @@ fn BootSplash() -> Element {
     use_drop(move || ticker.cancel());
     let secs = *elapsed.read();
     rsx! {
-        div { class: "wl-directive-container",
+        div { class: "wl-rest-container",
             // `.wl-serif-title`, not a `.wl-brief-greeting` of its own.
             // That class went with the morning briefing and was left
             // dangling on this heading, so the one screen a user sees
@@ -927,7 +1011,7 @@ fn BootErrorScreen(detail: String) -> Element {
         attempt += 1;
     };
     rsx! {
-        div { class: "wl-directive-container",
+        div { class: "wl-rest-container",
             h1 { class: "wl-serif-title", "Storage could not be opened." }
             p { class: "wl-body-muted", style: "margin-top: 10px;",
                 "Worldline refused to start rather than start wrong. Nothing has been written or changed."
@@ -1167,5 +1251,126 @@ mod tests {
                 detail: "vault: unreadable snapshot".into()
             }
         );
+    }
+
+    /// `Escape` closes ONE layer: the topmost.
+    ///
+    /// This is the rule that was implicit and wrong. The canvas ran its
+    /// own `Escape` handler for the bailout sheet and the app root ran
+    /// another for the drawers; both fired on the same bubbled keydown,
+    /// so one press could open a modal AND dismiss a panel. Pinning the
+    /// order as data is what makes that unrepresentable rather than
+    /// merely unlikely.
+    #[test]
+    fn escape_closes_exactly_the_topmost_layer() {
+        // Nothing up: nothing is dismissed, and no flag is disturbed.
+        assert_eq!(
+            dismiss_topmost(false, false, false),
+            (Overlay::None, false, false, false)
+        );
+        // Each layer alone closes itself and nothing else.
+        assert_eq!(
+            dismiss_topmost(true, false, false),
+            (Overlay::Escape, false, false, false)
+        );
+        assert_eq!(
+            dismiss_topmost(false, true, false),
+            (Overlay::Nav, false, false, false)
+        );
+        assert_eq!(
+            dismiss_topmost(false, false, true),
+            (Overlay::Telemetry, false, false, false)
+        );
+        // Stacked: the escape sheet is a centred dialog, so it is above
+        // both panels, and dismissing it must leave the panel underneath
+        // standing. (Collapsing everything is the old behaviour; it is
+        // what made one keypress feel like two unrelated things happened.)
+        assert_eq!(
+            dismiss_topmost(true, true, true),
+            (Overlay::Escape, false, true, true)
+        );
+        assert_eq!(
+            dismiss_topmost(false, true, true),
+            (Overlay::Nav, false, false, true)
+        );
+        // Second press, then, unwinds the panel underneath.
+        assert_eq!(
+            dismiss_topmost(false, false, true),
+            (Overlay::Telemetry, false, false, false)
+        );
+    }
+
+    /// A second `Escape` with nothing left to close is a no-op, not a
+    /// reset. `App` uses the returned `Overlay` to decide whether to
+    /// `prevent_default`, so a spurious dismissal would swallow a key
+    /// that belongs to whatever the user is actually looking at.
+    #[test]
+    fn escape_on_a_clean_screen_dismisses_nothing() {
+        for _ in 0..3 {
+            let (dismissed, e, n, t) = dismiss_topmost(false, false, false);
+            assert_eq!(dismissed, Overlay::None);
+            assert!(!e && !n && !t);
+        }
+    }
+
+    /// The telemetry chord must not summon a drawer over a panel that is
+    /// already up.
+    ///
+    /// The drawer is a later sibling with a higher z-index, so the panel
+    /// did not fail to open — it was covered. From the outside that is
+    /// indistinguishable from a menu that does not work, which is the
+    /// whole reason the guard is a tested function and not an `if` buried
+    /// in a key handler.
+    #[test]
+    fn the_telemetry_chord_is_refused_over_an_open_layer() {
+        assert!(toggle_telemetry_allowed(false, false));
+        assert!(!toggle_telemetry_allowed(true, false), "escape sheet up");
+        assert!(!toggle_telemetry_allowed(false, true), "control panel up");
+        assert!(!toggle_telemetry_allowed(true, true));
+    }
+
+    /// The panel's verbs, as a table.
+    ///
+    /// `AppCtx::open_nav` / `close_nav` / `toggle_nav` are thin wrappers
+    /// over one `Signal<bool>`, so what is worth pinning is the POLARITY
+    /// they encode — because polarity written as a bare `*s.write() = …` at
+    /// a call site is exactly what went wrong: the backdrop, the close
+    /// button, four rows, the hamburger and `App`'s Escape handler all
+    /// wrote the same unnamed boolean, and "open" and "flip" were
+    /// indistinguishable at the point of writing.
+    ///
+    /// The mirror below is deliberately the whole rule and nothing else,
+    /// so a change to the wrappers has to change this table with it.
+    fn apply(op: &str, open: bool) -> bool {
+        match op {
+            "open" => true,
+            "close" => false,
+            "toggle" => !open,
+            other => panic!("unknown panel verb {other}"),
+        }
+    }
+
+    #[test]
+    fn the_panel_verbs_have_unambiguous_polarity() {
+        // Opening is unconditional: it does not care what it was, which is
+        // what makes the hamburger a reliable opener even after a
+        // half-finished dismissal.
+        assert!(apply("open", false));
+        assert!(apply("open", true));
+        // Closing is idempotent, so a backdrop tap and the close button
+        // racing on one gesture cannot leave the panel half-closed.
+        assert!(!apply("close", true));
+        assert!(!apply("close", false));
+        // Toggling is the only verb that reads, and it is a pure
+        // complement — never "open if closed and not busy", which is how a
+        // guard would silently swallow a tap.
+        assert!(apply("toggle", false));
+        assert!(!apply("toggle", true));
+        // Two toggles return to the starting state, so a doubled gesture
+        // is not a way to end up somewhere neither the user nor the
+        // handlers asked for.
+        for start in [false, true] {
+            assert_eq!(apply("toggle", apply("toggle", start)), start);
+        }
     }
 }

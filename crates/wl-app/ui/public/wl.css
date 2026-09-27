@@ -49,6 +49,14 @@
    That is not hypothetical — `--wl-text-tertiary` was referenced thirteen
    times, defined zero times, and inverted the control panel's hierarchy.
 
+   ONE expected hit in that output, and it is not a defect:
+   `--wl-text-tertiary` still appears, because the prose above is what
+   documents the bug it caused. `grep` cannot tell a declaration from a
+   comment, so a name that occurs ONLY inside prose is a false positive.
+   Check WHERE a name appears before you go hunting for its definition, or
+   you will spend an afternoon editing a comment and "fixing" the
+   hierarchy a second time.
+
    Then RENDER it. `dx serve` (scripts/dx.sh serve --port 1420) draws the
    real screens against this file in a browser, with the mock shell behind
    it. Reviewing a design by reading a stylesheet is how the
@@ -392,7 +400,26 @@ button:disabled { cursor: not-allowed; }
 .wl-back:hover { transform: translateX(-1px); }
 .wl-back:active { transform: translateX(0); }
 
-/* The canvas's floating layer, and its one control. */
+/* The canvas's floating layer, and its one control.
+
+   `.wl-float-layer` is `position: absolute`, so its containing block is
+   the nearest POSITIONED ancestor — and there was none inside the canvas,
+   so it was `#main`: the app frame. That put the one control the canvas
+   has in a place the canvas does not own, and it showed. Measured in the
+   real WebKitGTK webview, the button's rect was `x=16 y=12` inside a
+   420px viewport whose content box starts at x=18: the control sat 2px
+   LEFT of the content it floats over and 8px above it, because the
+   layer's `padding: 12px 16px 0` was being applied inside the frame's
+   padding instead of inside the screen's. It also meant the control's
+   position was decided by an ancestor that also hosts the drawer, the
+   toast and the error screen, so any future `transform`, `filter` or
+   `contain` on `#main` would move the hamburger.
+
+   `.wl-canvas-screen` below is the fix: the screen that owns the control is the
+   box the control is positioned against. */
+.wl-canvas-screen {
+  position: relative;
+}
 .wl-float-layer {
   position: absolute;
   top: 0;
@@ -402,8 +429,16 @@ button:disabled { cursor: not-allowed; }
   z-index: 10;
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  padding: 12px 16px 0;
+  /* One control, in the left gutter. `flex-start` rather than
+     `space-between`: with a single child the two are identical today, and
+     `space-between` would silently push it to the far edge the day a
+     second control is added here — which the skill forbids, so the
+     declaration should not invite it. */
+  justify-content: flex-start;
+  /* No horizontal padding: the layer is now inside the content box, so
+     `left: 0` already aligns the control with the directive card's left
+     edge, and padding it here is what put the two out of register. */
+  padding: 12px 0 0;
   /* The layer spans the width but must not eat clicks meant for the
      directive card underneath, so it is transparent to input and the
      controls opt back in. */
@@ -415,8 +450,16 @@ button:disabled { cursor: not-allowed; }
    nothing until tapped) put a dead affordance next to a live one. Sync
    is a settings concern and lives in Settings' Sync section as a
    full-width row that also reports what the last cycle did; milestone
-   and sync status live in the Ctrl+, telemetry drawer. */
-.wl-float-menu { position: static; }
+   and sync status live in the Ctrl+, telemetry drawer.
+
+   `.wl-float-menu` is GONE, and that is the whole point of this note. The
+   modifier's one rule was `position: static`, on a class that also carried
+   `position: relative` from `.wl-circle-btn` and was never used inside a
+   page header (those go through `.wl-back`) — so it changed nothing, while
+   reading in the markup like a specificity override that did something. A
+   modifier that cannot change a declaration is a lie the next reader has
+   to disprove. The control is `.wl-circle-btn` and nothing else. */
+
 
 
 /* ==========================================================================
@@ -952,6 +995,22 @@ button:disabled { cursor: not-allowed; }
      sits under the menu button in the empty state, which is the tallest
      state. */
   padding: 66px 0 12px;
+  min-height: 0;
+}
+/* A centred card with NOTHING floating over it.
+
+   `.wl-directive-container` is the canvas's: its 66px top band is
+   clearance for the hamburger, which floats above it. `DormantScreen` used
+   that class as its own root, so a screen with no floating control
+   inherited a 66px hole above its card and sat visibly low in the frame —
+   the clearance for a control that was not there. Split so the geometry
+   belongs to the thing that needs it. */
+.wl-rest-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 12px 0;
   min-height: 0;
 }
 .wl-directive-card {

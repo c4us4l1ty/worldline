@@ -13,7 +13,12 @@ use crate::app::{AppCtx, Screen};
 pub fn DormantScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     rsx! {
-        div { class: "wl-directive-container",
+        // `wl-rest-container`, not `wl-directive-container`: this screen
+        // has no floating control, and the canvas's class carries a 66px
+        // top band that exists to clear the hamburger. Inheriting it put
+        // a hole above a card on a screen where nothing floats, and the
+        // card sat visibly low in the frame.
+        div { class: "wl-rest-container",
             div { class: "wl-directive-card",
                 div { class: "wl-directive-step-badge", "Dormant · until next milestone" }
                 h1 { class: "wl-serif-title",

@@ -96,21 +96,26 @@ pub fn NavDrawer() -> Element {
         });
     });
 
-    let close = move |_| {
-        let mut n = ctx.nav_open;
-        *n.write() = false;
-    };
+    // Every close in this file goes through `AppCtx::close_nav`, and every
+    // open goes through `AppCtx::open_nav`. They used to be bare
+    // `*s.write() = …` on the signal, which is a write with no name on it:
+    // at the backdrop, at the close button, and at each of the four rows,
+    // "close the panel" looked identical to "flip the panel" and only
+    // reading the boolean's polarity told them apart. A named verb is the
+    // difference between a menu that opens and a menu that depends on
+    // which boolean a given handler happened to write.
+    let close = move |_| ctx.close_nav();
     let go = move |screen: Screen| {
         let ctx = ctx;
         move |_| {
-            {
-                let mut n = ctx.nav_open;
-                *n.write() = false;
-            }
-            {
-                let mut s = ctx.screen;
-                *s.write() = screen.clone();
-            }
+            // Close BEFORE routing. Both writes land in the same render,
+            // so the order here is not about frames — it is that a panel
+            // left open over a screen it does not belong to is a state no
+            // key can reach, because the screen's own handlers do not know
+            // the panel exists.
+            ctx.close_nav();
+            let mut s = ctx.screen;
+            *s.write() = screen.clone();
         }
     };
 
