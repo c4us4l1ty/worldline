@@ -629,19 +629,57 @@ fn a_removed_provider_does_not_wedge_settings() {
 /// Single-word parameters were already correct, so this pins that
 /// `rename_all` did not change them: the whole point of the attribute is
 /// that it is a no-op for names that need no conversion.
+///
+/// The two commands here both take only single-word arguments, and both
+/// take an `Option` — which is the case `rename_all` breaks SILENTLY,
+/// because an `Option<T>` whose key does not arrive is not a "missing
+/// required key" error, it is a defaulted `None`. So the assertions are
+/// about the value that came back, not about the status.
+///
+/// (This used to drive `bail_out`, a command deleted with the escape
+/// hatch. Tauri answers an unregistered name with `Command … not found`,
+/// and `assert_bound` only fails on `missing required key` — so the test
+/// was green while pinning a parameter list that no longer existed. A
+/// gate that cannot fail is worse than no gate, because it reads as
+/// coverage.)
 #[test]
 fn single_word_arguments_are_unaffected_by_rename_all() {
     let (app, _scratch) = mock_app();
 
-    // `bail_out(reason, note)` — two single-word keys.
-    let result = call(
+    // `create_goal(title, description?, target_date?, complexity)` — an
+    // `Option` pair, one of them (`target_date`) a TWO-word key that
+    // `rename_all` exists to convert, and the other (`description`) a
+    // single word it must leave alone. Both are `Option<String>`, which
+    // is the case that fails SILENTLY: an `Option<T>` whose key does not
+    // arrive is not a "missing required key" error, it is a defaulted
+    // `None`, so the call succeeds and the field is simply gone. Hence
+    // the assertion is on the persisted row, not on the status.
+    let created = call(
         &app,
-        "bail_out",
-        serde_json::json!({ "reason": "external_dependency", "note": "blocked on infra" }),
+        "create_goal",
+        serde_json::json!({
+            "title": "The single-word test",
+            "description": "a description that must survive",
+            "target_date": "2026-12-31",
+            "complexity": 3,
+        }),
     );
-    // A no-active-directive bailout is a legitimate domain error; a key
-    // mismatch is not. `assert_bound` separates the two.
-    assert_bound(&result, "bail_out");
+    assert_bound(&created, "create_goal");
+    let created = created.expect("create_goal must bind and succeed");
+    let goal_id = created["id"].as_str().expect("goal id").to_string();
+
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let goal = state.repos.goal(&goal_id).unwrap().expect("goal persisted");
+    assert_eq!(
+        goal.description.as_deref(),
+        Some("a description that must survive"),
+        "`description` is single-word and must bind"
+    );
+    assert_eq!(
+        goal.target_date.as_deref(),
+        Some("2026-12-31"),
+        "`target_date` is two words and must survive rename_all"
+    );
 
     let velocity = call(&app, "velocity", serde_json::json!({})).expect("velocity");
     assert!(velocity.is_object(), "velocity must return an object");

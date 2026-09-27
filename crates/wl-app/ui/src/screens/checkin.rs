@@ -5,6 +5,14 @@ use dioxus::prelude::*;
 
 use crate::app::{flash, invoke, AppCtx, Screen, VelocityView};
 
+/// The one-shot claim rule for a check-in, as a pure function: at most
+/// one write, ever, and never while another is in flight.
+///
+/// Deliberately pure. Both flags it reads are component-scoped and are
+/// released from a task that outlives the component, so the *signal*
+/// writes live at the call site (and go through `app::set_if_alive`,
+/// because a dropped scope is a panic and a panic on wasm32 aborts the
+/// module). The rule they implement is what is worth pinning here.
 fn claim_submission(busy: &mut bool, submitted: bool) -> bool {
     if *busy || submitted {
         return false;
@@ -16,13 +24,15 @@ fn claim_submission(busy: &mut bool, submitted: bool) -> bool {
 pub fn CheckInScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut note = use_signal(String::new);
-    let mut submitted = use_signal(|| false);
+    let submitted = use_signal(|| false);
     let mut busy = use_signal(|| false);
 
     let mut record = move |outcome: &str| {
-        if !claim_submission(&mut busy.write(), *submitted.peek()) {
+        let mut in_flight = *busy.peek();
+        if !claim_submission(&mut in_flight, *submitted.peek()) {
             return;
         }
+        busy.set(true);
         let ctx = ctx;
         let note = note.read().clone();
         let outcome = outcome.to_string();
@@ -42,16 +52,25 @@ pub fn CheckInScreen() -> Element {
             };
             match invoke::<VelocityView>("check_in", req).await {
                 Ok(v) => {
+                    // `ctx.velocity` is root-scoped and always safe. The
+                    // two component signals are not: this task runs at
+                    // the root scope, so the check-in page can be gone
+                    // (back pressed during the write) before the reply
+                    // lands, and a direct `submitted.set(..)` on a
+                    // dropped scope panics — which, on wasm32, aborts the
+                    // module and freezes the window on its last frame
+                    // with no error screen. See `app::set_if_alive`.
                     {
                         let mut s = ctx.velocity;
                         *s.write() = v;
                     }
-                    submitted.set(true);
+                    crate::app::set_if_alive(&submitted, true);
                     flash(&ctx, "LOGGED — OBJECTIVELY");
                 }
                 Err(e) => flash(&ctx, &format!("ERR {e}")),
             }
-            busy.set(false);
+            // Released on both arms, and only if the page is still here.
+            crate::app::set_if_alive(&busy, false);
         });
     };
 

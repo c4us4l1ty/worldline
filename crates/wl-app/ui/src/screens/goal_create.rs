@@ -262,6 +262,10 @@ pub fn GoalCreateScreen() -> Element {
 
     let stage = *ctx.plan_stage.read();
     let busy = stage.is_busy();
+    // The manual path's own in-flight flag. Separate from `busy` because
+    // it is a different command with a different lifetime, and because
+    // the AI flow's stage already covers its own button.
+    let manual_busy = use_signal(|| false);
 
     // Autofocus + auto-grow. `autofocus` on the textarea is unreliable
     // under a client-rendered tree — WebKit honours it during parsing, not
@@ -358,7 +362,18 @@ pub fn GoalCreateScreen() -> Element {
                     // Cancelled while the request was out: the reply is
                     // discarded and the button comes back. The write is
                     // never reached, which is the whole point of staging.
-                    if *cancel.peek() != epoch {
+                    // `cancel` and `error` are component-scoped and this
+                    // task is not, so the page can be gone by now (back
+                    // mid-request). Both reads and writes are fallible
+                    // for that reason — see `app::peek_if_alive`. A
+                    // `*cancel.peek()` on a dropped scope is a panic,
+                    // and wasm32 aborts on panic.
+                    let still_current = crate::app::peek_if_alive(&cancel)
+                        .map(|c| c == epoch)
+                        .unwrap_or(false);
+                    if !still_current {
+                        // Root-scoped, so always safe: the busy state has
+                        // to be released even if nothing is listening.
                         let mut s = ctx.plan_stage;
                         s.set(PlanStage::Idle);
                         return;
@@ -377,8 +392,12 @@ pub fn GoalCreateScreen() -> Element {
                         None => {
                             let mut s = ctx.plan_stage;
                             s.set(PlanStage::Idle);
-                            *error.write() = Some(
-                                "The plan came back in a shape this build cannot show.".into(),
+                            crate::app::set_if_alive(
+                                &error,
+                                Some(
+                                    "The plan came back in a shape this build cannot show."
+                                        .into(),
+                                ),
                             );
                         }
                     }
@@ -391,8 +410,8 @@ pub fn GoalCreateScreen() -> Element {
                 Err(e) => {
                     let mut s = ctx.plan_stage;
                     s.set(PlanStage::Idle);
-                    if *cancel.peek() == epoch {
-                        *error.write() = Some(e);
+                    if crate::app::peek_if_alive(&cancel).map(|c| c == epoch).unwrap_or(false) {
+                        crate::app::set_if_alive(&error, Some(e));
                     }
                 }
             }
@@ -403,6 +422,18 @@ pub fn GoalCreateScreen() -> Element {
         if busy {
             return;
         }
+        // A SECOND guard, and the only one that actually covers this
+        // path. `busy` is derived from `ctx.plan_stage`, which the AI
+        // flow sets and the manual path never touches — so it was always
+        // `false` here, and two taps in the same frame issued two
+        // `create_goal` calls and wrote two goals. The user could do it
+        // with one double-tap, and the button stayed live for the whole
+        // round trip.
+        if manual_busy.read().clone() {
+            return;
+        }
+        let mut mb = manual_busy;
+        mb.set(true);
         let ctx = ctx;
         let raw = intent.read().clone();
         if raw.trim().is_empty() {
@@ -434,7 +465,11 @@ pub fn GoalCreateScreen() -> Element {
                 target_date: date,
                 complexity: rating,
             };
-            match invoke::<serde_json::Value>("create_goal", req).await {
+            let outcome = invoke::<serde_json::Value>("create_goal", req).await;
+            // Released on both arms, and fallibly: the page may already
+            // be gone, and the signal it belongs to with it.
+            crate::app::set_if_alive(&manual_busy, false);
+            match outcome {
                 Ok(_) => {
                     flash(&ctx, "GOAL CREATED — FIRST TASK READY");
                     {
@@ -473,6 +508,19 @@ pub fn GoalCreateScreen() -> Element {
                     class: "wl-circle-btn wl-back",
                     aria_label: "Back to the line",
                     title: "Back to the line",
+                    // Disabled while a call is in flight, like the
+                    // plan preview's own back. Without this the back
+                    // button routed around `cancel_epoch` entirely: you
+                    // pressed Generate, pressed back, went to Settings,
+                    // and 5-75 seconds later the late reply wrote
+                    // `Screen::PlanPreview` — throwing you out of
+                    // Settings onto a plan you had walked away from. The
+                    // cancel link beside the button still discards a
+                    // request the user has genuinely changed their mind
+                    // about, and it is the honest affordance for that:
+                    // the request is already paid for, so it is
+                    // abandoned, not undone.
+                    disabled: busy,
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
                     IconBack {}
                 },
@@ -605,6 +653,7 @@ pub fn GoalCreateScreen() -> Element {
                     // styling already keeps it subordinate to Generate.
                     button { class: "wl-btn-ghost",
                         title: "Create manually — no API key required",
+                        disabled: *manual_busy.read(),
                         onclick: create_manual,
                         "Create manually"
                     }

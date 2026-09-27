@@ -174,6 +174,7 @@
   --wl-border-subtle: rgba(29, 28, 19, 0.10);
   --wl-border-strong: rgba(29, 28, 19, 0.18);
   --wl-accent-coral:   #D8583B;
+  --wl-accent-coral-45: rgba(216, 88, 59, 0.45);
   --wl-raise: 0 2px 10px rgba(29, 28, 19, 0.10);
   --wl-raise-sheet: 12px 0 32px rgba(29, 28, 19, 0.18);
 }
@@ -251,6 +252,23 @@ select:focus-visible,
 [tabindex]:focus-visible:not(.wl-root) {
   outline: 1px solid var(--wl-accent-coral);
   outline-offset: 2px;
+}
+/* The bare fields carry their own focus affordance — the compose field's
+   coral hairline, the other inputs' coral border — and the generic
+   outline above was drawn ON TOP of them at full strength. On the
+   compose field that meant a 1px box around the entire 384px field, at
+   all times, because a textarea always matches `:focus-visible` and the
+   field is `autofocus`; §9's own note says "the only coral on this
+   screen" and that at full strength the accent "was the loudest thing on
+   a page whose whole idea is a quiet matte field". The bare fields are
+   excluded explicitly rather than by removing the generic rule, which
+   has to keep firing for everything it has not been given a better one
+   (the circle controls, the switches). */
+textarea.wl-compose:focus-visible,
+input.wl-input:focus-visible,
+input.wl-verify-slot:focus-visible,
+select.wl-horizon:focus-visible {
+  outline: none;
 }
 
 /* Every pressable surface shares one physical response: a 1.5% squash and
@@ -387,7 +405,15 @@ button:disabled { cursor: not-allowed; }
   background: var(--wl-surface-high);
   transform: translateY(-1px);
 }
-.wl-circle-btn:active:not(:disabled) { transform: translateY(0); }
+/* The shared squash, restated at the specificity that wins.
+   `button:active:not(:disabled)` is (0,2,1) and this rule was
+   (0,2,0), so the generic press lost to `.wl-circle-btn:hover` at
+   (0,3,0) — and `:hover` is still true while `:active` holds on a
+   desktop webview. The "every pressable surface shares one physical
+   response" invariant above was therefore not shipping on any of them. */
+.wl-circle-btn:active:not(:disabled) {
+  transform: scale(0.985) translateY(1px);
+}
 .wl-circle-btn:disabled { opacity: 0.4; }
 .wl-circle-btn svg { display: block; }
 
@@ -541,6 +567,13 @@ button:disabled { cursor: not-allowed; }
 .wl-btn-primary:hover:not(:disabled) {
   background-color: var(--wl-cta-hover);
   transform: translateY(-1px);
+}
+/* Same specificity reason as `.wl-circle-btn:active` above: at (0,3,0)
+   the hover rule outranked the shared (0,2,1) press, so the app's most
+   prominent control — the one the whole canvas is built around — had no
+   press response at all. */
+.wl-btn-primary:active:not(:disabled) {
+  transform: scale(0.985) translateY(1px);
 }
 .wl-btn-primary:disabled { opacity: 0.5; }
 
@@ -849,13 +882,18 @@ button:disabled { cursor: not-allowed; }
   outline: none;
 }
 .wl-textarea { resize: none; min-height: 84px; }
+/* Placeholder text is TEXT and WCAG 1.4.3 covers it. The two `opacity`
+   multipliers that used to be here composited `--wl-text-muted` down to
+   ≈2.95:1 on the dark elevated surface and ≈3.15:1 on the compose
+   canvas — a field you can read the label of but not the hint in. The
+   second step down the ladder is the correct one; there is no step below
+   it that is still text. */
 .wl-input::placeholder,
 .wl-textarea::placeholder {
-  color: var(--wl-text-muted);
-  opacity: 0.7;
+  color: var(--wl-text-secondary);
 }
 .wl-input:focus,
-.wl-textarea:focus { border-color: rgba(226, 109, 82, 0.45); }
+.wl-textarea:focus { border-color: var(--wl-accent-coral-45); }
 /* Inputs carrying an exact value — a mnemonic, a relay URL — are mono, so
    the characters are countable and a typo is visible. */
 .wl-input--mono { font-family: var(--font-mono); font-size: var(--t-mono-lead); }
@@ -927,7 +965,13 @@ button:disabled { cursor: not-allowed; }
    from the caret, a muted placeholder, and a coral hairline that exists
    only while focused, which is also the only coral on this screen. */
 .wl-compose {
-  flex: 1;
+  /* `flex: 1 1 auto`, NOT `flex: 1`. `flex: 1` is `flex: 1 1 0%`, and
+     the flex BASE SIZE — not `height` — is what lays this out, so the
+     inline `height` `app::autogrow_compose` sets from `scrollHeight`
+     was never consulted. The field did not grow; it scrolled inside
+     itself, which is the exact thing the autogrow exists to prevent.
+     `auto` lets `height` decide and the field still takes the slack. */
+  flex: 1 1 auto;
   min-height: 0;
   width: 100%;
   background: transparent;
@@ -950,7 +994,7 @@ button:disabled { cursor: not-allowed; }
   caret-color: var(--wl-accent-coral);
   transition: border-color var(--duration-settle) var(--ease-tactile);
 }
-.wl-compose::placeholder { color: var(--wl-text-muted); opacity: 0.65; }
+.wl-compose::placeholder { color: var(--wl-text-secondary); }
 /* Half-opacity coral: the hairline spans the full 384px column and at full
    strength it was the loudest thing on a page whose whole idea is a quiet
    matte field. It still reads as the only accent while focused. */
@@ -963,13 +1007,29 @@ button:disabled { cursor: not-allowed; }
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  /* `flex-start`, not `center`, and this is a bug fix rather than a
+     preference. The card was centred inside a fixed-height column and
+     `body { overflow: hidden }` clipped whatever did not fit — so a long
+     instruction put its top ~800px AND its bottom ~800px outside the
+     frame, with no scrollbar and nothing to reveal either end.
+
+     The input is not synthetic: "Create manually" splits a multi-line
+     intent at the first line and stores the rest as the goal
+     description, which `seed_first_steps` copies into the seeded
+     directive's `execution_context`, and the store accepts 4 000
+     characters of it. At 15px/1.6 in a 336px column that is ~90 lines —
+     roughly three times the frame. */
+  justify-content: flex-start;
   /* Top padding reserves the band the floating control occupies (12px
-     offset + 38px control + breathing room). Without it the centred card
-     sits under the menu button in the empty state, which is the tallest
+     offset + 38px control + breathing room). Without it the card sits
+     under the menu button in the empty state, which is the tallest
      state. */
   padding: 66px 0 12px;
   min-height: 0;
+  /* …and the over-tall case scrolls here rather than being clipped.
+     `min-height: 0` above is what lets this flex child shrink far
+     enough for the scroll container to engage. */
+  overflow-y: auto;
 }
 /* A centred card with NOTHING floating over it.
 
@@ -1022,6 +1082,13 @@ button:disabled { cursor: not-allowed; }
   line-height: 1.6;
   color: var(--wl-text-secondary);
   margin: 0 0 24px 0;
+  /* Clamped, with the overflow reachable: the container scrolls (above),
+     so this stops a single instruction from making the scroll a chore.
+     Six lines is roughly a fifth of the frame. */
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .wl-progress-track {
@@ -2025,8 +2092,19 @@ button:disabled { cursor: not-allowed; }
 }
 /* A finished task is quieter, never struck through. A line through text is
    a verdict, and this product does not deliver them. */
-.wl-task-row--done { opacity: 0.62; }
+/* A finished row is quieter, and the mechanism used to be a whole-row
+   `opacity: 0.62` — which composites the SUBTREE, taking the
+   instruction line's `--wl-text-muted` from 5.1:1 to ≈2.8:1. "Quieter,
+   never struck through" was implemented as "less readable than the
+   rows above it", which is not the same property and is not what a
+   finished row should be. Dimmed by token per element instead: the
+   title loses its weight, the secondary line steps down the ladder one
+   stop, and both stay above 5:1. */
 .wl-task-row--done .wl-task-title { font-weight: 400; }
+.wl-task-row--done .wl-task-instruction,
+.wl-task-row--done .wl-task-meta {
+  color: var(--wl-text-muted);
+}
 
 /* The tick. A pressed tick is CREAM, not coral: coral is a beacon for
    something live, and a finished task is neither live nor an alarm. */
@@ -2035,6 +2113,15 @@ button:disabled { cursor: not-allowed; }
   background-color: var(--wl-cta-bg);
   border-color: transparent;
   color: var(--wl-text-inverse);
+}
+/* …and it kept the fill under the pointer too. This class is (0,1,0)
+   and shares the element with `.wl-circle-btn`, whose `:hover` is
+   (0,3,0), so a TICKED row's tick went cream → grey the moment the
+   pointer landed on it — which reads as "the tick did not take" for
+   exactly the state a tick exists to show. Cream, not coral, because a
+   finished task is neither live nor an alarm (§C2). */
+.wl-task-tick--on:hover:not(:disabled) {
+  background-color: var(--wl-cta-bg);
 }
 .wl-icon-check { width: 18px; height: 18px; }
 

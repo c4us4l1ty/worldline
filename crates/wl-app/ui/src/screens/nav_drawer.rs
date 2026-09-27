@@ -82,7 +82,7 @@ pub fn visible_worldlines(goals: &[GoalView]) -> (Vec<GoalView>, usize) {
 #[component]
 pub fn NavDrawer() -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut goals = use_signal::<Option<Vec<GoalView>>>(|| None);
+    let goals = use_signal::<Option<Vec<GoalView>>>(|| None);
 
     // The drawer unmounts when it closes, so a plain mount effect is the
     // whole refresh story: every open re-reads. A goal created since the
@@ -90,8 +90,14 @@ pub fn NavDrawer() -> Element {
     // the whole reason this section is here.
     use_effect(move || {
         spawn(async move {
+            // `goals` belongs to the DRAWER's scope, and this task does
+            // not: it runs at the root scope and outlives the panel. The
+            // window between tapping a row and the reply is exactly when
+            // the panel unmounts, so the write has to be fallible — see
+            // `app::set_if_alive`. A `goals.set(..)` here aborted the
+            // wasm module, freezing the window on its last frame.
             if let Ok(v) = invoke::<Vec<GoalView>>("list_goals", ()).await {
-                goals.set(Some(v));
+                crate::app::set_if_alive(&goals, Some(v));
             }
         });
     });

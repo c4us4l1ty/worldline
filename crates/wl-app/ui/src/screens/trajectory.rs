@@ -58,17 +58,24 @@ pub fn adjustment_pct(adjustment: f64) -> i64 {
 
 pub fn TrajectoryScreen() -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut v = use_signal::<Option<VelocityView>>(|| None);
-    let mut error = use_signal(|| None::<String>);
+    let v = use_signal::<Option<VelocityView>>(|| None);
+    let error = use_signal(|| None::<String>);
 
     use_effect(move || {
         spawn(async move {
+            // Both signals belong to this screen's scope and the task
+            // belongs to the root scope, so the screen can be gone by
+            // the time the reply lands (back while it is computing). A
+            // direct write there aborts the wasm module rather than
+            // showing an error, so every one of them is fallible.
             match invoke::<VelocityView>("velocity", ()).await {
                 Ok(val) => {
-                    error.set(None);
-                    v.set(Some(val));
+                    crate::app::set_if_alive(&error, None);
+                    crate::app::set_if_alive(&v, Some(val));
                 }
-                Err(e) => *error.write() = Some(e),
+                Err(e) => {
+                    crate::app::set_if_alive(&error, Some(e));
+                }
             }
         });
     });

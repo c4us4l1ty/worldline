@@ -81,7 +81,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
         if cur != "intro" || !phrase.is_empty() || *busy.peek() {
             return;
         }
-        let mut g = generated;
+        let g = generated;
         if g.peek().is_some() {
             mode.set("display");
             return;
@@ -89,25 +89,42 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
         busy.set(true);
         error.set(String::new());
         spawn(async move {
+            // Every signal below belongs to this screen's scope while
+            // the task belongs to the root scope, so the screen can be
+            // gone by the time the reply lands. A direct `.set(..)` then
+            // is a `try_write().unwrap()` on a dropped generational box:
+            // a panic, and wasm32 aborts on panic, so the module dies and
+            // the window freezes on its last frame with no error screen.
+            // `set_if_alive` / `peek_if_alive` are the fallible forms.
             match invoke::<GeneratedIdentity>("identity_generate", ()).await {
                 Ok(id) => {
                     let words: Vec<String> =
                         id.phrase.split_whitespace().map(String::from).collect();
-                    g.set(Some(words));
-                    let mut gi = gen_indices;
-                    gi.set(id.verify_indices);
-                    let next = generation_mode(*mode.peek(), true);
-                    mode.set(next);
+                    crate::app::set_if_alive(&g, Some(words));
+                    crate::app::set_if_alive(&gen_indices, id.verify_indices);
+                    if let Some(cur) = crate::app::peek_if_alive(&mode) {
+                        crate::app::set_if_alive(&mode, generation_mode(cur, true));
+                    }
                 }
                 Err(_) => {
-                    let next = generation_mode(*mode.peek(), false);
-                    mode.set(next);
-                    if next == "generation_failed" {
-                        error.set("Identity generation failed. Please try again.".to_string());
+                    // The error is shown only when the mode actually
+                    // moved to `generation_failed`, so a failure that
+                    // the screen had already advanced past stays silent.
+                    let failed = crate::app::peek_if_alive(&mode)
+                        .map(|cur| generation_mode(cur, false) == "generation_failed")
+                        .unwrap_or(false);
+                    if failed {
+                        crate::app::set_if_alive(
+                            &error,
+                            "Identity generation failed. Please try again.".to_string(),
+                        );
+                    }
+                    if let Some(cur) = crate::app::peek_if_alive(&mode) {
+                        crate::app::set_if_alive(&mode, generation_mode(cur, false));
                     }
                 }
             }
-            busy.set(false);
+            crate::app::set_if_alive(&busy, false);
         });
     });
 
@@ -131,7 +148,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
         }
         let ctx = ctx;
         let words: Vec<String> = words_input.read().clone();
-        let mut words_sig = words_input;
+        let words_sig = words_input;
         let ch = verify_challenge.clone();
         let mut g = generated;
         let seeded = verify_phrase.clone();
@@ -154,18 +171,19 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
             let verified: bool = invoke::<bool>("identity_verify_backup", payload)
                 .await
                 .unwrap_or(false);
-            busy.set(false);
+            crate::app::set_if_alive(&busy, false);
             if verified {
                 // Secret hygiene: the 12 words lived in signals/DOM for
                 // the one mandated display — drop them the moment the
                 // shell confirms the backup (AGENTS.md: secrets never
                 // linger in the DOM).
                 g.set(None);
-                words_sig.set(vec![String::new(); 3]);
+                crate::app::set_if_alive(&words_sig, vec![String::new(); 3]);
                 let mut s = ctx.screen;
                 *s.write() = Screen::Settings;
             } else {
-                error.set(
+                crate::app::set_if_alive(
+                    &error,
                     "Those words don't match the sequence. Check your backup again.".to_string(),
                 );
             }
@@ -231,17 +249,23 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
                                     Ok(_) => {
                                         // Secret hygiene: drop the typed
                                         // phrase from the signal/DOM now
-                                        // that the shell holds it.
-                                        restore_input.set(String::new());
+                                        // that the shell holds it. Fallible,
+                                        // because the screen may be gone —
+                                        // see the note at the generate
+                                        // effect above.
+                                        crate::app::set_if_alive(&restore_input, String::new());
                                         let mut s = ctx.screen;
                                         *s.write() = Screen::Settings;
                                     }
                                     Err(_) => {
-                                        let mut e = error;
-                                        e.set("That phrase was not accepted. Check each word and try again.".to_string());
+                                        crate::app::set_if_alive(
+                                            &error,
+                                            "That phrase was not accepted. Check each word and try again."
+                                                .to_string(),
+                                        );
                                     }
                                 }
-                                busy.set(false);
+                                crate::app::set_if_alive(&busy, false);
                             });
                         },
                         "Restore identity"

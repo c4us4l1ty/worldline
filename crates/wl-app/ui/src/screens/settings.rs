@@ -132,7 +132,7 @@ pub fn next_theme(current: &str) -> &'static str {
 fn commit(
     mut ctx: AppCtx,
     local: Signal<AppSettingsView>,
-    mut confirmed: Signal<AppSettingsView>,
+    confirmed: Signal<AppSettingsView>,
     payload: AppSettingsView,
 ) {
     spawn(async move {
@@ -144,15 +144,23 @@ fn commit(
         {
             Ok(_) => {
                 *ctx.settings.write() = payload.clone();
-                confirmed.set(payload);
+                // Component-scoped, written from a root-scope task, and
+                // the page can be gone: Settings is closed while a commit
+                // is in flight all the time (press back immediately after
+                // changing a field). A direct `confirmed.set(..)` there
+                // panics on the dropped scope, and wasm32 aborts on panic
+                // — so the module dies and the window freezes on its last
+                // painted frame. See `app::set_if_alive`.
+                crate::app::set_if_alive(&confirmed, payload);
             }
             Err(e) => {
                 // Put the page back in step with the store. Showing a value
                 // the database does not hold is the specific failure this
                 // replaces: the old code flashed an error and left the
                 // unsaved draft on screen.
-                let mut draft = local;
-                draft.set(confirmed.peek().clone());
+                if let Some(known) = crate::app::peek_if_alive(&confirmed) {
+                    crate::app::set_if_alive(&local, known);
+                }
                 flash(&ctx, &format!("NOT SAVED — {e}"));
             }
         }
@@ -189,7 +197,14 @@ pub const MAX_PHRASE_CHARS: usize = 200;
 /// into an IPC argument on submit.
 pub const MAX_API_KEY_CHARS: usize = 512;
 
-pub fn SettingsScreen() -> Element {
+/// `sheet_open` is passed in rather than created here because the ESCAPE
+/// LADDER lives at the app root: a choice sheet is a full-screen dialog
+/// with no keydown handler of its own, so the root has to know one is up
+/// or `Escape` cannot close it — and the root has to know in order to
+/// refuse `Ctrl+,`, which would otherwise summon a drawer UNDER the
+/// sheet at a higher `z-index`.
+#[component]
+pub fn SettingsScreen(sheet_open: Signal<bool>) -> Element {
     let ctx = use_context::<AppCtx>();
     let mut local = use_signal(|| ctx.settings.read().clone());
     // The last state the SHELL confirmed. Every commit is scoped to this
@@ -197,7 +212,7 @@ pub fn SettingsScreen() -> Element {
     // it — see the module docs.
     let confirmed = use_signal(|| ctx.settings.read().clone());
     let mut api_key = use_signal(String::new);
-    let mut key_saved = use_signal(|| false);
+    let key_saved = use_signal(|| false);
     let mut busy = use_signal(|| false);
     // Separate guard for the relay handshake probe, so a connection test
     // in flight cannot be re-entered by the sync button beside it.
@@ -234,13 +249,13 @@ pub fn SettingsScreen() -> Element {
     // for a settings page and strictly better than resurrecting a
     // snapshot.
     {
-        let mut local = local;
-        let mut confirmed = confirmed;
+        let local = local;
+        let confirmed = confirmed;
         use_effect(move || {
             spawn(async move {
                 if let Ok(fresh) = invoke::<AppSettingsView>("settings_get", ()).await {
-                    confirmed.set(fresh.clone());
-                    local.set(fresh);
+                    crate::app::set_if_alive(&confirmed, fresh.clone());
+                    crate::app::set_if_alive(&local, fresh);
                 }
             });
         });
@@ -264,17 +279,20 @@ pub fn SettingsScreen() -> Element {
         }
         *last_probe_trigger.write() = Some(p.clone());
         let still_current = local;
-        let mut saved = key_saved;
+        let saved = key_saved;
         spawn(async move {
             if p.is_empty() {
-                saved.set(false);
+                crate::app::set_if_alive(&saved, false);
                 return;
             }
             let has: bool = invoke("has_api_key", serde_json::json!({ "provider": p.clone() }))
                 .await
                 .unwrap_or(false);
-            if still_current.peek().ai_provider.clone().unwrap_or_default() == p {
-                saved.set(has);
+            let current = crate::app::peek_if_alive(&still_current)
+                .map(|c| c.ai_provider.clone().unwrap_or_default() == p)
+                .unwrap_or(false);
+            if current {
+                crate::app::set_if_alive(&saved, has);
             }
         });
     });
@@ -312,19 +330,19 @@ pub fn SettingsScreen() -> Element {
             // that has already started its own. Dropping the answer is
             // what keeps two in-flight fetches from racing for the one
             // `catalog` slot.
-            if *catalog_gen.peek() != generation {
+            if crate::app::peek_if_alive(&catalog_gen).map(|g| g != generation).unwrap_or(true) {
                 return;
             }
             match answer {
                 Ok(list) => {
-                    *catalog.write() = Some(list);
+                    crate::app::set_if_alive(&catalog, Some(list));
                 }
                 Err(e) => {
-                    *catalog.write() = None;
-                    catalog_error.set(Some(e));
+                    crate::app::set_if_alive(&catalog, None);
+                    crate::app::set_if_alive(&catalog_error, Some(e));
                 }
             }
-            catalog_busy.set(false);
+            crate::app::set_if_alive(&catalog_busy, false);
         });
     };
     {
@@ -405,6 +423,17 @@ pub fn SettingsScreen() -> Element {
         .collect()
     };
 
+    // `sheet_open` is the one thing about the choice sheets the APP root
+    // needs to know, because the escape ladder and the `Ctrl+,` guard
+    // live there: a sheet is a full-screen dialog, so `Escape` has to
+    // reach it — the sheets carry no key handler of their own — and the
+    // telemetry drawer must not be summonable underneath one it renders
+    // above at a higher `z-index`.
+    let sheets_up = open_picker.read().is_some();
+    if *sheet_open.peek() != sheets_up {
+        sheet_open.set(sheets_up);
+    }
+
     rsx! {
         div { class: "wl-page",
             // The way back used to be a button at the very bottom of a long
@@ -479,9 +508,11 @@ pub fn SettingsScreen() -> Element {
                                                     { let mut sig = ctx.identity_status; sig.set(st); }
                                                     flash(&ctx, "IDENTITY UNLOCKED");
                                                 }
-                                                Err(e) => identity_error.set(e),
+                                                Err(e) => {
+                                                    crate::app::set_if_alive(&identity_error, e.clone());
+                                                }
                                             }
-                                            identity_busy.set(false);
+                                            crate::app::set_if_alive(&identity_busy, false);
                                         });
                                     },
                                     if *identity_busy.read() { "Unlocking…" } else { "Unlock from vault" }
@@ -536,15 +567,17 @@ pub fn SettingsScreen() -> Element {
                                             Ok(_) => {
                                                 // Secret hygiene: the phrase
                                                 // never lingers in the DOM.
-                                                phrase.set(String::new());
+                                                crate::app::set_if_alive(&phrase, String::new());
                                                 let st: IdentityStatus =
                                                     invoke("identity_status", ()).await.unwrap_or_default();
                                                 { let mut sig = ctx.identity_status; sig.set(st); }
                                                 flash(&ctx, "IDENTITY RESTORED");
                                             }
-                                            Err(e) => identity_error.set(e),
+                                            Err(e) => {
+                                                crate::app::set_if_alive(&identity_error, e.clone());
+                                            }
                                         }
-                                        identity_busy.set(false);
+                                        crate::app::set_if_alive(&identity_busy, false);
                                     });
                                 },
                                 "Restore"
@@ -684,7 +717,7 @@ pub fn SettingsScreen() -> Element {
                             // Rendered inline, and in full: this is the
                             // message that used to be discarded.
                             span { class: "wl-form-error", "{err}" }
-                        } else if let Some(list) = catalog.read().clone() {
+                        } else if let Some(list) = catalog.read().as_ref() {
                             span { class: "wl-mono",
                                 "{list.models.len()} models"
                                 if list.cached { " · cached" }
@@ -748,15 +781,18 @@ pub fn SettingsScreen() -> Element {
                                     .await
                                     {
                                         Ok(true) => {
-                                            key_saved.set(true);
-                                            api_key.set(String::new());
+                                            crate::app::set_if_alive(&key_saved, true);
+                                            // Secret hygiene: the pasted key
+                                            // is dropped from the field the
+                                            // moment the vault has it.
+                                            crate::app::set_if_alive(&api_key, String::new());
                                             flash(&ctx, "KEY SEALED IN VAULT");
                                             // A new key may unlock a
                                             // catalog that was refused
                                             // before, so refetch rather
                                             // than leaving the picker
                                             // stuck on an auth error.
-                                            *catalog.write() = None;
+                                            crate::app::set_if_alive(&catalog, None);
                                         }
                                         _ => flash(&ctx, "KEY REJECTED"),
                                     }
@@ -783,9 +819,9 @@ pub fn SettingsScreen() -> Element {
                                         .await
                                         {
                                             Ok(true) => {
-                                                key_saved.set(false);
+                                                crate::app::set_if_alive(&key_saved, false);
                                                 flash(&ctx, "VAULT KEY REMOVED");
-                                                *catalog.write() = None;
+                                                crate::app::set_if_alive(&catalog, None);
                                             }
                                             _ => flash(&ctx, "KEY NOT FOUND"),
                                         }
@@ -863,7 +899,11 @@ pub fn SettingsScreen() -> Element {
                                             flash(&ctx, &msg);
                                         }
                                     }
-                                    probing.set(false);
+                                    // Fallible: a relay handshake can take
+                                    // 120 s, and back is not disabled while
+                                    // it runs, so this page is very likely
+                                    // gone by now.
+                                    crate::app::set_if_alive(&probing, false);
                                 });
                             },
                             if *probing.read() { "Testing relay…" } else { "Test connection" }
@@ -892,7 +932,10 @@ pub fn SettingsScreen() -> Element {
                                         flash(&ctx, "SYNC FAILED — OFFLINE?");
                                     }
                                 }
-                                busy.set(false);
+                                // A sync cycle is up to 200 HTTP posts, so
+                                // this page is regularly gone by the time
+                                // it answers.
+                                crate::app::set_if_alive(&busy, false);
                             });
                         },
                         span { IconSync {} }
@@ -912,6 +955,12 @@ pub fn SettingsScreen() -> Element {
         // overlays like the nav and telemetry drawers: they are only ever
         // opened from here, so they can own local signals instead of
         // growing `AppCtx` for a transient concern.
+        //
+        // `sheet_open` is the one thing about them the APP does need to
+        // know, because the escape ladder and the `Ctrl+,` guard live at
+        // the root: a sheet is a full-screen dialog, so `Escape` has to
+        // reach it, and the telemetry drawer must not be summonable
+        // underneath it.
         if let Some(sheet) = *open_picker.read() {
             match sheet {
                 ChoiceSheet::Provider => rsx! {

@@ -1039,17 +1039,34 @@ pub enum Overlay {
     None,
     /// The hamburger's control panel.
     Nav,
+    /// A choice sheet (provider or model picker), rendered over the
+    /// page that opened it.
+    ///
+    /// The TOP rung, and it was missing. Both sheets are full-screen
+    /// `wl-picker-backdrop` dialogs with a close button and a backdrop
+    /// tap, and neither had a keydown handler — so `Escape`, which the
+    /// app root handles, could not reach them at all, and a keyboard user
+    /// with a sheet open had no dismissal path. Worse, `Ctrl+,` was
+    /// still allowed through: it mounted the telemetry drawer at
+    /// `z-index: 40` UNDER the sheet's `z-index: 80`, so the drawer was
+    /// live and invisible, and the next `Escape` closed the drawer the
+    /// user could not see while the sheet they could see stayed open.
+    Picker,
     /// The `Ctrl+,` telemetry drawer.
     Telemetry,
 }
 
 /// The layer a dismissal should hit first.
 ///
-/// Escape modal above the two panels above nothing: the escape sheet is a
-/// centred dialog, so anything open underneath it is strictly less
-/// important to the user than the dialog they are looking at.
-pub fn topmost_overlay(nav_open: bool, telemetry_open: bool) -> Overlay {
-    if nav_open {
+/// A choice sheet above the control panel above the telemetry drawer
+/// above nothing. A sheet is a centred dialog the user is looking at, so
+/// anything open underneath it is strictly less important than the
+/// dialog itself; the panel is above the drawer for the same reason
+/// `topmost_overlay` is data rather than a chain of `if`s in a handler.
+pub fn topmost_overlay(nav_open: bool, telemetry_open: bool, picker_open: bool) -> Overlay {
+    if picker_open {
+        Overlay::Picker
+    } else if nav_open {
         Overlay::Nav
     } else if telemetry_open {
         Overlay::Telemetry
@@ -1065,11 +1082,21 @@ pub fn topmost_overlay(nav_open: bool, telemetry_open: bool) -> Overlay {
 /// rule is a pure function that can be tested without a DOM, a webview,
 /// or a keyboard. A dismissal that closed everything, or nothing when
 /// nothing was open, is the whole class of bug this replaces.
-pub fn dismiss_topmost(nav_open: bool, telemetry_open: bool) -> (Overlay, bool, bool) {
-    match topmost_overlay(nav_open, telemetry_open) {
-        Overlay::Nav => (Overlay::Nav, false, telemetry_open),
-        Overlay::Telemetry => (Overlay::Telemetry, nav_open, false),
-        Overlay::None => (Overlay::None, nav_open, telemetry_open),
+///
+/// The sheets are local to Settings (they are only ever opened from
+/// there), so their state is a screen signal rather than an `AppCtx`
+/// field; the caller reads it and passes it in, and writes back only
+/// when the sheet is the layer that was dismissed.
+pub fn dismiss_topmost(
+    nav_open: bool,
+    telemetry_open: bool,
+    picker_open: bool,
+) -> (Overlay, bool, bool, bool) {
+    match topmost_overlay(nav_open, telemetry_open, picker_open) {
+        Overlay::Picker => (Overlay::Picker, nav_open, telemetry_open, false),
+        Overlay::Nav => (Overlay::Nav, false, telemetry_open, picker_open),
+        Overlay::Telemetry => (Overlay::Telemetry, nav_open, false, picker_open),
+        Overlay::None => (Overlay::None, nav_open, telemetry_open, picker_open),
     }
 }
 
@@ -1080,8 +1107,11 @@ pub fn dismiss_topmost(nav_open: bool, telemetry_open: bool) -> (Overlay, bool, 
 /// sibling with a higher z-index, it silently buried the panel the user
 /// had just opened. A shortcut that opens one drawer while another is
 /// open is not a shortcut, it is a race with a z-index.
-pub fn toggle_telemetry_allowed(nav_open: bool) -> bool {
-    !nav_open
+pub fn toggle_telemetry_allowed(nav_open: bool, picker_open: bool) -> bool {
+    // A sheet is the top rung: summoning the drawer under it is exactly
+    // the "the menu stopped working" failure the panel guard was added
+    // for, one layer down.
+    !nav_open && !picker_open
 }
 
 fn App() -> Element {
@@ -1148,8 +1178,18 @@ fn App() -> Element {
     //   independent; routing waits only on identity.
     // * **Retryable.** Keyed on `boot_attempt`, so retrying is a state
     //   change rather than a remount of the whole app.
+    // Whether a choice sheet (provider / model picker) is open. Owned
+    // by the app root rather than by Settings, because the ESCAPE LADDER
+    // is a root concern: without the root knowing, `Escape` could not
+    // reach a sheet and `Ctrl+,` mounted a drawer underneath one that the
+    // user could not see.
+    let mut sheet_open = use_signal(|| false);
     let mut booted_attempt = use_signal(|| u32::MAX);
-    let mut boot_settled = use_signal(|| false);
+    // The in-flight boot task, so a retry can cancel the attempt it is
+    // replacing. `Task` is `Copy`, so this is one pointer, and holding it
+    // is what makes "Retry" a state change rather than a second race
+    // against the first (see the effect below).
+    let mut boot_task = use_signal(|| None::<Task>);
     use_effect(move || {
         let attempt = *ctx.boot_attempt.read();
         // `peek` so arming the guard does not subscribe this effect to
@@ -1158,11 +1198,29 @@ fn App() -> Element {
             return;
         }
         *booted_attempt.write() = attempt;
+        // Cancel the previous attempt BEFORE starting this one. Both the
+        // task and its watchdog outlived the effect that spawned them —
+        // a detached `spawn` runs at the root scope, not the component's
+        // — so a retry used to leave attempt 1 running alongside attempt
+        // 2. That was not merely wasteful: attempt 1's `boot_settled`
+        // write armed attempt 2's watchdog, so if attempt 2's own
+        // `identity_status` hung, nothing ever wrote `BootError` and the
+        // splash counted seconds forever — the exact unbounded boot the
+        // 15 s budget and its two `const _: () = assert!(…)` bounds
+        // exist to make impossible. The two attempts also raced on
+        // `*screen.write()`, so a slow first attempt could overwrite a
+        // good second routing.
+        if let Some(previous) = boot_task.write().take() {
+            previous.cancel();
+        }
         let ctx2 = ctx;
-        spawn(async move {
+        let task = spawn(async move {
             let mut screen = ctx2.screen;
             let mut identity = ctx2.identity_status;
-            boot_settled.set(false);
+            // Per-attempt, not shared: the watchdog below reads exactly
+            // the signal its own attempt owns, so a reply from a
+            // superseded attempt cannot disarm a live one.
+            let mut boot_settled = Signal::new(false);
             *screen.write() = Screen::Boot;
 
             // Arm the watchdog FIRST. Anything awaited below can hang,
@@ -1205,6 +1263,14 @@ fn App() -> Element {
             boot_settled.set(true);
             watchdog.cancel();
         });
+        boot_task.set(Some(task));
+    });
+    // A boot task that outlives the app is still a live task; drop it
+    // with the component that owns the handle.
+    use_drop(move || {
+        if let Some(task) = *boot_task.peek() {
+            task.cancel();
+        }
     });
 
     let _screen = ctx.screen.read().clone();
@@ -1233,7 +1299,12 @@ fn App() -> Element {
                     // panel; the drawer is a later sibling with a higher
                     // z-index, so the panel vanished underneath it and the
                     // chord read as "the menu stopped working".
-                    if !focus_is_text_entry() && toggle_telemetry_allowed(*ctx.nav_open.read()) {
+                    if !focus_is_text_entry()
+                        && toggle_telemetry_allowed(
+                            *ctx.nav_open.read(),
+                            *sheet_open.read(),
+                        )
+                    {
                         let open = *ctx.telemetry_open.read();
                         { let mut s = ctx.telemetry_open; *s.write() = !open; }
                     }
@@ -1245,14 +1316,19 @@ fn App() -> Element {
                     // keypress that opened the sheet and left a modal the
                     // user never asked for on top of a panel that had just
                     // gone away.
-                    let (dismissed, nav_open, telemetry_open) = dismiss_topmost(
+                    let (dismissed, nav_open, telemetry_open, sheet_stays) = dismiss_topmost(
                         *ctx.nav_open.read(),
                         *ctx.telemetry_open.read(),
+                        *sheet_open.read(),
                     );
+                    let _ = sheet_stays;
                     if dismissed != Overlay::None {
                         e.prevent_default();
                         { let mut s = ctx.nav_open; *s.write() = nav_open; }
                         { let mut s = ctx.telemetry_open; *s.write() = telemetry_open; }
+                        if dismissed == Overlay::Picker {
+                            sheet_open.set(false);
+                        }
                     }
                 }
             },
@@ -1291,7 +1367,9 @@ fn App() -> Element {
                     Screen::PlanPreview => rsx! { crate::screens::PlanPreviewScreen {} },
                     Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
                     Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
-                    Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
+                    Screen::Settings => rsx! {
+                        crate::screens::SettingsScreen { sheet_open }
+                    },
                     Screen::EntropyLog => rsx! { crate::screens::EntropyLogScreen {} },
                     Screen::Trajectory => rsx! { crate::screens::TrajectoryScreen {} },
                 }
@@ -1451,6 +1529,48 @@ pub fn set_directive(ctx: &AppCtx, directive: Option<DirectiveView>) {
     // the single-active filter plus the write.
     let mut current = ctx.directive;
     current.set(active_directive(directive));
+}
+
+/// Writes to a signal, tolerating a scope that is already gone.
+///
+/// Every post-`await` write in this app has to go through here, and the
+/// reason is structural rather than defensive. A `use_signal` value is
+/// owned by the component that created it, but a detached `spawn`ed task
+/// is NOT that component's: it runs at the runtime's root scope and
+/// outlives whatever mounted it. So a screen can be unmounted while its
+/// `invoke` is still in flight — press back during a 75-second
+/// `master_plan_preview`, tick a ledger row and navigate away, open the
+/// panel and tap a row inside the `list_goals` window — and the reply
+/// then writes to a dropped scope. In dioxus-signals `read`/`write` are
+/// `try_read().unwrap()` / `try_write().unwrap()`, `panic = abort` is
+/// the wasm default, and the `ErrorBoundary` does not help because
+/// `catch_unwind` guards component render, not task polls: the whole
+/// module aborts and the window freezes on its last painted frame with
+/// no error screen.
+///
+/// The root-scoped `AppCtx` signals do not have this problem — they are
+/// owned by `ScopeId::APP`, which outlives every writer by construction
+/// — so those writes stay direct. This is for the component-local ones.
+pub fn set_if_alive<T: 'static>(sig: &Signal<T>, value: T) -> bool {
+    // `WriteLock` derefs to the signal's target, so the write is an
+    // ordinary assignment. `write()` is not reachable here: the
+    // accessor is a method on the `Writable` trait, and a
+    // `try_write_unchecked` handle is a `WriteLock`, not a signal.
+    match sig.try_write_unchecked() {
+        Ok(mut slot) => {
+            *slot = value;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reads a signal, returning `None` once its scope is gone. The
+/// counterpart to [`set_if_alive`] for the "has the screen unmounted?"
+/// question, which every post-`await` branch has to ask before acting on
+/// the result it was about to render.
+pub fn peek_if_alive<T: 'static + Clone>(sig: &Signal<T>) -> Option<T> {
+    sig.try_peek_unchecked().ok().map(|r| r.cloned())
 }
 
 pub fn flash(ctx: &AppCtx, msg: &str) {
@@ -1813,22 +1933,46 @@ mod tests {
     #[test]
     fn escape_closes_exactly_the_topmost_layer() {
         // Nothing up: nothing is dismissed, and no flag is disturbed.
-        assert_eq!(dismiss_topmost(false, false), (Overlay::None, false, false));
-        // Each layer alone closes itself and nothing else.
-        assert_eq!(dismiss_topmost(true, false), (Overlay::Nav, false, false));
         assert_eq!(
-            dismiss_topmost(false, true),
-            (Overlay::Telemetry, false, false)
+            dismiss_topmost(false, false, false),
+            (Overlay::None, false, false, false)
         );
-        // Stacked: the control panel is above the telemetry drawer, and
-        // dismissing it must leave the drawer underneath standing.
-        // (Collapsing everything is the old behaviour; it is what made one
-        // keypress feel like two unrelated things happened.)
-        assert_eq!(dismiss_topmost(true, true), (Overlay::Nav, false, true));
-        // Second press, then, unwinds the drawer underneath.
+        // Each layer alone closes itself and nothing else.
         assert_eq!(
-            dismiss_topmost(false, true),
-            (Overlay::Telemetry, false, false)
+            dismiss_topmost(true, false, false),
+            (Overlay::Nav, false, false, false)
+        );
+        assert_eq!(
+            dismiss_topmost(false, true, false),
+            (Overlay::Telemetry, false, false, false)
+        );
+        // A choice sheet is a full-screen dialog, so it is the top rung:
+        // it closes first and everything under it stands.
+        assert_eq!(
+            dismiss_topmost(false, false, true),
+            (Overlay::Picker, false, false, false)
+        );
+        // Stacked: the sheet is above the control panel, which is above
+        // the telemetry drawer, and dismissing one must leave the rest
+        // standing. (Collapsing everything is the old behaviour; it is
+        // what made one keypress feel like two unrelated things
+        // happened.)
+        assert_eq!(
+            dismiss_topmost(true, true, true),
+            (Overlay::Picker, true, true, false)
+        );
+        assert_eq!(
+            dismiss_topmost(true, true, false),
+            (Overlay::Nav, false, true, false)
+        );
+        // Then the drawer underneath, then the clear screen.
+        assert_eq!(
+            dismiss_topmost(false, true, false),
+            (Overlay::Telemetry, false, false, false)
+        );
+        assert_eq!(
+            dismiss_topmost(false, false, false),
+            (Overlay::None, false, false, false)
         );
     }
 
@@ -1839,28 +1983,28 @@ mod tests {
     #[test]
     fn escape_on_a_clean_screen_dismisses_nothing() {
         for _ in 0..3 {
-            let (dismissed, n, t) = dismiss_topmost(false, false);
+            let (dismissed, n, t, s) = dismiss_topmost(false, false, false);
             assert_eq!(dismissed, Overlay::None);
-            assert!(!n && !t);
+            assert!(!n && !t && !s);
         }
-        // And the chord is refused while the panel is up, rather than
-        // summoning the drawer behind it and burying it.
-        assert!(!toggle_telemetry_allowed(true));
-        assert!(toggle_telemetry_allowed(false));
     }
 
-    /// The telemetry chord must not summon a drawer over a panel that is
+    /// The telemetry chord must not summon a drawer under a layer that is
     /// already up.
     ///
-    /// The drawer is a later sibling with a higher z-index, so the panel
-    /// did not fail to open — it was covered. From the outside that is
-    /// indistinguishable from a menu that does not work, which is the
-    /// whole reason the guard is a tested function and not an `if` buried
-    /// in a key handler.
+    /// The drawer is a later sibling with a higher z-index than the
+    /// control panel, so the panel did not fail to open — it was covered,
+    /// and from the outside that is indistinguishable from a menu that
+    /// does not work. The choice sheets are worse: they sit at a HIGHER
+    /// z-index still, so a drawer summoned under one is invisible but
+    /// fully live, and the next `Escape` closes the drawer the user cannot
+    /// see while the sheet they can see stays open.
     #[test]
     fn the_telemetry_chord_is_refused_over_an_open_layer() {
-        assert!(toggle_telemetry_allowed(false));
-        assert!(!toggle_telemetry_allowed(true), "control panel up");
+        assert!(toggle_telemetry_allowed(false, false));
+        assert!(!toggle_telemetry_allowed(true, false), "control panel up");
+        assert!(!toggle_telemetry_allowed(false, true), "choice sheet up");
+        assert!(!toggle_telemetry_allowed(true, true), "both up");
     }
 
     /// The panel's verbs, as a table.

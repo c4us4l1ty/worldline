@@ -84,9 +84,9 @@ pub fn group_by_goal(tasks: &[TaskView]) -> Vec<(&str, Vec<&TaskView>)> {
 
 pub fn EntropyLogScreen() -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut tasks = use_signal::<Option<Vec<TaskView>>>(|| None);
-    let mut buckets = use_signal(Vec::new);
-    let mut error = use_signal(|| None::<String>);
+    let tasks = use_signal::<Option<Vec<TaskView>>>(|| None);
+    let buckets = use_signal(Vec::new);
+    let error = use_signal(|| None::<String>);
     // Ids whose tick is in flight, so a double-tap cannot fire two writes.
     // A checkbox that disables itself for the duration of its own request
     // is the whole of the "already resolved" problem.
@@ -96,25 +96,34 @@ pub fn EntropyLogScreen() -> Element {
     // when it is closed, so every open re-reads. A task ticked on the
     // previous visit therefore shows as done the next time, and a goal
     // created since is here.
+    // Every write below goes through `set_if_alive`. `tasks`, `error`,
+    // `buckets` and `pending` are owned by THIS screen's scope, but a
+    // `spawn`ed task runs at the root scope and outlives the screen, so
+    // the back chevron (which is not disabled while a tick is in flight)
+    // can unmount the page between the request and the reply. A direct
+    // `tasks.set(..)` at that point is a `try_write().unwrap()` on a
+    // dropped generational box: a panic, and wasm32 aborts on panic, so
+    // the whole module dies and the window freezes on its last painted
+    // frame with no error screen to explain it.
     use_effect(move || {
         spawn(async move {
             match invoke::<Vec<TaskView>>("task_ledger", ()).await {
                 Ok(v) => {
-                    error.set(None);
-                    tasks.set(Some(v));
+                    crate::app::set_if_alive(&error, None);
+                    crate::app::set_if_alive(&tasks, Some(v));
                 }
                 Err(e) => {
                     // A shell without the command (an older build) answers
                     // with a missing-command error, which is a real state
                     // and not a bug to hide: say so on the page.
-                    *error.write() = Some(e);
+                    crate::app::set_if_alive(&error, Some(e));
                 }
             }
             // The estimator is a second query, and a failure here must not
             // take the ledger down with it — a missing Calibration card is
             // a smaller problem than a missing task list.
             if let Ok(b) = invoke::<Vec<CalibrationView>>("calibration_view", ()).await {
-                buckets.set(b);
+                crate::app::set_if_alive(&buckets, b);
             }
         });
     });
@@ -140,17 +149,20 @@ pub fn EntropyLogScreen() -> Element {
                     // a tick, and a locally-patched row would be the only
                     // one of the four that did not.
                     if let Ok(v) = invoke::<Vec<TaskView>>("task_ledger", ()).await {
-                        tasks.set(Some(v));
+                        crate::app::set_if_alive(&tasks, Some(v));
                     }
                     if let Ok(b) = invoke::<Vec<CalibrationView>>("calibration_view", ()).await {
-                        buckets.set(b);
+                        crate::app::set_if_alive(&buckets, b);
                     }
                     crate::screens::canvas::refresh_canvas(&ctx);
                 }
                 Err(e) => flash(&ctx, &format!("ERR {e}")),
             }
-            let mut p = pending;
-            p.write().retain(|x| x != &id);
+            // Released on both arms, and only if the page is still here.
+            if crate::app::peek_if_alive(&pending).is_some() {
+                let mut p = pending;
+                p.write().retain(|x| x != &id);
+            }
         });
     };
 

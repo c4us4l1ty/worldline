@@ -77,7 +77,7 @@ pub fn graph_rows(plan: &PlanDraft) -> usize {
 
 pub fn PlanPreviewScreen() -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     // Which card is open, and which card is being edited. Separate signals
     // because "showing the steps" and "let me change the text" are
     // different intents, and one `Option<usize>` for both would close the
@@ -92,8 +92,17 @@ pub fn PlanPreviewScreen() -> Element {
     let plan = ctx.plan.read().clone();
 
     let begin_edit = move |(index, step): (usize, PlanStep)| {
-        draft_title.set(step.title.clone());
-        draft_minutes.set(step.estimated_minutes.to_string());
+        // Seed the draft only when the editor is moving to a DIFFERENT
+        // step. It re-seeded on every call, and the title field's
+        // `oninput` calls it on every keystroke — so typing a new title
+        // reset the estimate field to the step's stored value
+        // mid-keystroke. That is invisible until the estimate field is
+        // given the `oninput` it was missing, at which point it becomes
+        // "you cannot change both at once", which is not a feature.
+        if *editing.peek() != Some(index) {
+            draft_title.set(step.title.clone());
+            draft_minutes.set(step.estimated_minutes.to_string());
+        }
         editing.set(Some(index));
     };
 
@@ -211,7 +220,10 @@ pub fn PlanPreviewScreen() -> Element {
                 Err(e) => {
                     let mut s = ctx.plan_stage;
                     s.set(PlanStage::Idle);
-                    *error.write() = Some(e);
+                    // Fallible: Commit is a local write, but the user can
+                    // still have navigated away while it ran, and a
+                    // dropped scope is a panic (see `app::set_if_alive`).
+                    crate::app::set_if_alive(&error, Some(e));
                 }
             }
         });
@@ -238,6 +250,13 @@ pub fn PlanPreviewScreen() -> Element {
             crate::screens::goal_create::complexity_word(p.complexity)
         )
     });
+
+    // Hoisted out of the node loop below: both are loop-invariant, and
+    // reading them inside allocated two `String`s per node on every
+    // render — forty needless allocations per character typed in the
+    // edit field, for a twenty-step plan.
+    let draft_title_v = draft_title.read().clone();
+    let draft_minutes_v = draft_minutes.read().clone();
 
     rsx! {
         div { class: "wl-page",
@@ -307,14 +326,18 @@ pub fn PlanPreviewScreen() -> Element {
                                     waits_on: waits_on(row.step, &plan),
                                     is_open: open_v == Some(row.index),
                                     is_editing: editing_v == Some(row.index),
-                                    draft_title: draft_title.read().clone(),
-                                    draft_minutes: draft_minutes.read().clone(),
+                                    draft_title: draft_title_v.clone(),
+                                    draft_minutes: draft_minutes_v.clone(),
                                     disabled: stage.is_busy(),
                                     on_toggle: move |i: usize| {
                                         let mut o = open;
                                         o.set(if *o.peek() == Some(i) { None } else { Some(i) });
                                     },
                                     on_edit: begin_edit,
+                                    on_edit_minutes: {
+                                        let mut d = draft_minutes;
+                                        move |v: String| d.set(v)
+                                    },
                                     on_save: save_edit,
                                     on_cancel_edit: move |()| editing.set(None),
                                 }
@@ -433,6 +456,12 @@ fn TaskNode(
     disabled: bool,
     on_toggle: EventHandler<usize>,
     on_edit: EventHandler<(usize, PlanStep)>,
+    /// The estimate field's own keystrokes. A separate handler from
+    /// `on_edit` because that one carries a whole `PlanStep` and is
+    /// fired by the TITLE field on every keystroke; reusing it here
+    /// would re-seed the estimate draft from the stored step mid-typing
+    /// (see `begin_edit`).
+    on_edit_minutes: EventHandler<String>,
     on_save: EventHandler<()>,
     on_cancel_edit: EventHandler<()>,
 ) -> Element {
@@ -501,6 +530,15 @@ fn TaskNode(
                                 inputmode: "numeric",
                                 "aria-label": "Estimate in minutes",
                                 value: "{draft_minutes}",
+                                // Wired, which it was not: the field
+                                // rendered `draft_minutes` and no handler
+                                // ever wrote back, so `save_edit` parsed
+                                // the ORIGINAL number and the typed
+                                // estimate was discarded with no error.
+                                // The title field two nodes up has had an
+                                // `oninput` all along, which is what made
+                                // the omission visible.
+                                oninput: move |e: Event<FormData>| on_edit_minutes.call(e.value()),
                             },
                         },
                     }
