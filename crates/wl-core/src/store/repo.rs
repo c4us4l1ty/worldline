@@ -1487,17 +1487,16 @@ impl Repos {
     pub fn settings(&self) -> Result<AppSettings, StoreError> {
         self.lock_conn()
             .query_row(
-                "SELECT theme, always_on_top, ai_provider, tier1_model, tier2_model, relay_url
+                "SELECT theme, ai_provider, tier1_model, tier2_model, relay_url
                  FROM app_settings WHERE id = 1",
                 [],
                 |r| {
                     Ok(AppSettings {
                         theme: r.get(0)?,
-                        always_on_top: r.get::<_, i64>(1)? != 0,
-                        ai_provider: r.get(2)?,
-                        tier1_model: r.get(3)?,
-                        tier2_model: r.get(4)?,
-                        relay_url: r.get(5)?,
+                        ai_provider: r.get(1)?,
+                        tier1_model: r.get(2)?,
+                        tier2_model: r.get(3)?,
+                        relay_url: r.get(4)?,
                     })
                 },
             )
@@ -1543,18 +1542,23 @@ impl Repos {
         let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let ts = self.hlc.now(self.device);
-        // The `hotkey` column is deliberately absent from this statement
-        // and from the SELECT in `settings()`. The summon hotkey was
-        // removed as a feature; the column stays only because dropping a
-        // column on a CRDT-synced singleton costs a migration and buys
-        // nothing — `NOT NULL DEFAULT 'alt+space'` means omitting it here
-        // lets SQLite supply the default, and no reader ever asks for it.
+        // Two columns are deliberately absent from this statement and from
+        // the SELECT in `settings()`: `hotkey` and `always_on_top`. Both
+        // were features that no longer exist (a global summon hotkey; a
+        // pin-above-other-windows preference). Neither column is dropped,
+        // because dropping a column on a CRDT-synced singleton costs a
+        // migration and buys nothing — each keeps its `NOT NULL DEFAULT`,
+        // so omitting it here lets SQLite supply the default, and no reader
+        // ever asks for it. An old peer's op payload that still carries an
+        // `always_on_top` key is ignored on the pull side for the same
+        // reason, so a mixed-version fleet converges on the new shape
+        // without a migration or a rejection.
         tx.execute(
-            "INSERT INTO app_settings (id, theme, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET theme=?1, always_on_top=?2,
-                ai_provider=?3, tier1_model=?4, tier2_model=?5, relay_url=?6, hlc_timestamp=?7",
-            params![s.theme, s.always_on_top as i64, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
+            "INSERT INTO app_settings (id, theme, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET theme=?1,
+                ai_provider=?2, tier1_model=?3, tier2_model=?4, relay_url=?5, hlc_timestamp=?6",
+            params![s.theme, s.ai_provider, s.tier1_model, s.tier2_model, s.relay_url, ts.to_string()],
         )?;
         Self::emit_on(
             &tx,
@@ -1637,8 +1641,6 @@ impl Repos {
     fn settings_json(s: &AppSettings) -> serde_json::Value {
         serde_json::json!({
             "theme": s.theme,
-            // Numeric: the pull side reads `as_i64`.
-            "always_on_top": if s.always_on_top { 1 } else { 0 },
             "ai_provider": s.ai_provider,
             "tier1_model": s.tier1_model,
             "tier2_model": s.tier2_model,

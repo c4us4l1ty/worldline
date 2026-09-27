@@ -1,108 +1,154 @@
 /* ==========================================================================
-   Worldline Design System — tokens per .opencode/skills/worldline/SKILL.md
-   Calm, Sovereign, Tactile. 9:16 canvas (420×747 desktop discipline).
+   Worldline Design System — calm, sovereign, tactile.
+   9:16 canvas (420×747 desktop discipline).
+
+   Redesigned 2026-09-27. The three load-bearing changes, in order of how
+   much they were hurting:
+
+   1. **A 12px type floor.** The previous file had 28 `font-size`
+      declarations in the 9–11px band, across eleven classes. The skill's
+      own floor for mono telemetry is 12px (`--text-mono-hud: 0.75rem`),
+      so the CSS had drifted below its own spec, and a Settings page
+      stacked three label tiers at 11px / 11px / 12px that differed by
+      one pixel of letter-spacing. Every size is now a named token, and
+      nothing is below 12px. See §1.
+
+   2. **Three text steps, not four.** There *was* a fourth step,
+      `--wl-text-tertiary`, used by thirteen rules and **defined in none
+      of them**. A `color: var(--wl-text-tertiary)` declaration naming an
+      undefined custom property is invalid at computed-value time, so
+      every one of those properties silently INHERITED — which is why the
+      control panel's "SYSTEM TELEMETRY" and "ACTIVE WORLDLINES" group
+      labels rendered at full `--wl-text-primary`, brighter than the
+      15px rows they were heading. The ladder is now primary → secondary
+      → muted, all three of which clear 5:1 on the card surface, and the
+      token that caused the bug does not exist.
+
+   3. **One value-row component.** The provider and the two model slots
+      were three different-looking controls, and the provider was a native
+      `<select>` that WebKitGTK painted as a near-white field with
+      near-invisible text in it — `color-scheme` and `appearance: none`
+      do not reliably reach it. See §6.
+
+   Preserved from the previous file: the single floating control, the
+   bare compose field, the frictionful escape hatch, the cream CTA, the
+   coral beacon's three sanctioned uses, and the readout-not-a-button
+   rule for Active Worldlines.
    ========================================================================== */
 
+
+/* ==========================================================================
+   1. Tokens
+   ========================================================================== */
 :root {
-  /* Tell the UA this page is dark. Without it every NATIVE widget —
-     the provider `<select>`'s closed state and its dropdown popup,
-     scrollbars, the search field's clear button, autofill — renders
-     with the light system palette. The settings provider select was
-     painting a near-white field carrying #E5E2E0 text on it: a light
-     box with almost invisible lettering, and no amount of restyling
-     `.wl-select` fixed it because the widget never used our background
-     in the first place. This is the root cause; the `appearance: none`
-     below is the follow-through. */
+  /* Tell the UA this page is dark. Without it every NATIVE widget — the
+     compose screen's horizon pill's dropdown popup, scrollbars, the
+     search field's clear button, autofill — renders with the light system
+     palette. This is the root cause of the provider select having shipped
+     as a white box carrying #E5E2E0 text on it, and it is why §6 retires
+     the last native `<select>` from Settings rather than restyling it
+     again. */
   color-scheme: dark;
 
-  /* Typography */
-  --font-directive: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  /* Typography ------------------------------------------------------------ */
+  /* Three families, four weights. `Doppio One` is the only serif and it
+     is reserved for editorial moments (page titles, the boot wordmark,
+     the seed-phrase heading) — never for a control, a row, or a value. */
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-serif: 'Doppio One', Georgia, 'Times New Roman', serif;
 
-  /* `--text-directive` is the canvas HEADLINE scale (28px) and currently
-     has no consumer — `.wl-directive-title` sets its own 24px. It is kept
-     because the one time it *was* consumed, the compose field inherited
-     it and rendered ~20 characters per line in a 384px column. Do not
-     reach for it as a default; reach for `--text-body`. */
-  --text-directive: 1.75rem;      /* 28px */
-  --text-directive-lead: 1.125rem; /* 18px */
-  --text-body: 0.9375rem;         /* 15px */
-  --text-caption: 0.8125rem;      /* 13px */
-  --text-mono-hud: 0.75rem;       /* 12px */
+  /* The type scale. Every `font-size` in this file is one of these — there
+     are no bare pixel sizes below. The order is the ladder: display down
+     to telemetry, and 12px is the floor. */
+  --t-display:    30px;  /* serif 400 — hero, boot wordmark             */
+  --t-page:       24px;  /* serif 400 — page title, centred             */
+  --t-directive:  24px;  /* sans  700 — THE directive                   */
+  --t-title:      17px;  /* sans  600 — card & modal headings           */
+  --t-lead:       16px;  /* sans  500 — a value worth reading           */
+  --t-body:       15px;  /* sans  400 — body copy, nav rows             */
+  --t-caption:    13px;  /* sans  400 — notes, hints, empty states      */
+  --t-mono-lead:  13px;  /* mono  500 — ids you read character by character */
+  --t-mono:       12px;  /* mono  500 — telemetry, counts, HLC, chips   */
 
-  /* Dark canvas tokens (primary default) */
-  --wl-canvas: #131312;
-  --wl-surface-card: #20201F;
-  --wl-surface-elevated: #2A2A29;
-  --wl-surface-high: #353533;
-  --wl-cta-bg: #DAD5C7;
-  --wl-cta-hover: #E7E2D4;
-  --wl-accent-coral: #E26D52;
-  --wl-text-primary: #E5E2E0;
-  --wl-text-secondary: #CAC6BC;
-  --wl-text-muted: #949087;
-  --wl-text-inverse: #1D1C13;
-  --wl-border-subtle: rgba(229, 226, 224, 0.08);
-  --wl-border-strong: rgba(229, 226, 224, 0.14);
-  --wl-sync-green: #63AE7B;
+  /* Surfaces (dark canvas, the default) ---------------------------------- */
+  --wl-canvas:          #131312;  /* matte warm slate                  */
+  --wl-surface-card:    #20201F;  /* the directive card, section cards */
+  --wl-surface-elevated:#2A2A29;  /* chips, secondary controls, inputs */
+  --wl-surface-high:    #353533;  /* hover on elevated, empty tracks   */
+  --wl-cta-bg:          #DAD5C7;  /* the warm cream primary            */
+  --wl-cta-hover:       #E7E2D4;
+  --wl-accent-coral:    #E26D52;  /* beacon — see the three uses below */
 
-  /* Light parchment variant */
-  --wl-light-canvas: #F4F0E8;
-  --wl-light-card: #ECE6DA;
-  --wl-light-elevated: #E0DAD0;
-  --wl-light-text-primary: #1D1C13;
-  --wl-light-text-secondary: #68645C;
-  --wl-light-cta: #1D1C13;
-  --wl-light-cta-text: #F4F0E8;
+  /* Text. Three steps, descending, all legible on `--wl-surface-card`. */
+  --wl-text-primary:   #E5E2E0;   /* 12.6:1 — headlines, values, rows   */
+  --wl-text-secondary: #CAC6BC;   /*  9.9:1 — instruction, row labels   */
+  --wl-text-muted:     #949087;   /*  5.4:1 — notes, meta, group labels  */
+  --wl-text-inverse:   #1D1C13;   /* inside the cream CTA               */
+
+  --wl-border-subtle: rgba(229, 226, 224, 0.08);  /* field borders      */
+  --wl-border-strong: rgba(229, 226, 224, 0.14);  /* row dividers      */
+
+  /* Light parchment variant ---------------------------------------------- */
+  --wl-light-canvas:          #F4F0E8;
+  --wl-light-card:            #ECE6DA;
+  --wl-light-elevated:        #E0DAD0;
+  --wl-light-text-primary:    #1D1C13;
+  --wl-light-text-secondary:  #4A4740;
+  --wl-light-text-muted:      #5E5A53;
+  --wl-light-cta:             #1D1C13;
+  --wl-light-cta-text:        #F4F0E8;
 
   /* Appearance-switch state colours.
-     These are ABSOLUTE on purpose, not derived from the active theme. A
-     switch encodes "which theme is selected", not "what is currently
-     rendered", so flipping them with `data-theme` would invert the whole
-     control the moment it took effect — a cream knob on a cream track the
-     instant you chose dark. Fixed values keep both states legible in
-     either rendered theme. Still no pure #000/#FFF (skill §5). */
+     ABSOLUTE on purpose, not derived from the active theme. A switch
+     encodes "which theme is selected", not "what is currently rendered",
+     so flipping them with `data-theme` would invert the whole control the
+     instant it took effect. Still no pure #000 / #FFF (skill §5). */
   --wl-switch-off-track: #353533;
-  --wl-switch-off-knob: #E5E2E0;
-  --wl-switch-off-icon: #353533;
-  --wl-switch-on-track: #DAD5C7;
-  --wl-switch-on-knob: #1D1C13;
-  --wl-switch-on-icon: #DAD5C7;
+  --wl-switch-off-knob:  #E5E2E0;
+  --wl-switch-off-icon:  #353533;
+  --wl-switch-on-track:  #DAD5C7;
+  --wl-switch-on-knob:   #1D1C13;
+  --wl-switch-on-icon:   #DAD5C7;
 
-  /* Radii */
-  --wl-radius-sm: 0.5rem;
+  /* Radii ---------------------------------------------------------------- */
+  --wl-radius-sm:   0.5rem;
+  --wl-radius-btn:  0.75rem;
   --wl-radius-card: 1.25rem;
-  --wl-radius-btn: 0.75rem;
   --wl-radius-pill: 9999px;
 
-  /* Motion architecture (spec §3.1) */
-  --ease-tactile: cubic-bezier(0.16, 1, 0.3, 1);
+  /* Motion ---------------------------------------------------------------- */
+  --ease-tactile:     cubic-bezier(0.16, 1, 0.3, 1);
   --duration-instant: 120ms;
-  --duration-settle: 200ms;
-  --duration-modal: 260ms;
+  --duration-settle:  200ms;
+  --duration-modal:   260ms;
+
+  /* Elevation. The raised look is an elevated surface PLUS a soft drop
+     shadow, so a control reads as sitting above the content rather than
+     embedded in it. Named once, used by every floating control. */
+  --wl-raise: 0 2px 10px rgba(19, 19, 18, 0.55);
+  --wl-raise-sheet: 12px 0 32px rgba(19, 19, 18, 0.5);
 }
 
-/* Light theme overrides via [data-theme="light"] on <html> */
+/* The mirror of `color-scheme: dark`: native widgets have to flip with the
+   theme or a light-mode popup appears in a parchment page. */
 [data-theme="light"] {
-  /* The mirror of `color-scheme: dark` in `:root`: native widgets have
-     to flip with the theme or a light-mode `<select>` popup appears in a
-     parchment page. */
   color-scheme: light;
-  --wl-canvas: var(--wl-light-canvas);
-  --wl-surface-card: var(--wl-light-card);
-  --wl-surface-elevated: var(--wl-light-elevated);
-  --wl-surface-high: var(--wl-light-elevated);
-  --wl-cta-bg: var(--wl-light-cta);
-  --wl-cta-hover: #31302F;
-  --wl-text-primary: var(--wl-light-text-primary);
-  --wl-text-secondary: var(--wl-light-text-secondary);
-  --wl-text-muted: var(--wl-light-text-secondary);
-  --wl-text-inverse: var(--wl-light-cta-text);
+  --wl-canvas:          var(--wl-light-canvas);
+  --wl-surface-card:    var(--wl-light-card);
+  --wl-surface-elevated:var(--wl-light-elevated);
+  --wl-surface-high:    var(--wl-light-elevated);
+  --wl-cta-bg:          var(--wl-light-cta);
+  --wl-cta-hover:       #31302F;
+  --wl-text-primary:    var(--wl-light-text-primary);
+  --wl-text-secondary:  var(--wl-light-text-secondary);
+  --wl-text-muted:      var(--wl-light-text-muted);
+  --wl-text-inverse:    var(--wl-light-cta-text);
   --wl-border-subtle: rgba(29, 28, 19, 0.10);
   --wl-border-strong: rgba(29, 28, 19, 0.18);
-  --wl-accent-coral: #D8583B;
+  --wl-accent-coral:   #D8583B;
+  --wl-raise: 0 2px 10px rgba(29, 28, 19, 0.10);
+  --wl-raise-sheet: 12px 0 32px rgba(29, 28, 19, 0.18);
 }
 
 * {
@@ -111,64 +157,22 @@
   padding: 0;
 }
 
-/* Strict programmatic focus ring (spec §1 Tab traversal). */
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-[tabindex]:focus-visible {
-  outline: 1px solid var(--wl-accent-coral);
-  outline-offset: 2px;
-}
-
-.interactive-action {
-  transition: transform var(--duration-instant) var(--ease-tactile),
-              background-color var(--duration-instant) var(--ease-tactile),
-              box-shadow var(--duration-instant) var(--ease-tactile);
-}
-.interactive-action:active {
-  transform: scale(0.985) translateY(1px);
-}
-
-/* Directive advance: next card enters from 8px below over 200ms. */
-@keyframes wl-card-enter {
-  from { transform: translateY(8px); opacity: 0.0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-.wl-card-enter {
-  animation: wl-card-enter var(--duration-settle) var(--ease-tactile);
-}
-/* Coral pulse on the progress track when a directive advances. */
-@keyframes wl-progress-pulse {
-  0% { background-color: var(--wl-accent-coral); }
-  100% { background-color: var(--wl-cta-bg); }
-}
-.wl-card-enter .wl-progress-bar {
-  animation: wl-progress-pulse var(--duration-settle) var(--ease-tactile);
-}
-/* Escape modal entry: overlay fades 160ms, sheet rises 16px. */
-@keyframes wl-modal-fade {
-  from { opacity: 0.0; }
-  to { opacity: 1; }
-}
-@keyframes wl-sheet-rise {
-  from { transform: translateY(16px); opacity: 0.0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-
 html, body, #main {
   height: 100%;
 }
 
 body {
-  font-family: var(--font-body);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  line-height: 1.55;
+  letter-spacing: -0.01em;
   background: var(--wl-canvas);
   color: var(--wl-text-primary);
+  -webkit-font-smoothing: antialiased;
   /* 9:16 discipline: fixed portrait column, never full-bleed. */
   width: 100%;
   max-width: 420px;
   margin: 0 auto;
-  -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 
@@ -181,102 +185,203 @@ body {
   position: relative;
 }
 
-/* ==========================================================================
-   A. Floating controls
-   ========================================================================== */
-/* The old `.wl-hud` was a solid, full-width strip with a
-   `border-bottom`. It is gone: the menu is a floating circular
-   control overlaying the canvas the way the reference design
-   (Plan/3.png) does. The bar dominated a surface whose whole premise
-   is ONE directive and no chrome.
+/* The root of every screen. Previously an inline `style` attribute
+   repeated verbatim in two components; a rule here means a new screen
+   cannot get the flex column subtly wrong. */
+.wl-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  outline: none;
+}
 
-   The layer spans the viewport but must not eat clicks meant for the
-   directive card underneath, so it is `pointer-events: none` and the
-   controls opt back in. */
+/* Strict programmatic focus ring (skill §1 Tab traversal). */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 1px solid var(--wl-accent-coral);
+  outline-offset: 2px;
+}
+
+/* Every pressable surface shares one physical response: a 1.5% squash and
+   a 1px settle. Two components used to declare their own slightly
+   different versions of this. */
+button {
+  transition: background-color var(--duration-instant) var(--ease-tactile),
+              border-color var(--duration-instant) var(--ease-tactile),
+              color var(--duration-instant) var(--ease-tactile),
+              transform var(--duration-instant) var(--ease-tactile);
+}
+button:active:not(:disabled) { transform: scale(0.985) translateY(1px); }
+button:disabled { cursor: not-allowed; }
+
+
+/* ==========================================================================
+   2. Type primitives
+   ========================================================================== */
+/* A hero or a screen-defining heading. Serif, and only ever on a screen's
+   own subject matter — the boot wordmark, the seed-phrase title, the
+   empty-state statement. */
+.wl-serif-title {
+  font-family: var(--font-serif);
+  font-size: var(--t-display);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+  color: var(--wl-text-primary);
+  margin: 0 0 10px 0;
+}
+
+/* The coral italic. The one place coral is decorative rather than a
+   beacon, and the skill scopes it to EDITORIAL headings. It is not for
+   page titles, section headings, or any control. */
+.wl-italic-accent {
+  font-style: italic;
+  color: var(--wl-accent-coral);
+}
+
+.wl-body-muted {
+  font-size: var(--t-body);
+  line-height: 1.55;
+  color: var(--wl-text-muted);
+  letter-spacing: -0.01em;
+}
+
+/* Monospace for anything numeric or an exact string. `tabular-nums`
+   because a figure that reflows as it ticks is unreadable telemetry. */
+.wl-mono {
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A section or card heading. This class REPLACED the 11px uppercase mono
+   label that used to head every card, and the change is the single
+   biggest legibility win in the redesign.
+
+   Group identity came from a size trick (10–11px mono uppercase) that
+   did not survive a 420px window and was the first thing a user read as
+   a smudge. It now comes from size and weight relative to the content
+   beneath it, which survives any size. Sentence case, not caps: caps at
+   this size are what made "INTELLIGENCE" and "AI PROVIDER (BYOK)" look
+   like the same object. */
+.wl-section-title {
+  font-family: var(--font-sans);
+  font-size: var(--t-title);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  color: var(--wl-text-primary);
+  margin: 0 0 14px 0;
+}
+
+/* The eyebrow: a quiet mono label, for genuine telemetry groups only —
+   HLC stamps, counts, a "MOCK DATA" marker, a sealed-key chip. Still
+   uppercase and still tracked, because at 12px with 5:1 of contrast it
+   is legible where the 10px version was not. Never used for a field. */
+.wl-eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  line-height: 1.35;
+}
+
+/* A note under a row. 13px sans, not 12px mono: this is prose, and prose
+   in a monospace face at small size is the least readable thing in the
+   system. Always `--wl-text-muted`, never primary — a note that competes
+   with its own control is worse than no note. */
+.wl-hint {
+  font-size: var(--t-caption);
+  line-height: 1.5;
+  color: var(--wl-text-muted);
+  margin: 8px 0 0 0;
+}
+
+
+/* ==========================================================================
+   3. Circular controls
+   ==========================================================================
+   ONE definition for the round control that appears in the top-left gutter
+   of every screen.
+
+   This class is the fix for "the hamburger is not consistent". The
+   canvas's menu button and the page back-chevron were separate 34px
+   definitions with different offsets (14px from the top on the canvas,
+   2px in the page header), so the two controls that occupy the same
+   position on the same screen did not line up. The canvas button also
+   carried a `wl-float-menu` class with no rule anywhere in the
+   stylesheet, so its "specificity" was a mirage.
+
+   38px is the one size. The old 34px was a thumb target that measured
+   small next to a 20px mark. */
+.wl-circle-btn {
+  pointer-events: auto;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--wl-border-subtle);
+  background: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--wl-raise);
+}
+.wl-circle-btn:hover:not(:disabled) {
+  background: var(--wl-surface-high);
+  transform: translateY(-1px);
+}
+.wl-circle-btn:active:not(:disabled) { transform: translateY(0); }
+.wl-circle-btn:disabled { opacity: 0.4; }
+.wl-circle-btn svg { display: block; }
+
+/* Page back chevron: the same circle, floated over the header's left
+   gutter so it can overlay a centred title. */
+.wl-back { position: absolute; left: 0; top: 0; }
+.wl-back:hover { transform: translateX(-1px); }
+.wl-back:active { transform: translateX(0); }
+
+/* The canvas's floating layer, and its one control. */
 .wl-float-layer {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  /* Sits above the card, below the drawers (which are z-index 1000+). */
+  /* Above the directive card, below the drawers (z-index 40+). */
   z-index: 10;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 14px 16px 0;
+  padding: 12px 16px 0;
+  /* The layer spans the width but must not eat clicks meant for the
+     directive card underneath, so it is transparent to input and the
+     controls opt back in. */
   pointer-events: none;
 }
+/* The canvas has EXACTLY one floating control and it is the menu. A
+   full-width header strip fought the core premise — ONE directive, no
+   chrome — and a second control (a 34px sync circle that reported
+   nothing until tapped) put a dead affordance next to a live one. Sync
+   is a settings concern and lives in Settings' Sync section as a
+   full-width row that also reports what the last cycle did; milestone
+   and sync status live in the Ctrl+, telemetry drawer. */
+.wl-float-menu { position: static; }
 
-/* Circular floating control. The raised look comes from an elevated
-   surface plus a soft drop shadow, so it reads as sitting above the
-   content rather than embedded in it. */
-.wl-float-btn {
-  pointer-events: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  border: 1px solid var(--wl-border-subtle);
-  background: var(--wl-surface-elevated);
-  color: var(--wl-text-primary);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
-  /* Was `var(--duration-fast)`, a token that is defined nowhere in this
-     file — the declaration was invalid, so these transitions silently
-     collapsed to 0s and the controls snapped instead of easing. */
-  transition: transform var(--duration-instant) var(--ease-tactile),
-    background-color var(--duration-instant) var(--ease-tactile);
-}
-.wl-float-btn:hover:not(:disabled) {
-  background: var(--wl-surface-card);
-  transform: translateY(-1px);
-}
-.wl-float-btn:active:not(:disabled) { transform: translateY(0); }
-.wl-float-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.wl-float-btn svg { display: block; }
-
-/* The sync control that used to sit opposite the menu (`⇅`, 34px circle)
-   was removed: sync is a settings concern, not a canvas one, and it now
-   lives in the Sync section of Settings as a full-width row. Canvas
-   chrome is menu-only. `.wl-float-right` went with it.
-   The session timer (`.wl-float-timer`) is likewise gone — removed
-   2026-09-26. The beacon accent now lives in `.wl-directive-step-badge`
-   and `.wl-nav-btn-create`. */
-
-/* Milestone, sync status and the Evening audit nudge live in the
-   telemetry drawer (Ctrl+,), which already rendered sync stats and an
-   always-visible Evening audit button — so none of them became
-   unreachable when the canvas bar came down. */
-
-/* `.wl-hud`, `.wl-hud-timer` and `.wl-float-timer` are all gone. The
-   canvas bar came down 2026-09-26, the session timer came with it, and
-   `.wl-hud` outlived both only as the inline status row on the BYOK
-   setup screen — which no entry point reached, and which was removed
-   with it. No rsx user remains for any of the three. */
 
 /* ==========================================================================
-   G. Page shell — centred title + floating back affordance
+   4. Page shell — centred title + floating back affordance
    ========================================================================== */
-/* Secondary screens (goal creation, settings) previously had no back
-   affordance at all: goal creation had NO way out except creating a goal,
-   and settings buried "Back to the line" at the very bottom styled as the
-   escape hatch. Every page now opens with the same fixed header, so the
-   way back is in the same place on every screen.
-
-   The header sits OUTSIDE the scroll region on purpose — on a long page
-   (settings) an in-flow back button scrolls away exactly when you need
-   it.
-
-   The title is CENTRED, which is why the back button is not a flex
-   sibling. As a 34px flex child it pushed the title permanently right of
-   the viewport axis and no amount of `justify-content` could fix that
-   without also centring the button. Instead the button is taken out of
-   flow and floated over the gutter, and the 40px symmetric side padding
-   keeps the title on the true centre axis while reserving room for it. */
 .wl-page {
   flex: 1;
   min-height: 0;
@@ -287,83 +392,44 @@ body {
   position: relative;
   display: flex;
   justify-content: center;
+  align-items: center;
   text-align: center;
   flex-shrink: 0;
-  /* 40px gutter: the 34px control plus 6px of clearance on the left, and
-     the mirrored reserve that keeps the centred text on-axis. */
-  padding: 2px 40px 16px;
+  /* 52px gutter: the 38px control plus 14px of clearance on the left, and
+     the mirrored reserve that keeps the centred title on the true centre
+     axis. Symmetric padding is the whole trick — as an in-flow flex child
+     the back button pushed the title permanently right of the axis. */
+  padding: 0 52px 18px;
 }
-.wl-back {
-  pointer-events: auto;
-  position: absolute;
-  left: 0;
-  top: 2px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  border: 1px solid var(--wl-border-subtle);
-  background: var(--wl-surface-elevated);
-  color: var(--wl-text-primary);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
-  transition: transform var(--duration-instant) var(--ease-tactile),
-    background-color var(--duration-instant) var(--ease-tactile);
-}
-.wl-back:hover { background: var(--wl-surface-card); transform: translateX(-1px); }
-.wl-back:active { transform: translateX(0); }
-.wl-back svg { display: block; }
-
+/* A page title is one plain serif line. No sub-heading (a deck under a
+   two-word heading restated the heading) and no coral (a decorative
+   accent in a heading made that screen read as a different kind of
+   object and spent the beacon on an adjective). */
 .wl-page-title {
   font-family: var(--font-serif);
-  /* 24px, down from 26px: the centred column is 40px narrower per side,
-     and "State the Objective" (the longest title) needs the headroom to
-     stay on one line. */
-  font-size: 24px;
+  font-size: var(--t-page);
   font-weight: 400;
   line-height: 1.2;
   letter-spacing: -0.025em;
   color: var(--wl-text-primary);
   margin: 0;
 }
-/* The compose screen's title. This used to be an inline `style` on the
-   `<h1>` in goal_create.rs, which meant the page's vertical rhythm could
-   not be tuned from the stylesheet where the rest of it lives. */
+/* The compose screen's title sits under its own control row rather than
+   inside `.wl-page-head` — see §9 for why the two cannot share a row. */
 .wl-page-title--compose {
   text-align: center;
-  padding: 22px 40px 0;
+  padding: 24px 52px 0;
+  flex-shrink: 0;
 }
-/* `.wl-page-sub` was removed with the page sub-headings it styled
-   (2026-09-27). Both page titles are now a single line with nothing
-   beneath them; a deck under a two-word heading was restating the
-   heading rather than adding anything. */
 
-/* ==========================================================================
-   G2. Compose screen (goal creation)
-   ========================================================================== */
-/* The compose screen is a page of its own kind: not a settings form but a
-   single free-text field that owns the screen. It borrows the canvas's
-   premise — ONE thing, no chrome — rather than the settings page's
-   four-cards-and-a-save-button shape.
-
-   `wl-page-bar` holds the edge controls (back chevron left, target-date
-   horizon right) on their own row, with the centred title BELOW it. The
-   title and the horizon pill cannot share a row: the title is ~230px
-   wide inside a 304px padded box, and an absolutely-positioned pill in
-   the right gutter would overlay its last ~50px. Splitting the rows
-   removes that arithmetic instead of tuning around it. */
+/* Edge controls on their own row, title centred beneath. */
 .wl-page-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   flex-shrink: 0;
-  min-height: 34px;
+  min-height: 38px;
 }
 /* The chevron is a NORMAL flex child here, unlike in `.wl-page-head`
    where it is absolutely positioned to overlay a centred title. Left
@@ -371,94 +437,248 @@ body {
    in-flow child, and `space-between` would pin it to the left edge. */
 .wl-page-bar .wl-back { position: static; }
 
-/* Target-date horizon. A native `<select>` restyled as a pill: keyboard
-   and screen-reader behaviour come free, and the dropdown list is the
-   platform's, which is the right trade for a control this small. */
-.wl-horizon {
-  appearance: none;
-  -webkit-appearance: none;
+
+/* ==========================================================================
+   5. Buttons
+   ========================================================================== */
+/* The warm cream CTA. An unequivocal behavioural magnet, and the only
+   filled light surface in the app. */
+.wl-btn-primary {
+  width: 100%;
+  min-height: 52px;
+  padding: 0 20px;
+  background-color: var(--wl-cta-bg);
+  color: var(--wl-text-inverse);
+  font-family: var(--font-sans);
+  font-size: var(--t-lead);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  border-radius: var(--wl-radius-btn);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+}
+.wl-btn-primary:hover:not(:disabled) {
+  background-color: var(--wl-cta-hover);
+  transform: translateY(-1px);
+}
+.wl-btn-primary:disabled { opacity: 0.5; }
+
+/* The secondary action. A solid quiet surface, not an outline: at
+   `--wl-surface-card` with an 8%-white hairline on a #131312 canvas it
+   very nearly disappeared, which left button pairs reading as "one real
+   button and one smudge". */
+.wl-btn-ghost {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 18px;
+  background-color: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  border-radius: var(--wl-radius-btn);
+  border: 1px solid var(--wl-border-strong);
+  cursor: pointer;
+}
+.wl-btn-ghost:hover:not(:disabled) { background-color: var(--wl-surface-high); }
+.wl-btn-ghost:disabled { opacity: 0.5; }
+
+/* A ghost that hugs its label instead of filling its container.
+   MUST be declared after `.wl-btn-ghost`: the two have equal specificity
+   and set the same properties, so while this block sat earlier in the
+   file the ghost's `width: 100%` silently won and every compact button
+   rendered full-width. Ordering is the fix. */
+.wl-btn-compact {
+  width: auto;
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 18px;
+}
+
+/* Destructive-adjacent, but not an alarm: removing a stored key is a
+   configuration act, and this system has no red failure state. */
+.wl-btn-danger { color: var(--wl-accent-coral); }
+.wl-btn-danger:hover:not(:disabled) { color: var(--wl-accent-coral); }
+
+/* The frictionful escape hatch. A quiet outlined surface that warms
+   toward the coral beacon on hover — the friction is the categorisation
+   that happens before it, not this button. */
+.wl-btn-escape {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 18px;
+  background-color: transparent;
+  color: var(--wl-text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  font-weight: 500;
+  border-radius: var(--wl-radius-btn);
+  border: 1px solid var(--wl-border-subtle);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+}
+.wl-btn-escape:hover:not(:disabled) {
+  background-color: var(--wl-surface-card);
+  color: var(--wl-accent-coral);
+  border-color: rgba(226, 109, 82, 0.3);
+}
+.wl-btn-escape:disabled { opacity: 0.5; }
+
+.wl-kbd {
   font-family: var(--font-mono);
-  /* 12px, up from 11px, and `--wl-text-secondary` rather than muted: at
-     11px muted next to the 18px back chevron the pill read as a disabled
-     control rather than an active choice. */
-  font-size: 12px;
-  letter-spacing: 0.05em;
+  font-size: var(--t-mono);
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--wl-text-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+[data-theme="light"] .wl-kbd { background: rgba(244, 240, 232, 0.25); }
+.wl-kbd-subtle {
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  opacity: 0.7;
+}
+
+
+/* ==========================================================================
+   6. Cards, fieldsets, and the value row
+   ========================================================================== */
+/* A group of related fields on a secondary screen. */
+.wl-section {
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-card);
+  padding: 18px 16px;
+  margin-bottom: 14px;
+}
+
+/* One field inside a section.
+
+   Fields are separated by a 1px hairline rather than by 14px of air. That
+   single change is what turned the Settings page from a stack of
+   disconnected boxes into a card that reads as a card, and it
+   reclaimed roughly 40px of a 747px window. */
+.wl-fieldset { padding: 14px 0; }
+.wl-fieldset:first-of-type { padding-top: 0; }
+.wl-fieldset:last-of-type { padding-bottom: 0; }
+.wl-fieldset + .wl-fieldset { border-top: 1px solid var(--wl-border-subtle); }
+
+/* The label above a text input. Sans, 13px, sentence case, quiet. This
+   replaces the 11px uppercase mono `.wl-label` that used to sit here —
+   the same tier of problem as `.wl-section-label`, one level down. */
+.wl-fieldset-label {
+  display: block;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  line-height: 1.4;
   color: var(--wl-text-secondary);
+  margin: 0 0 8px 0;
+}
+
+/* THE VALUE ROW — the component the provider and both model slots share.
+
+   It replaces three different-looking controls, one of which was a
+   native `<select>` that WebKitGTK painted as a near-white field with
+   near-invisible text in it. `color-scheme: dark` darkens the dropdown
+   *popup* and `appearance: none` styles the *closed* state, and neither
+   reached the widget reliably — the provider shipped as a light box in a
+   graphite panel, twice. Rather than restyle it a third time, Settings
+   now contains no native form widget at all: every choice is a row that
+   opens one of the two sheets, so there is one row type, one open
+   gesture, and one list rendering.
+
+   A three-line grid rather than a single line, because the value here is
+   an exact string you compare character by character against a catalog.
+   The old 12px mono in a 46px row forced `nvidia/nemotron-3.5-lightning:free`
+   onto one squeezed line; 13px mono with a two-line clamp gives it room
+   to be read. */
+.wl-value-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "label go"
+    "value go"
+    "meta  go";
+  align-items: center;
+  column-gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
   background-color: var(--wl-surface-elevated);
   border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-pill);
-  padding: 7px 26px 7px 12px;
+  border-radius: var(--wl-radius-btn);
   cursor: pointer;
-  outline: none;
-  /* Chevron drawn as a background so the pill needs no extra element;
-     `no-repeat` + explicit size keeps it from tiling at narrow widths. */
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23949087' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  background-size: 9px 6px;
-  transition: color var(--duration-instant) var(--ease-tactile),
-              border-color var(--duration-instant) var(--ease-tactile);
 }
-.wl-horizon:hover { color: var(--wl-text-secondary); border-color: var(--wl-border-strong); }
-.wl-horizon option { background-color: var(--wl-surface-card); color: var(--wl-text-primary); }
-
-/* The field. Deliberately bare — no card, no resting border — because a
-   box around it fights the "this IS the page" reading. Affordance comes
-   from the caret, a muted placeholder, and a coral hairline that only
-   exists while focused, which is also the only coral on this screen. */
-.wl-compose {
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid transparent;
-  border-radius: 0;
+.wl-value-row:hover:not(:disabled) { border-color: var(--wl-border-strong); }
+.wl-value-row:disabled { opacity: 0.5; }
+.wl-value-row-label {
+  grid-area: label;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--wl-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 3px;
+}
+.wl-value-row-value {
+  grid-area: value;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono-lead);
+  line-height: 1.35;
   color: var(--wl-text-primary);
-  font-family: var(--font-directive);
-  /* 18px/400, NOT `var(--text-directive)`. That token is 28px and is
-     sized for a directive HEADLINE on the 420px canvas; the compose field
-     inherited it and rendered ~20 characters per line in a 384px column,
-     which made a one-sentence intent feel like a wall. 18px sits between
-     `--text-body` (15px) and the directive title (24px): still
-     unmistakably the page's main content, without shouting. */
-  font-size: 18px;
-  font-weight: 400;
-  line-height: 1.5;
-  letter-spacing: -0.01em;
-  padding: 10px 0 14px;
-  margin: 0;
-  outline: none;
-  resize: none;
-  overflow-y: auto;
-  caret-color: var(--wl-accent-coral);
-  transition: border-color var(--duration-settle) var(--ease-tactile);
+  /* Wrap rather than break mid-token, and cap at two lines: a value that
+     needs a third line is a value the row should not be showing whole. */
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.wl-compose::placeholder {
+.wl-value-row-value--empty { color: var(--wl-text-muted); font-family: var(--font-sans); }
+.wl-value-row-meta {
+  grid-area: meta;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  line-height: 1.35;
   color: var(--wl-text-muted);
-  font-weight: 400;
-  opacity: 0.55;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
 }
-/* Half-opacity coral: the hairline spans the full 384px column, and at
-   full strength it was the loudest thing on a page whose whole idea is a
-   quiet matte field. It still reads as the only accent when focused. */
-.wl-compose:focus { border-bottom-color: rgba(226, 109, 82, 0.5); }
+.wl-value-row-go {
+  grid-area: go;
+  display: flex;
+  align-items: center;
+  color: var(--wl-text-muted);
+}
+.wl-value-row-go svg { display: block; }
 
-/* Commit row: two EQUAL ways to commit the same text, so they get one
-   geometry. Before this they differed three ways at once — 52px vs 46px
-   tall, 1.35fr vs 1fr wide, and 15px vs 14px type — which read as "one
-   real button and one leftover".
+/* The catalog status line: count, or the provider's own error, plus a
+   refresh. Sits between the model slots and the API key because it
+   describes the slots. */
+.wl-catalog-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: var(--t-caption);
+  color: var(--wl-text-muted);
+}
+.wl-catalog-status .wl-btn-compact { min-height: 40px; font-size: var(--t-caption); }
 
-   The equalizing is scoped to this row on purpose: `.wl-btn-primary` is
-   52px because the canvas's commit is a thumb target, and
-   `.wl-btn-ghost` is 46px everywhere else in the app. Overriding both
-   here is the only way to make the pair symmetric without restyling
-   every other ghost button in the product.
-
-   `margin-top: auto` pins the row to the bottom of the page (the field is
-   `flex: 1`, so this is belt-and-braces today) — matching the canvas,
-   whose actions are also bottom-anchored, and keeping both commits in the
-   same thumb zone the user already learned. */
+/* Two equal ways to commit the same text, so they get one geometry. They
+   used to differ three ways at once — 52px vs 46px tall, 1.35fr vs 1fr
+   wide, 15px vs 14px type — which read as "one real button and one
+   leftover". The equalizing is scoped to this row: `.wl-btn-primary` is
+   52px because a commit is a thumb target, and `.wl-btn-ghost` is 48px
+   everywhere else. `margin-top: auto` pins the row to the bottom of the
+   page, matching the canvas's bottom-anchored actions. */
 .wl-actions-row {
   display: flex;
   flex-direction: row;
@@ -470,162 +690,65 @@ body {
 .wl-actions-row .wl-btn-primary,
 .wl-actions-row .wl-btn-ghost {
   flex: 1 1 0;
-  /* `width: 100%` on both classes is inert inside a row flex container
-     once `flex-basis: 0` is set, but stating it keeps the box model
-     honest if either class is ever used in a grid. */
   width: auto;
   min-width: 0;
-  height: 50px;
-  font-size: 15px;
-  font-weight: 600;
+  min-height: 52px;
+  font-size: var(--t-body);
 }
-/* The secondary is a solid quiet surface rather than an outline. At
-   `--wl-surface-card` (#20201F) with an 8%-white hairline on a #131312
-   canvas it very nearly disappeared, which left the pair reading as one
-   button and one smudge. Elevated + the stronger border gives it the same
-   physical presence as the cream primary, minus the emphasis. */
-.wl-actions-row .wl-btn-ghost {
-  background-color: var(--wl-surface-elevated);
-  border-color: var(--wl-border-strong);
-}
-/* Without this the row's ghost rests on `--wl-surface-elevated`, which is
-   exactly what the global `.wl-btn-ghost:hover` sets — so hovering the
-   secondary would have produced no visible change at all. Step up to
-   `--wl-surface-high` instead. */
-.wl-actions-row .wl-btn-ghost:hover {
-  background-color: var(--wl-surface-high);
-}
+.wl-actions-row .wl-btn-ghost { background-color: var(--wl-surface-elevated); }
 
-/* A group of related fields. Replaces the flat, undifferentiated column
-   of inputs these pages used to be. */
-.wl-section {
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-card);
-  padding: 16px 16px 4px;
-  margin-bottom: 14px;
-}
-.wl-section-label {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--wl-text-muted);
-  margin: 0 0 12px;
-  display: block;
-}
-.wl-section .wl-field:last-child { margin-bottom: 12px; }
-.wl-section-note {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--wl-text-muted);
-  margin: 0 0 12px;
-}
-
-/* Page-level action row. Sits below the sections, outside any card, so a
-   "save everything" button does not read as belonging to one group. */
-.wl-page-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 4px;
-}
-/* Inline row for a secondary action beside its own field (e.g. "Test
-   connection" under the relay URL). */
-.wl-inline-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-.wl-inline-actions .wl-btn-ghost { width: auto; padding: 0 16px; flex: 1 1 auto; }
-
-/* Status chip, replacing the ad-hoc `wl-hud-pill` reuse in settings. */
-.wl-chip {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--wl-text-muted);
-  background-color: var(--wl-surface-elevated);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-pill);
-  padding: 4px 10px;
-  white-space: nowrap;
-}
-
-/* Compact button for a secondary action that shares a row with a field
-   (Restore beside the phrase input, Remove beside the sealed chip). The
-   old approach was an inline `style: "width: auto; padding: 0 16px"` on
-   every call site, which is why the sizes had drifted apart. */
-.wl-btn-danger { color: var(--wl-accent-coral); }
-.wl-btn-danger:hover { color: var(--wl-accent-coral); }
-
-/* Input paired with an inline action. */
-.wl-restore-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 
 /* ==========================================================================
-   H. Appearance switches (theme, window pin)
+   7. Appearance switch
    ========================================================================== */
-/* Both of these were something else before: the theme was a `<select>`
-   listing two options, and the window pin was a full-width button whose
-   label changed to describe the state it would put you in. Both are
-   boolean device preferences, so both read as switches.
-
-   A switch has to show its effect immediately — that is the entire
-   affordance. So these two persist on click, while the text fields
-   (relay URL, model ids) still wait for "Save settings". That is the one
-   deliberate inconsistency on the page, and it is the right way round:
-   a theme toggle that only applied on Save would appear broken. */
+/* Boolean device preferences are switches, not a `<select>` and not a
+   label-bearing button. They apply AND persist immediately — a theme you
+   are not allowed to see is not a control you can evaluate. */
 .wl-switch {
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  background: transparent;
+  gap: 14px;
+  background: none;
   border: none;
-  padding: 8px 0;
+  padding: 4px 0;
   cursor: pointer;
   text-align: left;
   color: var(--wl-text-primary);
 }
 .wl-switch-label {
-  font-family: var(--font-directive);
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: var(--t-lead);
   font-weight: 500;
+  line-height: 1.4;
   letter-spacing: -0.01em;
 }
 .wl-switch-track {
   position: relative;
   flex-shrink: 0;
-  width: 46px;
-  height: 26px;
+  width: 50px;
+  height: 28px;
   border-radius: var(--wl-radius-pill);
   background: var(--wl-switch-off-track);
   border: 1px solid var(--wl-border-subtle);
   transition: background-color var(--duration-settle) var(--ease-tactile),
               border-color var(--duration-settle) var(--ease-tactile);
 }
-/* 20px knob inset 2px in a 44×24 content box: 2 + 20 + 20 + 2 = 44, so a
-   20px translate lands it exactly on the opposite inset. */
+/* A 22px knob inset 2px in a 48×26 content box: 2 + 22 + 22 + 2 = 48, so a
+   22px translate lands it exactly on the opposite inset. */
 .wl-switch-knob {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   /* `overflow: hidden` is load-bearing, not defensive: the moon is a
-     crescent that reaches its viewBox edge, and at 12px its tip was
+     crescent that reaches its viewBox edge, and downscaled its tip was
      clipped by the knob's own border-radius into an unreadable blob. */
   overflow: hidden;
   background: var(--wl-switch-off-knob);
@@ -635,109 +758,160 @@ body {
 }
 /* Checked = "dark graphite is the selected theme": the track takes the
    cream CTA tone and the knob inverts to charcoal, so the two states are
-   distinguishable at a glance in either rendered theme. */
+   distinguishable at a glance in EITHER rendered theme. */
 .wl-switch[aria-checked="true"] .wl-switch-track {
   background: var(--wl-switch-on-track);
   border-color: var(--wl-switch-on-track);
 }
 .wl-switch[aria-checked="true"] .wl-switch-knob {
-  transform: translateX(20px);
+  transform: translateX(22px);
   background: var(--wl-switch-on-knob);
   color: var(--wl-switch-on-icon);
 }
 .wl-switch:hover .wl-switch-track { border-color: var(--wl-border-strong); }
 .wl-switch svg { display: block; }
 
-/* The pin switch carries no glyph — a sun or moon there would be a lie
-   about what it controls — so its knob gets a plain pip. It needs its
-   own colour pair: inheriting the theme knob's tokens made an OFF pin
-   switch render a dark pip on a light knob, which read as inverted. */
-.wl-switch-pip {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--wl-switch-off-icon);
-  transition: background-color var(--duration-settle) var(--ease-tactile);
-}
-.wl-switch[aria-checked="true"] .wl-switch-pip {
-  background: var(--wl-switch-on-icon);
-}
-
-/* Compact state readout (identity status, sync freshness). */
-.wl-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--wl-text-muted);
-  font-variant-numeric: tabular-nums;
-}
-.wl-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--wl-text-muted);
-}
-/* The identity dot is a cryptographic-security badge, which is one of the
-   three sanctioned uses for the coral beacon (skill §1). */
-.wl-status-dot-sealed { background: var(--wl-accent-coral); }
 
 /* ==========================================================================
-   I. Sync panel (Settings)
+   8. Text inputs
    ========================================================================== */
-/* The sync control was a 34px circle on the canvas. It is a settings
-   concern, not a canvas one, so it moved here and gained the room to show
-   what it last did instead of only offering to do it. */
-.wl-sync-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--wl-border-subtle);
-}
-.wl-sync-cta {
+.wl-input,
+.wl-textarea {
   width: 100%;
-  height: 46px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  background: var(--wl-surface-elevated);
-  color: var(--wl-text-primary);
+  background-color: var(--wl-surface-elevated);
   border: 1px solid var(--wl-border-subtle);
   border-radius: var(--wl-radius-btn);
-  font-family: var(--font-directive);
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  cursor: pointer;
-  transition: background-color var(--duration-instant) var(--ease-tactile),
-              transform var(--duration-instant) var(--ease-tactile);
+  color: var(--wl-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  padding: 12px 14px;
+  outline: none;
 }
-.wl-sync-cta:hover:not(:disabled) { background: var(--wl-surface-high); }
-.wl-sync-cta:active:not(:disabled) { transform: scale(0.985); }
-.wl-sync-cta:disabled { opacity: 0.5; cursor: not-allowed; }
-.wl-sync-cta svg { display: block; }
-.wl-sync-meta { justify-content: center; }
+.wl-textarea { resize: none; min-height: 84px; }
+.wl-input::placeholder,
+.wl-textarea::placeholder {
+  color: var(--wl-text-muted);
+  opacity: 0.7;
+}
+.wl-input:focus,
+.wl-textarea:focus { border-color: rgba(226, 109, 82, 0.45); }
+/* Inputs carrying an exact value — a mnemonic, a relay URL — are mono, so
+   the characters are countable and a typo is visible. */
+.wl-input--mono { font-family: var(--font-mono); font-size: var(--t-mono-lead); }
+
+/* The compose screen's target-date horizon, and the ONLY remaining native
+   `<select>` in the app. A small closed control, so it is worth keeping
+   the platform's keyboard and screen-reader behaviour; the provider
+   needed the same treatment and did not get it, which is why it is
+   gone.
+
+   `appearance: none` is REQUIRED, not cosmetic — a native select ignores
+   the background above and paints its own closed state. `color-scheme`
+   (in `:root`) darkens the dropdown *popup*, which `appearance: none`
+   cannot reach. */
+.wl-horizon {
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  letter-spacing: 0.05em;
+  color: var(--wl-text-secondary);
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-pill);
+  padding: 9px 28px 9px 14px;
+  cursor: pointer;
+  outline: none;
+  /* The chevron is a background so the pill needs no extra element;
+     `no-repeat` + an explicit size keeps it from tiling when narrow. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23949087' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 9px 6px;
+}
+.wl-horizon:hover { color: var(--wl-text-primary); border-color: var(--wl-border-strong); }
+.wl-horizon option {
+  background-color: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
+}
+
+/* An input paired with an inline action. */
+.wl-restore-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.wl-restore-row .wl-input { flex: 1; min-width: 0; }
+.wl-restore-row .wl-btn-compact { min-height: auto; }
+
+/* A row of secondary actions beneath a field. */
+.wl-inline-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.wl-inline-actions .wl-btn-ghost { width: auto; padding: 0 18px; flex: 1 1 auto; }
+
 
 /* ==========================================================================
-   B. Stackelberg Single Directive Card (skill §4.B)
+   9. The compose screen
+   ========================================================================== */
+/* Goal creation is a page of its own kind: not a settings form but a
+   single free-text field that owns the screen. It borrows the canvas's
+   premise — ONE thing, no chrome.
+
+   The field is deliberately bare — no card, no resting border — because
+   a box around it fights the "this IS the page" reading. Affordance comes
+   from the caret, a muted placeholder, and a coral hairline that exists
+   only while focused, which is also the only coral on this screen. */
+.wl-compose {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  color: var(--wl-text-primary);
+  font-family: var(--font-sans);
+  /* 18px, NOT the 24px directive scale. The compose field once inherited
+     `--text-directive` (28px) and rendered ~20 characters per line in a
+     384px column, which made a one-sentence intent feel like a wall. */
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  padding: 10px 0 14px;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  caret-color: var(--wl-accent-coral);
+  transition: border-color var(--duration-settle) var(--ease-tactile);
+}
+.wl-compose::placeholder { color: var(--wl-text-muted); opacity: 0.65; }
+/* Half-opacity coral: the hairline spans the full 384px column and at full
+   strength it was the loudest thing on a page whose whole idea is a quiet
+   matte field. It still reads as the only accent while focused. */
+.wl-compose:focus { border-bottom-color: rgba(226, 109, 82, 0.5); }
+
+
+/* ==========================================================================
+   10. The Stackelberg single-directive canvas
    ========================================================================== */
 .wl-directive-container {
   flex: 1;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  /* Top padding reserves the band the floating controls occupy (14px
-     offset + 34px control + breathing room). Without it the centred
-     card would sit under the menu button in the empty state, which is
-     the tallest state. */
-  padding: 62px 0 12px;
+  /* Top padding reserves the band the floating control occupies (12px
+     offset + 38px control + breathing room). Without it the centred card
+     sits under the menu button in the empty state, which is the tallest
+     state. */
+  padding: 66px 0 12px;
   min-height: 0;
 }
 .wl-directive-card {
@@ -750,17 +924,20 @@ body {
 [data-theme="light"] .wl-directive-card {
   box-shadow: 0 4px 20px rgba(29, 28, 19, 0.08);
 }
+/* The first of the coral beacon's three sanctioned uses: the active step
+   marker. Not a decorative accent, not a surface. */
 .wl-directive-step-badge {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--t-mono);
+  font-weight: 500;
   text-transform: uppercase;
   color: var(--wl-accent-coral);
   letter-spacing: 0.05em;
   margin-bottom: 14px;
 }
 .wl-directive-title {
-  font-family: var(--font-directive);
-  font-size: 24px;
+  font-family: var(--font-sans);
+  font-size: var(--t-directive);
   font-weight: 700;
   line-height: 1.3;
   letter-spacing: -0.025em;
@@ -768,18 +945,18 @@ body {
   margin: 0 0 14px 0;
 }
 .wl-directive-instruction {
-  font-size: 14px;
+  font-size: var(--t-body);
   line-height: 1.6;
   color: var(--wl-text-secondary);
   margin: 0 0 24px 0;
 }
 .wl-code {
   font-family: var(--font-mono);
+  font-size: var(--t-mono);
   background: var(--wl-surface-elevated);
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--wl-text-primary);
-  font-size: 12px;
 }
 .wl-progress-track {
   width: 100%;
@@ -791,44 +968,434 @@ body {
 .wl-progress-bar {
   height: 100%;
   background-color: var(--wl-cta-bg);
-  transition: width 200ms ease;
+  transition: width var(--duration-settle) var(--ease-tactile);
 }
 
-/* Idle / resting states */
-.wl-serif-title {
-  font-family: var(--font-serif);
-  font-size: 30px;
-  font-weight: 400;
-  line-height: 1.15;
-  letter-spacing: -0.025em;
-  color: var(--wl-text-primary);
-  margin: 0 0 10px 0;
+/* A directive advance: the next card enters from 8px below over 200ms. */
+@keyframes wl-card-enter {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
 }
-.wl-italic-accent {
-  font-style: italic;
-  color: var(--wl-accent-coral);
+.wl-card-enter { animation: wl-card-enter var(--duration-settle) var(--ease-tactile); }
+/* A coral pulse on the progress track when a directive advances. */
+@keyframes wl-progress-pulse {
+  0%   { background-color: var(--wl-accent-coral); }
+  100% { background-color: var(--wl-cta-bg); }
 }
-.wl-body-muted {
-  font-size: 14px;
-  line-height: 1.55;
-  color: var(--wl-text-muted);
-  letter-spacing: -0.01em;
+.wl-card-enter .wl-progress-bar {
+  animation: wl-progress-pulse var(--duration-settle) var(--ease-tactile);
 }
+
 
 /* ==========================================================================
-   Model picker (Settings → Intelligence)
+   11. Modal overlays
+   ==========================================================================
+
+   THE BASE LAYER COMES FIRST, DELIBERATELY.
+
+   Every overlay below is `.wl-modal-backdrop` plus a modifier that
+   overrides `align-items` or `background` — `.wl-nav-backdrop` stretches,
+   `.wl-modal-centered` and `.wl-drawer-backdrop` centre,
+   `.wl-picker-backdrop` anchors to the floor. The modifiers have the SAME
+   specificity as the base, so source order decides, and this block has to
+   precede all of them.
+
+   It did not, once. This block sat after the control panel, so
+   `align-items: flex-end` silently beat `.wl-nav-backdrop`'s `stretch` and
+   the sheet stopped being full-height — a 273px-wide panel floating in
+   the middle of the frame with the canvas visible above it. Nothing
+   errored; the panel just looked like it belonged to nothing. Ordering
+   is the whole fix, and the reason is written here so the blocks are
+   never re-sorted by a well-meaning cleanup.
+   ------------------------------------------------------------------------ */
+.wl-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(19, 19, 18, 0.8);
+  display: flex;
+  align-items: flex-end;
+  z-index: 40;
+  border-radius: 0;
+  animation: wl-modal-fade var(--duration-instant) var(--ease-tactile);
+}
+@keyframes wl-modal-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.wl-modal-centered {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.wl-modal-sheet {
+  width: 100%;
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-strong);
+  border-radius: var(--wl-radius-card);
+  padding: 24px 22px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
+  animation: wl-sheet-rise var(--duration-modal) var(--ease-tactile);
+}
+.wl-modal-centered-sheet { max-width: 372px; }
+.wl-modal-header {
+  font-family: var(--font-sans);
+  font-size: var(--t-title);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--wl-text-primary);
+}
+.wl-modal-sub {
+  font-size: var(--t-caption);
+  line-height: 1.5;
+  color: var(--wl-text-muted);
+  margin-bottom: 4px;
+}
+
+/* The escape hatch's three categories. The friction is the requirement to
+   CHOOSE one before the directive unmounts; these are how you choose. */
+.wl-bailout-reason {
+  width: 100%;
+  text-align: left;
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+  padding: 14px 16px;
+  cursor: pointer;
+}
+.wl-bailout-reason:hover:not(:disabled) { border-color: rgba(226, 109, 82, 0.35); }
+.wl-bailout-reason[aria-pressed="true"] {
+  border-color: var(--wl-accent-coral);
+  background-color: var(--wl-surface-high);
+}
+.wl-bailout-reason:disabled { opacity: 0.5; }
+.wl-bailout-reason-title {
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  font-weight: 600;
+  color: var(--wl-text-primary);
+  letter-spacing: -0.01em;
+}
+.wl-bailout-reason-sub {
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--wl-text-muted);
+  margin-top: 4px;
+}
+
+/* Evening check-in. Three outcomes, equal weight, no alarm red. */
+.wl-checkin-row { display: flex; gap: 10px; }
+.wl-checkin-choice {
+  flex: 1;
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+  padding: 16px 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.wl-checkin-choice:hover:not(:disabled) { border-color: var(--wl-border-strong); }
+.wl-checkin-choice:disabled { opacity: 0.5; }
+/* Done / partial / skipped as filled-half-hollow discs. These three marks
+   are the ONE deliberate exception to "icons are inline SVG": a
+   half-filled circle is a typographic idiom with no universally
+   recognised drawn equivalent, and the point is that the three read as
+   one scale of a single figure. */
+.wl-checkin-glyph {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1;
+  color: var(--wl-text-secondary);
+}
+.wl-checkin-label {
+  font-family: var(--font-sans);
+  font-size: var(--t-caption);
+  font-weight: 600;
+  color: var(--wl-text-secondary);
+}
+
+
+/* ==========================================================================
+   12. The control panel (what the hamburger opens)
+   ==========================================================================
+   The sheet is the answer to "where am I?" without leaving the surface
+   you are already on. A menu that only routes to other menus is a file
+   browser, and the product's whole premise is that you should never be
+   browsing.
+
+   It was 273px (65% of the 420px frame) for 15px rows, which left ~200px
+   of label column after the icon gutter — too narrow for a goal title and
+   a progress bar on the same line. 312px (74%) matches the proportion of
+   the sidebar this was modelled on and gives the readout room. */
+.wl-nav-backdrop {
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 0;
+  background: rgba(19, 19, 18, 0.72);
+}
+[data-theme="light"] .wl-nav-backdrop { background: rgba(29, 28, 19, 0.42); }
+.wl-nav-sheet {
+  width: 74%;
+  max-width: 312px;
+  background-color: var(--wl-surface-card);
+  border-right: 1px solid var(--wl-border-strong);
+  border-radius: 0 var(--wl-radius-card) var(--wl-radius-card) 0;
+  padding: 22px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  /* Hug the content, capped at the frame. The sheet is a CARD anchored to
+     the top-left, not a full-height drawer: a panel stretched to 747px
+     with two goals in it is ~300px of nothing, and no amount of internal
+     alignment makes an empty half a panel look deliberate. Capping rather
+     than fixing the height means the long case (six goals plus a long
+     entropy log) still scrolls inside the frame instead of overflowing. */
+  max-height: 100%;
+  box-shadow: var(--wl-raise-sheet);
+  animation: wl-nav-slide var(--duration-modal) var(--ease-tactile);
+}
+/* Transform ONLY. The previous keyframes also faded the sheet from
+   `opacity: 0.6`, so for the length of the animation the drawer was
+   translucent and the canvas showed *through* it while the backdrop
+   separately faded in — two overlapping fades, which is what made opening
+   the hamburger read as a blink-then-open. The backdrop's fade is the part
+   that earns its keep (it is the dimming); the sheet only needs to move. */
+@keyframes wl-nav-slide {
+  from { transform: translateX(-24px); }
+  to   { transform: none; }
+}
+
+.wl-nav-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+/* The wordmark. Serif, because it is the product's name and the only
+   moment in the app that is not addressing the user about their work.
+   Cream, the spec's app-name tone: on a graphite card a linen wordmark
+   read as body text rather than as a logotype. */
+.wl-nav-wordmark {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--wl-cta-bg);
+}
+/* Close. The same circle as `.wl-back` at a smaller size, so "close" and
+   "back" are one control language rather than two — previously this was
+   a bare 30px circle with no border, so it did not read as a peer of
+   anything. */
+.wl-nav-close {
+  background: none;
+  border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: var(--wl-text-muted);
+  cursor: pointer;
+}
+.wl-nav-close:hover { background-color: var(--wl-surface-high); color: var(--wl-text-primary); }
+.wl-nav-close svg { display: block; }
+
+.wl-nav-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 18px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  /* Content sits at the TOP of the scroll region and the leftover height
+     is simply left empty. The previous version had the groups centred,
+     which put a ~200px void between the worldline readout and the
+     Settings row and made the panel look like it had lost its contents.
+
+     That void is the same defect the module doc records having been fixed
+     once already: an earlier design pinned two buttons to the floor behind
+     a `flex: 1` spacer, and the spacer WAS the layout. A panel that
+     routes to other pages is a browser, and a browser with a hole in it
+     reads as broken. The honest shape is a top-aligned list that ends where
+     its content ends — short when there is little to say, which is the
+     normal case, because most installs have one or two goals. */
+  justify-content: flex-start;
+}
+/* The gap is carried by the last group, not by the scroll region, so a
+   long list reaches the footer instead of stopping short of it. */
+.wl-nav-group:last-child { margin-bottom: 0; }
+
+/* The primary action. The ONE filled surface in the panel, mirroring the
+   reference sidebar's highlighted top row. */
+.wl-nav-primary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 52px;
+  padding: 0 16px;
+  border-radius: var(--wl-radius-btn);
+  background-color: var(--wl-surface-high);
+  border: 1px solid var(--wl-border-strong);
+  color: var(--wl-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--t-lead);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-align: left;
+  cursor: pointer;
+}
+.wl-nav-primary:hover { background-color: var(--wl-cta-bg); color: var(--wl-text-inverse); }
+.wl-nav-primary-glyph {
+  display: flex;
+  align-items: center;
+  color: var(--wl-accent-coral);
+}
+.wl-nav-primary:hover .wl-nav-primary-glyph { color: var(--wl-text-inverse); }
+.wl-nav-primary-glyph svg { display: block; }
+
+/* A labelled group. The label is the mono eyebrow at the 12px floor —
+   still quiet, and now genuinely QUIETER than the 15px rows beneath it,
+   which is the inversion that was the visible bug. */
+.wl-nav-group { display: flex; flex-direction: column; gap: 4px; }
+.wl-nav-group + .wl-nav-group {
+  border-top: 1px solid var(--wl-border-subtle);
+  padding-top: 18px;
+  margin-top: -4px;
+}
+.wl-nav-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 6px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  line-height: 1.35;
+}
+/* `dx serve` fabricates every command response, so the worldline list is
+   invented rather than queried. This cost a whole test cycle once already
+   with the model catalog (PRD delta 148): an invented list is
+   indistinguishable from a real one from the outside. */
+.wl-nav-mock {
+  font-size: var(--t-mono);
+  color: var(--wl-accent-coral);
+}
+
+.wl-nav-row {
+  background: none;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 6px;
+  border-radius: var(--wl-radius-sm);
+  color: var(--wl-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-align: left;
+  cursor: pointer;
+}
+.wl-nav-row:hover { background-color: var(--wl-surface-elevated); }
+.wl-nav-row-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  flex-shrink: 0;
+  color: var(--wl-text-secondary);
+}
+.wl-nav-row-icon svg { display: block; }
+.wl-nav-row-label { flex: 1; min-width: 0; }
+.wl-nav-chevron {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--wl-text-muted);
+}
+.wl-nav-chevron svg { display: block; }
+
+/* Active Worldlines — a READOUT, deliberately not a button. There is no
+   hover state and no pointer cursor, because tapping a goal opens no
+   detail page: a tappable row with nothing behind it is a dead
+   affordance, and that is worse than no row at all. */
+.wl-worldline { padding: 10px 6px 12px; }
+.wl-worldline-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.wl-worldline-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-body);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--wl-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wl-worldline-count {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+}
+.wl-worldline-track {
+  height: 4px;
+  border-radius: 2px;
+  background-color: var(--wl-surface-high);
+  overflow: hidden;
+}
+.wl-worldline-fill {
+  height: 100%;
+  border-radius: 2px;
+  background-color: var(--wl-cta-bg);
+  transition: width var(--duration-settle) var(--ease-tactile);
+}
+.wl-nav-empty,
+.wl-nav-more {
+  padding: 4px 6px 0;
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--wl-text-muted);
+}
+.wl-nav-more { font-family: var(--font-mono); font-size: var(--t-mono); }
+
+.wl-nav-foot {
+  flex-shrink: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--wl-border-subtle);
+}
+/* Settings is a peer of the group rows, not a lesser thing pinned to the
+   floor — same row, same icon gutter, same chevron. */
+.wl-nav-foot .wl-nav-row { min-height: 48px; padding: 0 6px; }
+
+
+/* ==========================================================================
+   13. The choice sheet (model picker, provider picker)
    ========================================================================== */
-/* A bottom sheet, not a native `<select>`: OpenRouter serves 443
-   text-output models and a 420px WebKit popup with that many options is
-   unusable. The sheet also has room for a search field and a
-   "Recommended" group, neither of which a `<select>` can express. */
-/* z-index 80, above `.wl-toast` (60). The sheet is anchored to the
-   bottom of the frame and the toast sits at `bottom: 86px`, so at equal
-   z-index the toast landed on top of the model list. The other overlays
-   (nav 40, telemetry 40) are deliberately left BELOW the toast: the
-   telemetry drawer flashes a toast when you sync from inside it, and
-   raising its backdrop would hide the result of the thing you just
-   clicked. */
+/* One sheet, two contents. A native `<select>` cannot host a search
+   field, a "Recommended" group, or 443 rows that are rankable as you
+   type, and it rendered as a white box in a graphite panel. */
 .wl-picker-backdrop { align-items: flex-end; z-index: 80; }
 .wl-picker-sheet {
   width: 100%;
@@ -838,11 +1405,11 @@ body {
   background: var(--wl-surface-card);
   border: 1px solid var(--wl-border-strong);
   border-bottom: none;
-  /* A sheet is a rounded rect, not a pill: the list is tall. The pill
-     radius reserved for toasts reads as a mistake at this height. */
+  /* A sheet is a rounded rect, not a pill: the list is tall, and the pill
+     radius reads as a mistake at this height. */
   border-radius: var(--wl-radius-card) var(--wl-radius-card) 0 0;
-  padding: 16px 18px 18px;
-  animation: wl-sheet-rise 200ms var(--ease-tactile);
+  padding: 18px 18px 20px;
+  animation: wl-sheet-rise var(--duration-settle) var(--ease-tactile);
 }
 @keyframes wl-sheet-rise {
   from { transform: translateY(16px); opacity: 0; }
@@ -856,39 +1423,47 @@ body {
 }
 .wl-picker-title {
   font-family: var(--font-serif);
-  font-size: 18px;
+  font-size: var(--t-title);
   font-weight: 400;
   letter-spacing: -0.02em;
   color: var(--wl-text-primary);
 }
-/* The ✕ is a text glyph, like the nav drawer's ✚: the two are the only
-   two marks in the app that are not inline SVG, and keeping them as
-   glyphs is what stopped the SVG set from growing a "close" icon that
-   has to agree with a 1.6px stroke everywhere else. */
+/* An inline SVG, matching every other close affordance in the app. This
+   was a `✕` text glyph, whose weight and colour came from the font
+   stack — the same class of drift the whole icon set was rebuilt to
+   eliminate. */
 .wl-picker-close {
   background: none;
   border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
   color: var(--wl-text-muted);
-  font-size: 15px;
-  line-height: 1;
   cursor: pointer;
-  padding: 6px;
 }
-.wl-picker-close:hover { color: var(--wl-text-primary); }
+.wl-picker-close:hover { background-color: var(--wl-surface-elevated); color: var(--wl-text-primary); }
+.wl-picker-close svg { display: block; }
+
 .wl-picker-sub {
   font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  font-size: var(--t-mono);
+  letter-spacing: 0.03em;
   color: var(--wl-text-muted);
-  margin: 2px 0 12px;
+  margin: 6px 0 14px;
   flex-shrink: 0;
 }
 .wl-picker-cached { opacity: 0.7; }
-/* "MOCK DATA" — visible proof that the list came from
-   `invoke-shim.js` and not from the provider. */
+/* Visible proof that the list came from `invoke-shim.js` and not from the
+   provider. */
 .wl-picker-mock { color: var(--wl-accent-coral); }
+
 .wl-picker-search { flex-shrink: 0; margin-bottom: 10px; }
-.wl-picker-input { font-family: var(--font-mono); font-size: 13px; }
+.wl-picker-input { font-family: var(--font-mono); font-size: var(--t-mono-lead); }
+
 .wl-picker-list {
   flex: 1;
   min-height: 0;
@@ -898,466 +1473,386 @@ body {
   gap: 2px;
   margin: 0 -6px;
   padding: 0 6px;
-  /* Same reasoning as `.wl-scroll-region`: the model list is a scroll
-     container, so it needs the WebKit scrollbar rules too, not just the
-     Firefox ones. */
   scrollbar-width: thin;
   scrollbar-color: var(--wl-surface-high) transparent;
 }
 .wl-picker-group {
   font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
+  font-size: var(--t-mono);
+  font-weight: 500;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--wl-text-muted);
-  padding: 10px 8px 4px;
+  padding: 12px 8px 6px;
 }
-/* One model per row: the id in mono (it is the value that gets sent),
-   the display name beneath it, and the context window as a quiet
-   right-aligned badge. The id is the important part and has to be
-   readable at a glance, so it leads. */
+/* One choice per row. The id leads in mono at 13px — it is the value that
+   gets sent, so it is the part that has to be readable at a glance. */
 .wl-picker-row {
   display: grid;
   grid-template-columns: 1fr auto;
   grid-template-areas: "id ctx" "name ctx";
-  gap: 1px 10px;
+  gap: 3px 12px;
   align-items: center;
   text-align: left;
   width: 100%;
-  padding: 8px;
+  padding: 10px 8px;
   border: none;
   border-radius: var(--wl-radius-sm);
   background: transparent;
   cursor: pointer;
-  transition: background-color var(--duration-instant) var(--ease-tactile);
 }
-.wl-picker-row:hover { background: var(--wl-surface-elevated); }
+.wl-picker-row:hover { background-color: var(--wl-surface-elevated); }
 .wl-picker-row-id {
   grid-area: id;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono-lead);
+  line-height: 1.35;
   color: var(--wl-text-primary);
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 .wl-picker-row-name {
   grid-area: name;
-  font-size: 11px;
-  line-height: 1.35;
+  font-size: var(--t-caption);
+  line-height: 1.4;
   color: var(--wl-text-muted);
 }
 .wl-picker-row-ctx {
   grid-area: ctx;
-  font-size: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
   color: var(--wl-text-muted);
   white-space: nowrap;
 }
 .wl-picker-empty,
 .wl-picker-more {
-  font-size: 12px;
+  font-size: var(--t-caption);
   line-height: 1.5;
   color: var(--wl-text-muted);
-  padding: 14px 8px;
+  padding: 16px 8px;
   text-align: center;
 }
+.wl-picker-more { font-family: var(--font-mono); }
+
 .wl-picker-manual {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
   border-top: 1px solid var(--wl-border-subtle);
 }
 .wl-picker-manual-toggle {
   background: none;
   border: none;
   padding: 4px 0;
-  font-family: var(--font-body);
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: var(--t-caption);
   color: var(--wl-text-muted);
   text-decoration: underline;
   cursor: pointer;
 }
 .wl-picker-manual-toggle:hover { color: var(--wl-text-secondary); }
-.wl-picker-manual .wl-btn-compact { height: 38px; font-size: 13px; }
+.wl-picker-manual .wl-btn-compact { min-height: 44px; }
 
-/* The two tier slots on the Settings page. A row that reads as a value
-   with a chevron, not an input: the point is that these are chosen from
-   a list, not typed. */
-.wl-model-slot {
+
+/* ==========================================================================
+   14. Status, chips, telemetry readouts
+   ========================================================================== */
+.wl-status {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
-  width: 100%;
-  min-height: 46px;
-  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.wl-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--wl-text-muted);
+}
+/* The identity dot is a cryptographic-security badge, which is the second
+   of the coral beacon's three sanctioned uses. */
+.wl-status-dot-sealed { background: var(--wl-accent-coral); }
+
+/* ONE definition. This class was declared twice — once as a 10px
+   uppercase pill and again as a 9px inline lozenge — and the second
+   silently won everywhere, so the "sealed" key chip in Settings and the
+   "blocked" chip in the Entropy Log were the same class at two
+   different sizes. */
+.wl-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1.35;
+  color: var(--wl-text-secondary);
   background-color: var(--wl-surface-elevated);
   border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
-  cursor: pointer;
-  text-align: left;
-  transition: border-color var(--duration-instant) var(--ease-tactile);
+  border-radius: var(--wl-radius-pill);
+  padding: 5px 11px;
+  white-space: nowrap;
 }
-.wl-model-slot:hover { border-color: var(--wl-border-strong); }
-.wl-model-slot-id {
-  font-size: 12px;
-  color: var(--wl-text-primary);
-  word-break: break-all;
-}
-.wl-model-slot-empty { font-size: 13px; color: var(--wl-text-muted); }
-.wl-model-slot-go { color: var(--wl-text-muted); font-size: 15px; }
-
-/* Catalog status line: count, or the provider's own error, plus refresh. */
-.wl-catalog-status {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--wl-text-muted);
-  margin: -4px 0 14px;
-}
-.wl-catalog-status .wl-btn-compact { height: 32px; font-size: 12px; }
 
 /* An error a person can act on, shown in full.
    NOT a toast: the toast is an uppercase mono pill capped at 90% width,
    so a real diagnosis wrapped into a three-line lozenge. And not red —
-   skill §5 has no red failure states; this is `--wl-text-secondary`
-   because a wrong API key is a configuration state, not an emergency. */
+   this system has no red failure state, and a wrong API key is a
+   configuration state, not an emergency. */
 .wl-form-error {
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.55;
-  letter-spacing: 0.02em;
+  font-size: var(--t-mono-lead);
+  line-height: 1.5;
   color: var(--wl-text-secondary);
   word-break: break-word;
-  margin: 10px 0 0;
-  padding: 9px 12px;
+  margin: 12px 0 0;
+  padding: 11px 14px;
   background-color: var(--wl-surface-card);
   border: 1px solid var(--wl-border-subtle);
   border-radius: var(--wl-radius-sm);
 }
 
+.wl-char-count {
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+  text-align: right;
+  margin-top: 6px;
+}
+
+
 /* ==========================================================================
-   C. Action Controls & Escape Hatch (skill §4.C)
-   ==========================================================================
-   `.wl-actions` (the canvas footer holding Complete Directive and
-   Bailout / Blocked) was removed 2026-09-27. The canvas is now the
-   directive and nothing else: completion is ⌘+Enter, the escape hatch is
-   Escape, and the hamburger is the only control on the surface. The
-   buttons themselves survive — `.wl-btn-primary` and `.wl-btn-escape` are
-   still the CTA and the frictionful bail on the compose and dormant
-   screens. `.wl-actions-row` is a different, unrelated class
-   (the compose screen's button pair) and is untouched. */
-.wl-btn-primary {
+   15. Sync panel (Settings)
+   ========================================================================== */
+/* A full-width row that reports what the last cycle did, which the 34px
+   canvas circle that used to be this control never had room to do. */
+.wl-sync-cta {
   width: 100%;
-  height: 52px;
-  background-color: var(--wl-cta-bg);
-  color: var(--wl-text-inverse);
-  font-family: var(--font-directive);
-  font-size: 15px;
-  font-weight: 600;
-  border-radius: var(--wl-radius-btn);
-  border: none;
-  cursor: pointer;
+  min-height: 50px;
   display: flex;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
   gap: 10px;
-  letter-spacing: -0.005em;
-  transition: background-color 120ms ease, transform 120ms ease;
-}
-.wl-btn-primary:hover {
-  background-color: var(--wl-cta-hover);
-  transform: translateY(-1px);
-}
-.wl-btn-primary:active { transform: translateY(0); }
-.wl-kbd {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  background: rgba(0, 0, 0, 0.12);
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-[data-theme="light"] .wl-kbd { background: rgba(244, 240, 232, 0.25); }
-.wl-btn-escape {
-  width: 100%;
-  height: 42px;
-  background-color: transparent;
-  color: var(--wl-text-muted);
-  font-family: var(--font-directive);
-  font-size: 13px;
-  font-weight: 500;
-  border-radius: var(--wl-radius-btn);
-  border: 1px solid var(--wl-border-subtle);
-  cursor: pointer;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 8px;
-  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-.wl-btn-escape:hover {
-  background-color: var(--wl-surface-card);
-  color: var(--wl-accent-coral);
-  border-color: rgba(226, 109, 82, 0.3);
-}
-.wl-kbd-subtle {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  opacity: 0.7;
-}
-
-/* Secondary ghost button (forms, settings) */
-.wl-btn-ghost {
-  width: 100%;
-  height: 46px;
-  background-color: var(--wl-surface-card);
+  background: var(--wl-surface-elevated);
   color: var(--wl-text-primary);
-  font-family: var(--font-directive);
-  font-size: 14px;
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
   font-weight: 600;
-  border-radius: var(--wl-radius-btn);
-  border: 1px solid var(--wl-border-subtle);
+  letter-spacing: -0.005em;
   cursor: pointer;
-  transition: background-color 120ms ease, transform 120ms ease;
 }
-.wl-btn-ghost:hover { background-color: var(--wl-surface-elevated); }
+.wl-sync-cta:hover:not(:disabled) { background: var(--wl-surface-high); }
+.wl-sync-cta:disabled { opacity: 0.5; }
+.wl-sync-cta svg { display: block; }
+.wl-sync-meta { justify-content: center; margin-top: 10px; }
 
-/* `.wl-btn-compact` — a ghost that hugs its label instead of filling its
-   container. It MUST be declared after `.wl-btn-ghost`, because the two
-   have equal specificity and set the same properties (`width`,
-   `height`, `font-size`): while this block sat earlier in the file, the
-   ghost's `width: 100%` silently won and every compact button rendered
-   full-width. Two call sites had been rescued with one-off overrides
-   (`.wl-inline-actions .wl-btn-ghost`, `.wl-drawer-close`) and the rest
-   were broken — including the model catalog's "Refresh models". Ordering
-   is the fix; the overrides stay because they change other properties
-   too. */
-.wl-btn-compact {
-  width: auto;
-  flex: 0 0 auto;
-  height: 46px;
-  padding: 0 16px;
-}
-
-/* Text inputs (settings / goal creation) */
-.wl-input, .wl-textarea, .wl-select {
-  width: 100%;
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
-  color: var(--wl-text-primary);
-  font-family: var(--font-body);
-  font-size: 14px;
-  padding: 12px 14px;
-  outline: none;
-  letter-spacing: -0.01em;
-}
-.wl-input:focus, .wl-textarea:focus, .wl-select:focus {
-  border-color: rgba(226, 109, 82, 0.45);
-}
-
-/* The provider `<select>`, styled like `.wl-horizon` on the compose
-   screen: same pill geometry, same inline chevron, same reasoning.
-   `appearance: none` is REQUIRED here, not cosmetic — a native select
-   ignores the background above and paints its own closed state, which
-   is how this control shipped as a near-white box with light-grey text
-   in a graphite panel. `color-scheme` (in `:root`) darkens the dropdown
-   *popup*, which `appearance: none` cannot reach. */
-.wl-select {
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  /* Room for the chevron; the horizontal padding matches the pill. */
-  padding-right: 34px;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23949087' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-  background-size: 9px 6px;
-  transition: border-color var(--duration-instant) var(--ease-tactile);
-}
-.wl-select:hover { border-color: var(--wl-border-strong); }
-/* Options are rendered by the OS popup, which `appearance: none` does
-   not touch — so they are styled explicitly as well. */
-.wl-select option {
-  background-color: var(--wl-surface-elevated);
-  color: var(--wl-text-primary);
-}
-.wl-textarea { resize: none; min-height: 72px; }
-.wl-label {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--wl-text-muted);
-  margin: 0 0 6px 2px;
-}
-.wl-field { margin-bottom: 14px; }
 
 /* ==========================================================================
-   D. BIP-39 Seed Vault (skill §4.D)
+   16. The telemetry drawer (Ctrl,+)
+   ========================================================================== */
+.wl-drawer-backdrop {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.wl-drawer-sheet { max-width: 372px; }
+.wl-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.wl-drawer-close { width: auto; min-height: 40px; padding: 0 16px; }
+.wl-drawer-block + .wl-drawer-block { border-top: 1px solid var(--wl-border-subtle); padding-top: 16px; }
+.wl-drawer-block:first-of-type { padding-top: 4px; }
+
+
+/* ==========================================================================
+   17. BIP-39 seed vault
    ========================================================================== */
 .wl-seed-vault { display: flex; flex-direction: column; gap: 20px; }
+.wl-seed-header { display: flex; flex-direction: column; gap: 10px; }
 .wl-seed-sub {
-  font-size: 13px;
+  font-size: var(--t-caption);
   line-height: 1.5;
   color: var(--wl-text-muted);
   margin: 0;
 }
-.wl-seed-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.wl-seed-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
 .wl-seed-token {
   background-color: var(--wl-surface-card);
   border: 1px solid var(--wl-border-subtle);
   border-radius: var(--wl-radius-pill);
-  padding: 8px 12px;
+  padding: 10px 14px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--t-mono-lead);
+  line-height: 1.35;
   color: var(--wl-text-primary);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   user-select: all;
 }
-.wl-seed-num { color: var(--wl-text-muted); font-size: 10px; }
-
-/* Verification challenge slots */
+.wl-seed-num { color: var(--wl-text-muted); font-size: var(--t-mono); }
 .wl-verify-slot {
   background-color: var(--wl-surface-elevated);
   border: 1px solid var(--wl-border-subtle);
   border-radius: var(--wl-radius-pill);
-  padding: 10px 14px;
+  padding: 12px 16px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--t-mono-lead);
   color: var(--wl-text-primary);
   width: 100%;
   outline: none;
 }
 .wl-verify-slot:focus { border-color: rgba(226, 109, 82, 0.45); }
 
+
 /* ==========================================================================
-   Modal overlays (frictionful escape hatch, skill §4.C)
+   18. Entropy Log & Trajectory
    ========================================================================== */
-.wl-modal-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(19, 19, 18, 0.85);
-  display: flex;
-  align-items: flex-end;
-  z-index: 40;
-  border-radius: 0;
-  animation: wl-modal-fade 160ms var(--ease-tactile);
+.wl-entropy-summary {
+  margin: 0 0 16px;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  line-height: 1.5;
+  color: var(--wl-text-muted);
 }
-.wl-modal-centered {
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-.wl-modal-sheet {
-  width: 100%;
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-strong);
-  border-radius: var(--wl-radius-card);
-  padding: 24px 22px 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: calc(100% - 8px);
-  overflow-y: auto;
-  animation: wl-sheet-rise var(--duration-modal) var(--ease-tactile);
-}
-.wl-modal-centered-sheet {
-  max-width: 372px;
-}
-.wl-modal-header {
-  font-family: var(--font-directive);
-  font-size: 16px;
+.wl-entropy-group { margin-bottom: 20px; }
+.wl-entropy-goal {
+  margin: 0 0 10px;
+  font-size: var(--t-body);
   font-weight: 600;
+  line-height: 1.4;
+  color: var(--wl-text-primary);
+}
+.wl-entropy-entry {
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+}
+.wl-entropy-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.wl-entropy-date {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+}
+.wl-entropy-reason {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-caption);
+  line-height: 1.4;
+  color: var(--wl-text-secondary);
+}
+.wl-entropy-directive {
+  margin: 0;
+  font-size: var(--t-body);
+  line-height: 1.4;
+  color: var(--wl-text-primary);
+}
+.wl-entropy-note {
+  margin: 6px 0 0;
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--wl-text-muted);
+  font-style: italic;
+}
+.wl-entropy-empty-title,
+.wl-traj-empty-title {
+  margin: 0 0 8px;
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 400;
   letter-spacing: -0.02em;
   color: var(--wl-text-primary);
 }
-.wl-modal-sub {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--wl-text-muted);
-  margin-bottom: 4px;
-}
-.wl-bailout-reason {
-  width: 100%;
-  text-align: left;
-  background-color: var(--wl-surface-elevated);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
-  padding: 14px 16px;
-  cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease;
-}
-.wl-bailout-reason:hover { border-color: rgba(226, 109, 82, 0.35); }
-.wl-bailout-reason-title {
-  font-family: var(--font-directive);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--wl-text-primary);
-  letter-spacing: -0.01em;
-}
-.wl-bailout-reason-sub {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--wl-text-muted);
-  margin-top: 3px;
-}
 
-/* Evening check-in (zero-guilt, PRD §5.4) */
-.wl-checkin-row { display: flex; gap: 10px; }
-.wl-checkin-choice {
-  flex: 1;
-  background-color: var(--wl-surface-elevated);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
-  padding: 14px 8px;
-  cursor: pointer;
+.wl-traj-card { margin-bottom: 12px; }
+.wl-traj-pace {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  transition: border-color 120ms ease;
-}
-.wl-checkin-choice:hover { border-color: rgba(226, 109, 82, 0.35); }
-.wl-checkin-glyph { font-family: var(--font-mono); font-size: 16px; }
-.wl-checkin-label {
-  font-family: var(--font-directive);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--wl-text-secondary);
-}
-
-/* Velocity display — GPS recalibration tones, never alarm red */
-.wl-velocity-strip {
-  display: flex;
+  align-items: baseline;
   gap: 10px;
-  align-items: center;
-  padding: 14px 16px;
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
+  margin-bottom: 16px;
 }
-.wl-velocity-metric {
+.wl-traj-pace-label {
+  font-family: var(--font-serif);
+  font-size: 24px;
+  letter-spacing: -0.02em;
+  color: var(--wl-text-primary);
+}
+.wl-traj-pace-note {
   font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--wl-text-muted);
-  letter-spacing: 0.04em;
+  font-size: var(--t-mono);
+  letter-spacing: 0.07em;
   text-transform: uppercase;
+  color: var(--wl-text-muted);
 }
-.wl-velocity-value {
-  font-family: var(--font-mono);
-  font-size: 16px;
+.wl-traj-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 12px;
+}
+.wl-traj-cell { display: flex; flex-direction: column; gap: 3px; }
+.wl-traj-k {
+  font-size: var(--t-caption);
+  font-weight: 500;
+  line-height: 1.35;
   color: var(--wl-text-secondary);
+}
+.wl-traj-v {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  line-height: 1.1;
+  color: var(--wl-text-primary);
   font-variant-numeric: tabular-nums;
 }
+.wl-traj-u {
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+}
+.wl-traj-formula {
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--wl-border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  line-height: 1.5;
+  color: var(--wl-text-muted);
+}
+.wl-traj-foot { margin: 4px 0 0; }
 
-/* Scrollable interior region ONLY for settings/seed screens (the
-   directive canvas itself never scrolls — skill §5). */
+
+/* ==========================================================================
+   19. Scroll regions, scrollbars, toast
+   ========================================================================== */
+/* The scrolling interior. Only secondary screens scroll — the directive
+   canvas itself never does (skill §5). */
 .wl-scroll-region {
   flex: 1;
   overflow-y: auto;
@@ -1371,31 +1866,32 @@ body {
    `scrollbar-width` / `scrollbar-color` above are FIREFOX properties.
    The Linux shell is WebKitGTK, which ignores both and draws its own
    default scrollbar — a bright light-grey bar against a #131312 canvas,
-   visible down the right edge of Settings. These pseudo-elements are
-   the only thing that reaches the engine that actually renders the
-   app, so they are not optional polish.
-   `::-webkit-scrollbar-track` is transparent rather than
-   `--wl-canvas` so the track does not draw a visible seam where the
-   scroll region ends. */
+   visible down the right edge of Settings. These pseudo-elements are the
+   only thing that reaches the engine that actually renders the app, so
+   they are not optional polish. The track is transparent rather than
+   `--wl-canvas` so no seam draws where the scroll region ends. */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background-color: var(--wl-surface-high);
   border-radius: 4px;
   /* A transparent border keeps the thumb off the container edge, so it
-     reads as inset rather than as a bar flush with the frame. */
+     reads as inset rather than flush with the frame. */
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover { background-color: #45453F; }
 [data-theme="light"] ::-webkit-scrollbar-thumb:hover { background-color: #CFC8BA; }
 
-/* Toast */
+/* z-index 60 — above the nav and telemetry backdrops (40) and below the
+   choice sheet (80). The telemetry drawer flashes a toast when you sync
+   from inside it, so its backdrop must stay BELOW the toast or the result
+   of the thing you just clicked gets hidden. */
 .wl-toast {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 86px;
+  bottom: 90px;
   margin: 0 auto;
   width: fit-content;
   max-width: 90%;
@@ -1404,473 +1900,52 @@ body {
   border-radius: var(--wl-radius-pill);
   color: var(--wl-text-secondary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--t-mono);
   letter-spacing: 0.04em;
-  padding: 8px 16px;
+  padding: 10px 18px;
   z-index: 60;
+  text-align: center;
   text-transform: uppercase;
 }
 
-/* Spec additions: BYOK pills, phase checklist, coral CTA, drawer. */
-.wl-mono {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-.wl-provider-pills {
-  display: flex;
-  gap: 8px;
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-pill);
-  padding: 4px;
-}
-.wl-provider-pill {
-  flex: 1;
-  height: 36px;
-  border-radius: var(--wl-radius-pill);
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--wl-text-muted);
-  font-family: var(--font-directive);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color var(--duration-instant) var(--ease-tactile);
-}
-.wl-provider-pill-active {
-  background-color: var(--wl-surface-elevated);
-  border-color: var(--wl-border-strong);
-  color: var(--wl-text-primary);
-}
-.wl-phase-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0 0 16px 0;
-}
-.wl-phase-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--wl-text-muted);
-}
-.wl-phase-now { color: var(--wl-text-primary); }
-.wl-phase-glyph { font-family: var(--font-mono); font-size: 12px; }
-.wl-phase-now .wl-phase-glyph { color: var(--wl-accent-coral); }
-.wl-phase-text { font-family: var(--font-body); }
-.wl-char-count {
-  font-size: 10px;
-  color: var(--wl-text-muted);
-  text-align: right;
-}
-.wl-btn-coral {
-  width: 100%;
-  height: 48px;
-  background-color: var(--wl-accent-coral);
-  color: var(--wl-text-primary);
-  font-family: var(--font-directive);
-  font-size: 14px;
-  font-weight: 600;
-  border-radius: var(--wl-radius-btn);
-  border: none;
-  cursor: pointer;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  transition: transform var(--duration-instant) var(--ease-tactile),
-              filter var(--duration-instant) var(--ease-tactile);
-}
-.wl-btn-coral:hover { filter: brightness(1.06); transform: translateY(-1px); }
-.wl-btn-coral:active { transform: scale(0.985) translateY(1px); }
-.wl-drawer-backdrop {
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-.wl-drawer-sheet { max-width: 372px; }
-.wl-drawer-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-.wl-drawer-close {
-  width: auto;
-  height: 36px;
-  padding: 0 14px;
-}
-
-/* MVP-1 nav drawer: left slide-out (~65% width), dimmed overlay behind.
-   App name on top; two HORIZONTAL icon buttons pinned to the bottom —
-   goal creation LEFT (coral highlight), settings RIGHT (muted gear). */
-.wl-nav-backdrop {
-  align-items: stretch;
-  justify-content: flex-start;
-  padding: 0;
-}
-.wl-nav-sheet {
-  width: 65%;
-  max-width: 273px;
-  background-color: var(--wl-surface-card);
-  border-right: 1px solid var(--wl-border-strong);
-  border-radius: 0 var(--wl-radius-card) var(--wl-radius-card) 0;
-  padding: 24px 20px 22px;
-  display: flex;
-  flex-direction: column;
-  animation: wl-nav-slide var(--duration-modal) var(--ease-tactile);
-}
-/* Transform ONLY. The previous keyframes also faded the sheet from
-   `opacity: 0.6`, so for the length of the animation the drawer was
-   translucent and the canvas showed *through* it, while the backdrop
-   underneath was separately fading from 0 over 160ms. Two overlapping
-   fades = a visible ghost of the page, which is what made opening the
-   hamburger read as a blink-then-open. The backdrop's fade is the part
-   that earns its keep (it is the dimming); the sheet only needs to
-   move. */
-@keyframes wl-nav-slide {
-  from { transform: translateX(-24px); }
-  to { transform: none; }
-}
-.wl-nav-appname {
-  font-family: var(--font-directive);
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  /* Cream (the spec's app-name tone), not `--wl-text-primary`. The drawer
-     is a dark card, so a linen wordmark read as body text rather than as
-     the product's one logotype. */
-  color: var(--wl-cta-bg);
-}
-
-/* --------------------------------------------------------------------------
-   Control panel body (2026-09-27).
-
-   The sheet is now a scroll column: a fixed top bar, a scrolling middle
-   holding the primary action plus two groups, and a fixed Settings row at
-   the bottom. The old design pinned two big buttons to the floor with a
-   `flex: 1` spacer above them, which is what left the void — the spacer
-   *was* the layout. `flex-shrink: 0` on the top and foot is what keeps
-   Settings reachable once a user has six goals and an entropy log. */
-.wl-nav-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-shrink: 0;
-}
-.wl-nav-close {
-  /* There is no global `button` reset in this file — every button class
-     carries its own background and border. Omitting them painted the
-     UA's default light button chrome inside a graphite sheet. */
-  background: none;
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  color: var(--wl-text-secondary);
-  cursor: pointer;
-  transition: background-color var(--duration-instant) var(--ease-tactile),
-              color var(--duration-instant) var(--ease-tactile);
-}
-.wl-nav-close:hover {
-  background-color: var(--wl-surface-high);
-  color: var(--wl-text-primary);
-}
-.wl-nav-scroll {
-  flex: 1;
-  min-height: 0;
-  margin: 14px 0 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-/* The primary action, mirroring the reference's highlighted top row. It is
-   the ONE coral surface in the drawer — the beacon, used once. */
-.wl-nav-primary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: 44px;
-  padding: 0 12px;
-  border-radius: var(--wl-radius-btn);
-  background-color: var(--wl-surface-high);
-  color: var(--wl-text-primary);
-  font-size: 15px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--duration-instant) var(--ease-tactile);
-}
-.wl-nav-primary:hover { background-color: var(--wl-surface-elevated); }
-.wl-nav-primary-glyph {
-  font-size: 17px;
-  line-height: 1;
-  color: var(--wl-accent-coral);
-}
-
-/* Grouped read-out rows. */
-.wl-nav-section { display: flex; flex-direction: column; gap: 2px; }
-.wl-nav-label {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 0 4px 6px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--wl-text-tertiary);
-}
-/* `dx serve` fabricates every command response, so a worldline list is
-   invented rather than queried. Delta 148 paid for exactly this ambiguity
-   once with the model catalog; the marker is the fix. */
-.wl-nav-mock {
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  color: var(--wl-accent-coral);
-}
-.wl-nav-row {
-  background: none;
-  border: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: 38px;
-  padding: 0 8px;
-  border-radius: var(--wl-radius-sm);
-  color: var(--wl-text-primary);
-  font-size: 15px;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--duration-instant) var(--ease-tactile);
-}
-.wl-nav-row:hover { background-color: var(--wl-surface-high); }
-.wl-nav-row-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  flex-shrink: 0;
-  color: var(--wl-text-secondary);
-}
-.wl-nav-row-label { flex: 1; min-width: 0; }
-.wl-nav-chevron {
-  font-size: 17px;
-  line-height: 1;
-  color: var(--wl-text-tertiary);
-  flex-shrink: 0;
-}
-.wl-nav-empty {
-  padding: 2px 8px;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--wl-text-tertiary);
-}
-
-/* Active Worldlines — a readout, deliberately not a button: there is no
-   hover state and no pointer cursor, because tapping one does nothing. */
-.wl-worldline { padding: 7px 8px 9px; }
-.wl-worldline-top {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.wl-worldline-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 13px;
-  color: var(--wl-text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.wl-worldline-count {
-  flex-shrink: 0;
-  font-size: 10px;
-  color: var(--wl-text-tertiary);
-}
-.wl-worldline-track {
-  height: 3px;
-  border-radius: 2px;
-  background-color: var(--wl-surface-high);
-  overflow: hidden;
-}
-.wl-worldline-fill {
-  height: 100%;
-  border-radius: 2px;
-  background-color: var(--wl-cta-bg);
-  transition: width var(--duration-settle) var(--ease-tactile);
-}
-.wl-nav-more {
-  padding: 6px 8px 0;
-  font-size: 10px;
-  color: var(--wl-text-tertiary);
-}
-
-.wl-nav-foot {
-  flex-shrink: 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--wl-border-subtle);
-}
 
 /* ==========================================================================
-   Entropy Log (control panel → System Telemetry)
-   ========================================================================== */
-.wl-entropy-summary {
-  margin: 0 0 14px;
-  font-size: 11px;
-  color: var(--wl-text-tertiary);
-}
-.wl-entropy-group { margin-bottom: 18px; }
-.wl-entropy-goal {
-  margin: 0 0 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-weight: 500;
-  color: var(--wl-text-tertiary);
-}
-.wl-entropy-entry {
-  padding: 10px 12px;
-  margin-bottom: 6px;
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-sm);
-}
-.wl-entropy-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 5px;
-}
-.wl-entropy-date {
-  flex-shrink: 0;
-  font-size: 10px;
-  color: var(--wl-text-tertiary);
-}
-.wl-entropy-reason {
-  flex: 1;
-  font-size: 11px;
-  color: var(--wl-text-secondary);
-}
-/* "Blocked" is a state, not an alarm. Neutral sand outline — this design
-   system has no red failure state, and a coral badge here would be the
-   first one. */
-.wl-chip {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border: 1px solid var(--wl-border-strong);
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--wl-text-secondary);
-}
-.wl-entropy-directive {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.35;
-  color: var(--wl-text-primary);
-}
-.wl-entropy-note {
-  margin: 5px 0 0;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--wl-text-tertiary);
-  font-style: italic;
-}
-.wl-entropy-empty-title,
-.wl-traj-empty-title {
-  margin: 0 0 6px;
-  font-family: var(--font-serif);
-  font-size: 19px;
-}
-
-/* ==========================================================================
-   Trajectory (control panel → System Telemetry)
-   ========================================================================== */
-.wl-traj-card { margin-bottom: 12px; }
-.wl-traj-pace {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.wl-traj-pace-label {
-  font-family: var(--font-serif);
-  font-size: 20px;
-  color: var(--wl-text-primary);
-}
-.wl-traj-pace-note {
-  font-size: 10px;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--wl-text-tertiary);
-}
-.wl-traj-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px 10px;
-}
-.wl-traj-cell { display: flex; flex-direction: column; gap: 2px; }
-.wl-traj-k {
-  font-size: 10px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--wl-text-tertiary);
-}
-.wl-traj-v {
-  font-size: 22px;
-  line-height: 1.1;
-  color: var(--wl-text-primary);
-}
-.wl-traj-u { font-size: 10px; color: var(--wl-text-tertiary); }
-.wl-traj-formula {
-  margin: 14px 0 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--wl-border-subtle);
-  font-size: 10px;
-  color: var(--wl-text-tertiary);
-}
-.wl-traj-foot { margin: 4px 0 0; }
-
-/* ==========================================================================
-   Icon sizing
+   20. Icon sizing
    ========================================================================== */
 /* Icons carry no width/height attributes (see `icons.rs`): one rule sizes
-   all of them, so a new icon cannot arrive at an arbitrary size.
+   all of them, so a new icon cannot arrive at an arbitrary size. They
+   stroke with `currentColor`, so they inherit the theme and the button's
+   own colour for free — which is precisely the drift that made a glyph
+   settings icon render at the wrong size and in the wrong colour.
 
-   The menu and the settings gear were both enlarged on 2026-09-27 because
-   each was losing an optical comparison on the canvas and in the nav
-   drawer: an 18px hamburger in a 34px circle read as a smudge, and a 20px
-   gear drew only 14.3px of ink (its path stopped at r=8.6 of the 24-unit
-   grid) next to a bold 20px `✚`. The chevron stays at 18px — it is a
-   different control in a different position, not part of either pair. */
+   The menu and the settings gear were both enlarged once already because
+   each was losing an optical comparison: an 18px hamburger in a 38px
+   circle read as a smudge, and a 20px gear drew only 14.3px of ink (its
+   path stops at r=8.6 of the 24-unit grid) beside a bold `+`. */
 .wl-icon { display: block; flex-shrink: 0; }
-.wl-icon-menu { width: 20px; height: 20px; }
+.wl-icon-menu   { width: 20px; height: 20px; }
 .wl-icon-settings { width: 22px; height: 22px; }
-.wl-icon-back { width: 18px; height: 18px; }
-/* Sized to sit inside the 20px switch knob with clearance on every side.
+.wl-icon-back   { width: 18px; height: 18px; }
+.wl-icon-close  { width: 16px; height: 16px; }
+/* Sized to sit inside the 22px switch knob with clearance on every side.
    These are on a 24-unit grid, so the crescent's terminator survives the
-   downscale — the earlier 16-unit hand-rolled version did not. */
+   downscale — an earlier 16-unit hand-rolled version did not. */
 .wl-icon-moon, .wl-icon-sun { width: 13px; height: 13px; }
-/* The two control-panel marks. Both sit in `.wl-nav-row-icon`, a 22px
+.wl-icon-new { width: 20px; height: 20px; }
+/* The two control-panel marks. Both sit in `.wl-nav-row-icon`, a 24px
    column, so they are sized to match the gear beside them rather than to
    the canvas's larger menu mark. */
 .wl-icon-entropy, .wl-icon-velocity { width: 20px; height: 20px; }
+/* Trailing affordances. Small and quiet by design: they point, they do
+   not compete with the value they point at. */
+.wl-icon-chevron { width: 15px; height: 15px; }
+.wl-icon-sync { width: 18px; height: 18px; }
 
-/* Font faces: bundled OFL assets, no CDN (local-first, skill §6) */
+
+/* ==========================================================================
+   21. Font faces
+   ========================================================================== */
+/* Bundled OFL assets, no CDN (local-first, skill §6). */
 @font-face {
   font-family: 'DM Sans';
   src: url('fonts/DMSans-Variable.ttf') format('truetype');
@@ -1884,11 +1959,13 @@ body {
   font-display: swap;
 }
 
-/* Reduced motion respect */
-/* Reduced motion. This disabled `transition` only, so every `animation`
-   in this file — the backdrop fade, the nav slide, the sheet rise, the
-   card enter — still ran for users who asked for none of it. Both
-   properties have to go, or the setting is decorative. */
+
+/* ==========================================================================
+   22. Reduced motion
+   ========================================================================== */
+/* This disabled `transition` only, so every `animation` still ran for
+   users who asked for none of it. Both properties have to go, or the
+   setting is decorative. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

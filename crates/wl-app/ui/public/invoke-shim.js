@@ -111,7 +111,7 @@
     velocity: function () { return Promise.resolve(mockDb.velocity); },
     settings_get: function () {
       return Promise.resolve({
-        theme: mockDb.theme || 'dark', always_on_top: false,
+        theme: mockDb.theme || 'dark',
         ai_provider: null, tier1_model: null, tier2_model: null, relay_url: null,
       });
     },
@@ -211,7 +211,10 @@
       };
       return Promise.resolve('goal-ai-1');
     },
-    set_always_on_top: function (args) { return Promise.resolve(null); },
+    // `set_always_on_top` used to be mocked here for the Settings pin
+    // switch. The switch and the command are both gone (PRD delta 175), so
+    // a call to it now falls through to the "unknown command" rejection —
+    // which is the correct outcome, not a gap in the harness.
     identity_restore: function (args) { return Promise.resolve('restored-' + (args.phrase || '').length); },
 
     // Provider model catalog. Enough rows to exercise the search ranking

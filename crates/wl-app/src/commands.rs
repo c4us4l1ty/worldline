@@ -1203,28 +1203,14 @@ fn recommended_ids(provider: &str, models: &[ModelInfo]) -> Vec<String> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Window controls (PRD §2.2)
-// ---------------------------------------------------------------------------
-
-/// Generic over `R: Runtime` rather than taking the `Wry` default
-/// `AppHandle`: the IPC contract test registers this command on a
-/// `MockRuntime` app, and `AppHandle<Wry>` does not implement
-/// `CommandArg<MockRuntime>`. Runtime-generic keeps one handler list for
-/// both the shipped app and the test harness.
-#[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn set_always_on_top<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    pinned: bool,
-) -> ShellResult<()> {
-    if let Some(win) = app.get_webview_window("main") {
-        win.set_always_on_top(pinned)
-            .map_err(|e| ShellError::Io(e.to_string()))?;
-    }
-    Ok(())
-}
-
-use tauri::Manager;
+// There are no window-control commands. `set_always_on_top` used to live
+// here, backing the Settings pin switch; both are gone (PRD delta 175), and
+// so is the boot-time restore of the persisted value in `main.rs`. The
+// `app_settings.always_on_top` column remains in SQLite and is simply
+// never written or read — see the note in `wl-core`'s `save_settings`.
+//
+// `use tauri::Manager` is still required below: the identity commands call
+// `get_webview_window` to emit window-scoped events.
 
 #[cfg(test)]
 mod tests {

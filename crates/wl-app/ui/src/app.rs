@@ -5,6 +5,12 @@
 //! * 9:16 fixed portrait layout (420×747 desktop, fluid mobile).
 //! * ⌘+Enter completes; Escape opens the frictionful bailout modal.
 //! * Zero future lists, zero streaks, zero alarm red.
+//!
+//! Every screen renders under `.wl-root` (a flex column owned by
+//! `wl.css`), so a screen that needs a column declares it and not the
+//! geometry. Two components used to repeat that geometry as an inline
+//! `style` attribute, which is how the directive card ended up
+//! mis-centred in exactly one of them.
 
 use dioxus::{core::Task, prelude::*};
 use serde::{de::DeserializeOwned, Serialize};
@@ -278,7 +284,6 @@ pub struct VelocityView {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppSettingsView {
     pub theme: String,
-    pub always_on_top: bool,
     pub ai_provider: Option<String>,
     pub tier1_model: Option<String>,
     pub tier2_model: Option<String>,
@@ -289,7 +294,6 @@ impl Default for AppSettingsView {
     fn default() -> Self {
         Self {
             theme: "dark".into(),
-            always_on_top: false,
             ai_provider: None,
             tier1_model: None,
             tier2_model: None,
@@ -660,7 +664,6 @@ fn App() -> Element {
                     { let mut s = ctx.nav_open; *s.write() = false; }
                 }
             },
-            style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
             // Every screen renders inside an error boundary. A panic in
             // a component's render otherwise leaves the LAST GOOD DOM in
             // place, which for a boot-time panic means the splash stays
@@ -766,9 +769,15 @@ fn BootSplash() -> Element {
     let secs = *elapsed.read();
     rsx! {
         div { class: "wl-directive-container",
-            h1 { class: "wl-brief-greeting", "Worldline" }
+            // `.wl-serif-title`, not a `.wl-brief-greeting` of its own.
+            // That class went with the morning briefing and was left
+            // dangling on this heading, so the one screen a user sees
+            // while waiting rendered its wordmark at inherited body size
+            // and weight — a splash with no wordmark. Reusing the existing
+            // hero class is both correct and one fewer thing to invent.
+            h1 { class: "wl-serif-title", "Worldline" }
             p { class: "wl-body-muted", "Establishing cryptographic session…" }
-            p { class: "wl-body-muted wl-mono", style: "margin-top: 8px;",
+            p { class: "wl-body-muted wl-mono", style: "margin-top: 10px;",
                 "{secs}s"
             }
             // Past a third of the budget, stop looking patient and say

@@ -188,13 +188,13 @@ pub fn EntropyLogScreen() -> Element {
         div { class: "wl-page",
             div { class: "wl-page-head",
                 button {
-                    class: "wl-back",
+                    class: "wl-circle-btn wl-back",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
                     IconBack {}
                 }
-                div { h1 { class: "wl-page-title", "Entropy Log" } }
+                h1 { class: "wl-page-title", "Entropy Log" }
             }
 
             div { class: "wl-scroll-region",
@@ -241,7 +241,7 @@ pub fn EntropyLogScreen() -> Element {
                         }
                     }
                 } else {
-                    p { class: "wl-body-muted wl-entropy-empty", "Reading the ledger…" }
+                    p { class: "wl-body-muted", "Reading the ledger…" }
                 }
             }
         }

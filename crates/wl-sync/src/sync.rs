@@ -547,20 +547,25 @@ fn apply_upsert(
             )?;
         }
         CrdtTable::AppSettings => {
-            // `hotkey` is intentionally neither written nor read. The
-            // summon hotkey was removed as a feature, so a new peer's op
-            // payload has no such key — and an OLD peer's payload that
-            // still carries one is simply ignored rather than rejected.
-            // The column keeps its `NOT NULL DEFAULT 'alt+space'`, which
-            // SQLite supplies for the omitted INSERT field, so no
-            // migration is needed to drop it.
+            // `hotkey` and `always_on_top` are intentionally neither
+            // written nor read. Both were features that no longer exist (a
+            // global summon hotkey; a pin-above-other-windows
+            // preference), so a new peer's op payload has neither key — and
+            // an OLD peer's payload that still carries one is ignored
+            // rather than rejected. Each column keeps its
+            // `NOT NULL DEFAULT`, which SQLite supplies for the omitted
+            // INSERT field, so no migration is needed to drop either.
+            //
+            // Ignoring rather than rejecting is what makes a mixed-version
+            // fleet safe: a device still on the old build keeps pinning its
+            // own window and pushing the key, and this side simply stops
+            // carrying it forward.
             conn.execute(
-                "INSERT INTO app_settings (id,theme,always_on_top,ai_provider,tier1_model,tier2_model,relay_url,hlc_timestamp)
-                 VALUES (1,?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(id) DO UPDATE SET theme=?1,always_on_top=?2,ai_provider=?3,tier1_model=?4,tier2_model=?5,relay_url=?6,hlc_timestamp=?7",
+                "INSERT INTO app_settings (id,theme,ai_provider,tier1_model,tier2_model,relay_url,hlc_timestamp)
+                 VALUES (1,?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET theme=?1,ai_provider=?2,tier1_model=?3,tier2_model=?4,relay_url=?5,hlc_timestamp=?6",
                 rusqlite::params![
                     get(f, "theme").unwrap_or("dark".into()),
-                    f["always_on_top"].as_i64().unwrap_or(0),
                     get(f, "ai_provider"), get(f, "tier1_model"), get(f, "tier2_model"), get(f, "relay_url"),
                     ts_s
                 ],

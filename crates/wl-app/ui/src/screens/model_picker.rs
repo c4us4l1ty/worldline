@@ -1,26 +1,68 @@
-//! Model picker — a bottom sheet for choosing which model fills one of
-//! the two AI tier slots.
+//! The choice sheets — which model fills a tier slot, and which provider
+//! the BYOK key belongs to.
 //!
-//! Exists because the alternative was a free-text field, and a free-text
-//! field for a value that must match a provider's exact id string fails
-//! silently: the request 400s, the error was discarded, and the UI said
-//! "OFFLINE". 443 chat models (OpenRouter today) also do not fit in a
-//! native `<select>` on a 420px WebKit popup.
+//! Both are bottom sheets rather than native `<select>` elements, and the
+//! provider is the one that settles the argument. A free-text field for a
+//! value that must match a provider's exact id string fails silently: the
+//! request 400s, the error was discarded, and the UI said "OFFLINE".
+//! 443 chat models (OpenRouter today) do not fit in a native popup on a
+//! 420px WebKit screen, and a native popup cannot host a search field or a
+//! "Recommended" group at all.
 //!
-//! The sheet is rendered *inside* the settings screen rather than as a
-//! global overlay like the nav and telemetry drawers: it is only ever
-//! opened from here, so it can own local signals instead of growing
+//! The provider was a four-option `<select>` and should have been
+//! harmless. It was not: WebKitGTK painted its own closed state, so it
+//! shipped as a **near-white field carrying #E5E2E0 text** inside a
+//! graphite card — twice, once "fixed" with `color-scheme: dark` and
+//! `appearance: none` and once restyled. Neither declaration reliably
+//! reaches the widget. Rather than restyle it a third time, Settings now
+//! contains no native form widget at all, so there is one row type, one
+//! open gesture, and one list rendering. The compose screen's horizon
+//! pill is the last `<select>` in the app, and it survives because it is a
+//! small closed control with no failure to report.
+//!
+//! The sheets are rendered *inside* the settings screen rather than as a
+//! global overlay like the nav and telemetry drawers: they are only ever
+//! opened from here, so they can own local signals instead of growing
 //! `AppCtx` for a transient concern.
 //!
-//! Nothing here chooses a model for the user. The RECOMMENDED group is
-//! an ordering aid — the provider's own list is the only source of
+//! Nothing here chooses anything for the user. The RECOMMENDED group is
+//! an ordering aid — the provider's own catalog is the only source of
 //! truth, and a model released upstream appears under ALL as soon as the
 //! catalog is refetched, with no Worldline release involved.
 
 use dioxus::prelude::*;
 
-use crate::app::ModelInfoView;
-use crate::app::{flash, AppCtx};
+use crate::app::{flash, AppCtx, ModelInfoView};
+use crate::icons::IconClose;
+
+/// The BYOK providers, in the order the chooser lists them.
+///
+/// The first entry is the manual mode: no provider, no key, no AI. It is
+/// listed rather than implied, because "None" as an absent value is not
+/// a choice a user can see they have made.
+///
+/// The ids are the wire values the shell's vault namespaces by. Changing
+/// one orphans that provider's sealed key, so they are not display names.
+pub const PROVIDERS: [(&str, &str); 4] = [
+    ("", "None — manual mode"),
+    ("openrouter", "OpenRouter"),
+    ("google", "Google"),
+    ("bytez.com", "bytez.com"),
+];
+
+/// Display name for a stored provider id.
+///
+/// An id this build does not know renders as itself rather than as
+/// nothing: a vault key written by a newer build must stay visible to an
+/// older one, and silently showing a blank row would look like the key
+/// had vanished.
+pub fn provider_label(id: &str) -> &'static str {
+    PROVIDERS
+        .iter()
+        .find(|(known, _)| *known == id)
+        .map(|(_, label)| *label)
+        .unwrap_or("Unrecognised provider")
+}
 
 /// Which tier slot the sheet is filling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,31 +72,26 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// The row label. This is the *whole* label now: the old markup read
+    /// "Architect model (Tier 1)", which put a redundant parenthetical
+    /// after a word that already says it, and the redundancy is what made
+    /// the three choice rows read as unrelated fields rather than as one
+    /// group.
     pub fn label(self) -> &'static str {
         match self {
             Tier::Architect => "Architect model",
             Tier::Dispatcher => "Dispatcher model",
         }
     }
-
-    /// The tier number, as a string. Precomputed rather than an inline
-    /// `if` in the rsx: a conditional expression inside a `label { }`
-    /// attribute is not parseable there.
-    pub fn number(self) -> &'static str {
-        match self {
-            Tier::Architect => "1",
-            Tier::Dispatcher => "2",
-        }
-    }
 }
 
 /// How many rows the sheet will render at once.
 ///
-/// OpenRouter serves 443 chat models; rendering every one of them into
-/// the DOM on each keystroke is the thing that makes a searchable list
-/// feel slower than a native select. Results are ranked, so the cap
-/// drops the least relevant rather than an arbitrary slice, and the
-/// count line says when it did.
+/// OpenRouter serves 443 chat models; rendering every one of them into the
+/// DOM on each keystroke is the thing that makes a searchable list feel
+/// slower than a native select. Results are ranked, so the cap drops the
+/// least relevant rather than an arbitrary slice, and the count line says
+/// when it did.
 pub const MAX_ROWS: usize = 60;
 
 /// Filters and ranks the catalog against a query.
@@ -117,6 +154,19 @@ pub fn format_context(n: Option<i64>) -> String {
     }
 }
 
+/// The meta line under a chosen model, or `None` when the catalog cannot
+/// say anything about it.
+///
+/// Deliberately absent rather than a placeholder when unknown. The value
+/// row's third line is a fact about the model or it is not there; a
+/// rendered "—" or "unknown" would be noise on the common path where the
+/// catalog simply has not been fetched yet.
+pub fn chosen_meta(models: &[ModelInfoView], id: &str) -> Option<String> {
+    let model = models.iter().find(|m| m.id == id)?;
+    let ctx = format_context(model.context_length);
+    (!ctx.is_empty()).then_some(ctx)
+}
+
 #[component]
 pub fn ModelPicker(
     tier: Tier,
@@ -153,14 +203,11 @@ pub fn ModelPicker(
             .collect()
     };
 
-    let close = move |_| on_close.call(());
-    let pick = move |id: String| on_pick.call(id);
-
     rsx! {
         div {
             class: "wl-modal-backdrop wl-picker-backdrop",
             role: "presentation",
-            onclick: close,
+            onclick: move |_| on_close.call(()),
             div {
                 class: "wl-picker-sheet",
                 role: "dialog",
@@ -173,18 +220,18 @@ pub fn ModelPicker(
                         class: "wl-picker-close",
                         aria_label: "Close",
                         onclick: move |_| on_close.call(()),
-                        "✕"
+                        IconClose {}
                     }
                 }
                 p { class: "wl-picker-sub",
                     "{provider} · {models.len()} models"
                     if cached { span { class: "wl-picker-cached", " · cached" } }
                     // Say so when the numbers are canned. Under `dx serve`
-                    // every shell command is replaced by
-                    // `invoke-shim.js`, so the list is invented and no API
-                    // call is made — and a fabricated model list looks
-                    // exactly like a real one from the outside. This cost
-                    // a whole test cycle once already.
+                    // every shell command is replaced by `invoke-shim.js`,
+                    // so the list is invented and no API call is made — and
+                    // a fabricated model list looks exactly like a real
+                    // one from the outside. This cost a whole test cycle
+                    // once already.
                     if crate::app::transport() == "mock" {
                         span { class: "wl-picker-mock", " · MOCK DATA" }
                     }
@@ -237,7 +284,7 @@ pub fn ModelPicker(
                             for m in rec.iter().take(6) {
                                 ModelRow {
                                     model: (*m).clone(),
-                                    on_pick: pick,
+                                    on_pick: move |id: String| on_pick.call(id),
                                 }
                             }
                             div { class: "wl-picker-group", "All models" }
@@ -245,11 +292,11 @@ pub fn ModelPicker(
                         for m in results.iter().take(MAX_ROWS) {
                             ModelRow {
                                 model: (*m).clone(),
-                                on_pick: pick,
+                                on_pick: move |id: String| on_pick.call(id),
                             }
                         }
                         if results.len() > shown {
-                            p { class: "wl-picker-more wl-mono",
+                            p { class: "wl-picker-more",
                                 "{shown} of {results.len()} — keep typing to narrow"
                             }
                         }
@@ -283,7 +330,7 @@ pub fn ModelPicker(
                                 // as a named provider error rather than
                                 // being silently dropped.
                                 flash(&ctx, &format!("USING {id}"));
-                                pick(id);
+                                on_pick.call(id);
                             },
                             "Use this id"
                         }
@@ -300,6 +347,69 @@ pub fn ModelPicker(
     }
 }
 
+/// The provider chooser.
+///
+/// Four rows and no search field, because four rows do not need one — the
+/// search input would be a control that does nothing useful at this size.
+/// The sheet is here for its *behaviour*, not its length: one open gesture
+/// and one list rendering, identical to the model sheet, and no native
+/// widget for WebKitGTK to paint white.
+#[component]
+pub fn ProviderPicker(
+    current: String,
+    on_pick: EventHandler<String>,
+    on_close: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div {
+            class: "wl-modal-backdrop wl-picker-backdrop",
+            role: "presentation",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "wl-picker-sheet",
+                role: "dialog",
+                aria_label: "AI provider",
+                onclick: move |e| e.stop_propagation(),
+
+                div { class: "wl-picker-head",
+                    h2 { class: "wl-picker-title", "AI provider" }
+                    button {
+                        class: "wl-picker-close",
+                        aria_label: "Close",
+                        onclick: move |_| on_close.call(()),
+                        IconClose {}
+                    }
+                }
+                p { class: "wl-picker-sub",
+                    "Your key is sealed in this device's vault. It is never written to the database and never sent to the relay."
+                }
+
+                div { class: "wl-picker-list",
+                    for (id, label) in PROVIDERS {
+                        button {
+                            class: "wl-picker-row",
+                            key: "{id}",
+                            onclick: move |_| on_pick.call(id.to_string()),
+                            span { class: "wl-picker-row-name",
+                                style: "grid-area: id; color: var(--wl-text-primary);",
+                                "{label}"
+                            }
+                            // A check mark, not a radio dot: it says
+                            // "this is chosen" without implying a form
+                            // the sheet does not have. Reserve its column
+                            // on every row so the labels stay on one
+                            // vertical axis whether or not one is chosen.
+                            if current == id {
+                                span { class: "wl-picker-row-ctx", "current" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn ModelRow(model: ModelInfoView, on_pick: EventHandler<String>) -> Element {
     let ctx_size = format_context(model.context_length);
@@ -308,10 +418,10 @@ fn ModelRow(model: ModelInfoView, on_pick: EventHandler<String>) -> Element {
         button {
             class: "wl-picker-row",
             onclick: move |_| on_pick.call(id.clone()),
-            span { class: "wl-picker-row-id wl-mono", "{model.id}" }
+            span { class: "wl-picker-row-id", "{model.id}" }
             span { class: "wl-picker-row-name", "{model.name}" }
             if !ctx_size.is_empty() {
-                span { class: "wl-picker-row-ctx wl-mono", "{ctx_size}" }
+                span { class: "wl-picker-row-ctx", "{ctx_size}" }
             }
         }
     }
@@ -424,5 +534,68 @@ mod tests {
         assert_eq!(format_context(None), "");
         assert_eq!(format_context(Some(0)), "");
         assert_eq!(format_context(Some(-1)), "");
+    }
+
+    /// The manual-mode entry is listed, not implied. "None" as an absent
+    /// value is not a choice a user can see they have made, and the
+    /// chooser is the only place that choice is offered.
+    #[test]
+    fn manual_mode_is_a_listed_choice_not_an_implicit_one() {
+        assert_eq!(PROVIDERS[0].0, "", "manual mode must be first");
+        assert!(
+            !PROVIDERS[0].1.is_empty(),
+            "an empty id must still carry a visible label"
+        );
+        assert_eq!(provider_label(""), "None — manual mode");
+    }
+
+    /// Every id the shell's vault namespaces by has to render as its
+    /// human name, and a name must never render as its own id — that is
+    /// what put a raw wire value in front of a user once.
+    #[test]
+    fn every_known_provider_id_has_its_own_label() {
+        for (id, label) in PROVIDERS {
+            assert_eq!(provider_label(id), label, "{id} lost its label");
+            assert!(!label.is_empty());
+        }
+        // Two of the three real ids ARE their own display name. That is
+        // fine — the rule this test actually protects is that a label is
+        // never MISSING, not that it is always different from the wire
+        // value. `bytez.com` and `google` are how these providers spell
+        // themselves; inventing "Bytez" would be a guess about a
+        // third-party brand.
+        assert_eq!(provider_label("bytez.com"), "bytez.com");
+        assert_eq!(provider_label("google"), "Google");
+        // The one that genuinely needed renaming.
+        assert_eq!(provider_label("openrouter"), "OpenRouter");
+    }
+
+    /// A vault key written by a newer build names a provider this build
+    /// has never heard of. Showing a blank row would look like the key had
+    /// vanished; showing the raw id at least tells the truth.
+    #[test]
+    fn an_unknown_provider_id_says_so_rather_than_rendering_nothing() {
+        assert_eq!(provider_label("future.provider"), "Unrecognised provider");
+    }
+
+    /// The value row's third line is a fact about the model or it is not
+    /// there. A rendered placeholder would sit under every unset slot and
+    /// train the eye to skip the line.
+    #[test]
+    fn the_meta_line_reports_a_fact_or_nothing_at_all() {
+        let c = catalog();
+        // 1,050,000 rounds to 1.1M at one decimal, not 1.0M — the fixture
+        // value is deliberately not a round million so a truncation bug
+        // would show up here rather than passing on a friendly number.
+        assert_eq!(chosen_meta(&c, "openai/gpt-5.4"), Some("1.1M".into()));
+        // A model the catalog has never heard of — a hand-entered id, or
+        // one released upstream since the last fetch.
+        assert_eq!(chosen_meta(&c, "vendor/not-fetched-yet"), None);
+        // Present in the catalog, but with no usable context figure.
+        assert_eq!(
+            chosen_meta(&[m("vendor/bare", "Bare", None)], "vendor/bare"),
+            None
+        );
+        assert_eq!(chosen_meta(&[], "openai/gpt-5.4"), None);
     }
 }

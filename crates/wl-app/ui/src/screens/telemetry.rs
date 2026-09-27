@@ -23,7 +23,6 @@ pub fn TelemetryDrawer() -> Element {
     // MVP-4: last completed sync cycle, so quarantined ops and the
     // pull cursor are inspectable instead of silent.
     let mut last_sync = use_signal(|| None::<SyncDetail>);
-    let s = ctx.settings.read().clone();
     let sync = ctx.sync_status.read().clone();
     let v = ctx.velocity.read().clone();
     // Milestone moved here from the canvas header bar (see canvas.rs):
@@ -35,19 +34,23 @@ pub fn TelemetryDrawer() -> Element {
         .as_ref()
         .and_then(|d| d.milestone_title.clone())
         .unwrap_or_else(|| "No milestone".to_string());
-    let provider_label = s
+    let provider_label = ctx
+        .settings
+        .read()
         .ai_provider
         .clone()
         .unwrap_or_else(|| "none (manual mode)".into());
-    let relay_label = s
+    let relay_label = ctx
+        .settings
+        .read()
         .relay_url
         .clone()
         .unwrap_or_else(|| "no relay configured".into());
-    let pin_label = if s.always_on_top {
-        "always on top"
-    } else {
-        "floating"
-    };
+    // No pin read-out. "Pin above other windows" was a per-OS-window
+    // preference with a switch in Settings; both are gone (PRD delta 175),
+    // so a line reporting it would describe a setting that no longer
+    // exists. The window geometry line below is still true and still
+    // worth saying.
 
     rsx! {
         div {
@@ -66,22 +69,22 @@ pub fn TelemetryDrawer() -> Element {
                     }
                 }
 
-                div { class: "wl-field",
-                    label { class: "wl-label", "Local vault (Stronghold)" }
+                div { class: "wl-drawer-block",
+                    span { class: "wl-fieldset-label", "Local vault (Stronghold)" }
                     p { class: "wl-body-muted", "Status: unlocked in-process · XChaCha20-Poly1305 snapshot" }
                     p { class: "wl-body-muted wl-mono", "Key: 32-byte CSPRNG secret · 0600 file · KDF work factor 0" }
                     p { class: "wl-seed-sub", "A local encrypted file in your data dir — the OS keychain is not wired up yet." }
                     p { class: "wl-body-muted", "Provider: {provider_label}" }
                 }
 
-                div { class: "wl-field",
-                    label { class: "wl-label", "Current line" }
+                div { class: "wl-drawer-block",
+                    span { class: "wl-fieldset-label", "Current line" }
                     p { class: "wl-body-muted wl-mono", "Milestone: {milestone_label}" }
                     p { class: "wl-body-muted wl-mono", "Sync status: {sync}" }
                 }
 
-                div { class: "wl-field",
-                    label { class: "wl-label", "CRDT synchronization runtime" }
+                div { class: "wl-drawer-block",
+                    span { class: "wl-fieldset-label", "CRDT synchronization runtime" }
                     p { class: "wl-body-muted wl-mono", "Hybrid Logical Clock: — (no shell command)" }
                     p { class: "wl-body-muted wl-mono", "Relay: {relay_label}" }
                     p { class: "wl-body-muted wl-mono", "SQLite WAL size: — (no shell command)" }
@@ -92,10 +95,9 @@ pub fn TelemetryDrawer() -> Element {
                     }
                 }
 
-                div { class: "wl-field",
-                    label { class: "wl-label", "Desktop viewport runtime" }
+                div { class: "wl-drawer-block",
+                    span { class: "wl-fieldset-label", "Desktop viewport runtime" }
                     p { class: "wl-body-muted wl-mono", "Window geometry: 420px × 747px (9:16 fixed)" }
-                    p { class: "wl-body-muted wl-mono", "Pin to top: {pin_label}" }
                     button {
                         class: "wl-btn-ghost",
                         disabled: *busy.read(),

@@ -21,6 +21,14 @@
 //!   SVG inside a button is not independently focusable regardless.)
 //! * Sizing is CSS (`.wl-icon` + a per-icon modifier), never a
 //!   `width`/`height` attribute, so one rule controls all of them.
+//!
+//! **There are no glyph exceptions left.** The `✚` on the control panel's
+//! primary action and the `✕` in the choice sheet were both defended as
+//! "unambiguous at small sizes". That was true of their SHAPE and false
+//! of their rendering: a glyph's weight, spacing and — on many Linux
+//! desktops — its colour are chosen by the font stack, which is exactly
+//! the drift this set exists to remove. Three glyphs were still live as of
+//! the 2026-09-27 redesign and all three are now paths.
 
 use dioxus::prelude::*;
 
@@ -205,6 +213,85 @@ pub fn IconVelocity() -> Element {
             path { d: "M2.75 13.25a7.5 7.5 0 0 1 12.5 0" }
             path { d: "M9 13.25 12.4 7.9" }
             path { d: "M9 13.25h.01" }
+        },
+    )
+}
+
+/// New objective — a plus.
+///
+/// Replaces the `✚` glyph on the control panel's primary action. The plus
+/// is the right mark; a glyph was the wrong way to draw it. Drawn on the
+/// same 18-unit grid as the menu so the two share a stroke weight, at
+/// equal arm lengths (9,9) crossing (5.5, 5.5)→(12.5, 12.5).
+#[component]
+pub fn IconNew() -> Element {
+    frame(
+        "wl-icon-new",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M9 3.75v10.5M3.75 9h10.5" }
+        },
+    )
+}
+
+/// Chevron right — the trailing affordance on every row that opens
+/// something.
+///
+/// Replaces a `›` glyph, which is why the old rows looked ragged: the
+/// glyph's size and baseline came from whatever font the system resolved,
+/// so the same mark sat at three different heights across three sheets.
+/// One path, sized once in CSS.
+///
+/// Stroked at the standard 1.6 like the rest of the set rather than filled,
+/// so it weighs the same as the label it points at instead of outweighing
+/// it. A 15px chevron in a 20px icon column is 2.4px of stroke at
+/// render size, which is the most a 15px mark can carry without smearing.
+#[component]
+pub fn IconChevron() -> Element {
+    frame(
+        "wl-icon-chevron",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M7.25 4.5 12.75 9l-5.5 4.5" }
+        },
+    )
+}
+
+/// Close — a cross.
+///
+/// Replaces the `✕` glyph in the choice sheet, for the same reason the
+/// others went: a text mark picks up the font stack's weight and colour.
+/// Drawn as two strokes on the same 18-unit grid with 10-unit arms inset
+/// 4 units, which is the proportion that reads as a close at 16px without
+/// crowding the box.
+#[component]
+pub fn IconClose() -> Element {
+    frame(
+        "wl-icon-close",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M4.75 4.75 13.25 13.25M13.25 4.75 4.75 13.25" }
+        },
+    )
+}
+
+/// Sync — two arcs and two arrowheads.
+///
+/// Settings' sync row. An arc pair rather than the `⇅` glyph the canvas
+/// used to carry, and drawn so the two halves clearly oppose: the top arc
+/// runs left-to-right and its head is on the right, the bottom runs
+/// right-to-left and its head is on the left. A symmetric double-headed
+/// bar reads as "up and down" as a menu, not as a cycle.
+#[component]
+pub fn IconSync() -> Element {
+    frame(
+        "wl-icon-sync",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M2.5 7.25a6 6 0 0 1 10.2-2.6l1.3 1.35" }
+            path { d: "M14 3.25v2.9h-2.9" }
+            path { d: "M15.5 10.75a6 6 0 0 1-10.2 2.6L4 12" }
+            path { d: "M4 14.75v-2.9h2.9" }
         },
     )
 }

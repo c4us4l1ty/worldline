@@ -70,7 +70,7 @@ pub fn CheckInScreen() -> Element {
             }
 
             if !*submitted.read() {
-                div { class: "wl-field",
+                div { class: "wl-fieldset",
                     textarea {
                         class: "wl-textarea",
                         placeholder: "Optional: what happened today?",

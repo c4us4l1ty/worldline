@@ -581,7 +581,7 @@ async fn write_through_syncs_all_tables() {
         .unwrap();
     let settings = AppSettings {
         relay_url: Some("http://127.0.0.1:8080".into()),
-        always_on_top: true,
+        theme: "light".into(),
         ..AppSettings::default()
     };
     a.save_settings(&settings, id).unwrap();
@@ -648,12 +648,76 @@ async fn write_through_syncs_all_tables() {
         .unwrap();
     assert_eq!(bail_count, 1);
 
+    // The settings row converged. `always_on_top` was the field this
+    // assertion used to check; it is gone with the pin feature (PRD delta
+    // 175), and `theme` replaces it so the row still proves more than one
+    // field survived the round trip.
     let settings_b = b.settings().unwrap();
     assert_eq!(
         settings_b.relay_url.as_deref(),
         Some("http://127.0.0.1:8080")
     );
-    assert!(settings_b.always_on_top);
+    assert_eq!(settings_b.theme, "light");
+}
+
+/// A settings op pushed by an OLD peer still carries the retired keys.
+///
+/// That is not an error: the columns were retired without a migration, so a
+/// mixed-version fleet is the normal case for as long as any device is
+/// un-updated, and the pull side is required to ignore the keys rather than
+/// reject the op. Rejecting would wedge that device's sync permanently
+/// instead of degrading it.
+///
+/// The op is written with a hand-crafted payload rather than through
+/// `save_settings`, because the whole point is to produce a row the current
+/// build could not have written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settings_op_from_an_old_peer_still_applies() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    // Exactly the payload the previous build's `settings_json` produced:
+    // `always_on_top` and `hotkey` present, everything else current.
+    a.enqueue_outbox(&identity, "app_settings", "1", &legacy_settings_payload())
+        .unwrap();
+    let pushed = sync_cycle(&a, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        pushed.pushed, 1,
+        "the legacy op must be pushed, not dropped"
+    );
+
+    let b = Repos::new(open_in_memory().unwrap(), 2);
+    let pulled = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(pulled.applied, 1, "the op must apply, not be rejected");
+
+    // The retired keys are not surfaced; everything else arrived intact.
+    let s = b.settings().unwrap();
+    assert_eq!(s.theme, "light");
+    assert_eq!(s.ai_provider.as_deref(), Some("openrouter"));
+    assert_eq!(s.tier1_model.as_deref(), Some("vendor/legacy"));
+    assert_eq!(s.relay_url.as_deref(), Some("http://legacy:8080"));
+}
+
+/// The settings op the previous build emitted, verbatim in shape.
+///
+/// `hotkey` and `always_on_top` are both present because both were real
+/// fields on the last release, and both are now retired. The payload is
+/// encrypted into the outbox by `enqueue_outbox` like any other op, so
+/// this is indistinguishable on the wire from something the old binary
+/// sent — which is exactly the case the pull side has to survive.
+fn legacy_settings_payload() -> serde_json::Value {
+    serde_json::json!({
+        "theme": "light",
+        "hotkey": "alt+space",
+        "always_on_top": 1,
+        "ai_provider": "openrouter",
+        "tier1_model": "vendor/legacy",
+        "tier2_model": null,
+        "relay_url": "http://legacy:8080",
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

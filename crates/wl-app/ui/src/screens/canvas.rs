@@ -61,8 +61,7 @@ pub fn CanvasScreen() -> Element {
                     { let mut s = ctx.escape_open; *s.write() = !open; }
                 }
             },
-            style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
-        // Floating controls (replaces the former full-width HUD bar).
+        // The canvas's only chrome.
         //
         // The header used to be a solid strip spanning the full width with
         // a `border-bottom`, carrying six elements: the menu, an Evening
@@ -70,29 +69,29 @@ pub fn CanvasScreen() -> Element {
         // and the timer. That bar dominated a canvas whose entire premise is
         // ONE directive and no chrome, and it squeezed the empty state into
         // a letterbox. The menu is now a floating circular control
-        // (top-left) and the timer a floating pill (top-right), both
         // overlaying the content the way the reference design does.
         //
         // Milestone, sync status, sync-now and Evening audit moved to the
         // telemetry drawer (Ctrl+,), which already rendered sync stats and
         // an always-visible Evening audit button — so nothing became
-        // unreachable. The timer deliberately STAYS on the canvas: it is the
-        // coral beacon and the only live-updating element, and a focus timer
-        // you cannot see is not a timer.
+        // unreachable. The session timer was removed entirely (2026-09-26):
+        // a focus timer you cannot see is not a timer, and elapsed time
+        // survives only as sync freshness in the telemetry drawer.
         div { class: "wl-float-layer",
             // The layer spans the full width but must stay transparent to
-            // input, so `pointer-events` is re-enabled on the controls.
+            // input, so `pointer-events` is re-enabled on the control.
             //
-            // This is the canvas's ONLY chrome now. The sync control that
-            // used to float opposite it was a 34px circle that reported
-            // nothing until tapped; sync is a settings concern, not a
-            // canvas one, so it moved to the Sync section of Settings,
-            // where it is a full-width row that also shows what the last
-            // cycle did. Nothing became unreachable — sync status and the
-            // Evening audit were already reachable from the Ctrl+,
-            // telemetry drawer.
+            // The sync control that used to float opposite this was a 34px
+            // circle that reported nothing until tapped; sync is a settings
+            // concern, not a canvas one, so it moved to the Sync section of
+            // Settings, where it is a full-width row that also shows what
+            // the last cycle did.
+            //
+            // `.wl-circle-btn` is the same 38px circle every page's back
+            // chevron uses — one definition for one control language, so
+            // this and the button at the top of Settings cannot drift apart.
             button {
-                class: "wl-float-btn wl-float-menu",
+                class: "wl-circle-btn wl-float-menu",
                 aria_label: "Open navigation",
                 title: "Navigation",
                 onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } },

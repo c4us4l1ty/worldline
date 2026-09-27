@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<!--
+  Worldline design preview — a static render of every screen's markup
+  against the real `public/wl.css`.
+
+  WHY THIS EXISTS. Verifying the UI has historically meant running the
+  Tauri shell (needs gtk/webkit headers) or `dx serve` and driving a real
+  browser. Both are slow, and `dx serve` needs the wasm module to boot
+  before anything is visible, which makes a headless screenshot of a
+  partially-booted app worthless. So the visual pass had been done by
+  reading the stylesheet, which is exactly how thirteen rules came to
+  reference a token that was defined nowhere.
+
+  This harness removes the wasm from the loop entirely: the markup below
+  is the same class structure the rsx emits, and it loads the same
+  stylesheet the app ships. What you see is what the app renders. It is
+  DEV-ONLY and deliberately NOT copied into the Tauri bundle — it lives
+  beside `index.html` rather than in `public/`, so `dx`'s asset copier
+  never sees it.
+
+  Open it directly:  firefox crates/wl-app/ui/preview.html
+  or serve the ui/ directory and visit /preview.html.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Worldline — design preview</title>
+    <link rel="stylesheet" href="./public/wl.css" />
+    <style>
+      /* Harness chrome ONLY. Nothing here touches a wl- class. */
+      body {
+        max-width: none;
+        background: #0a0a09;
+        overflow: auto;
+        padding: 40px 20px 80px;
+      }
+      .harness {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 40px;
+        align-items: flex-start;
+        justify-content: center;
+      }
+      .frame {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        align-items: center;
+      }
+      .frame > figcaption {
+        font: 500 12px ui-monospace, Menlo, monospace;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #6b6862;
+      }
+      /* Exactly the app's own viewport, so what is checked here is the
+         layout that ships. */
+      .phone {
+        width: 420px;
+        height: 747px;
+        position: relative;
+        overflow: hidden;
+        border-radius: 14px;
+        border: 1px solid #242422;
+        background: var(--wl-canvas);
+        display: flex;
+        flex-direction: column;
+        padding: 20px 18px 22px;
+      }
+      .phone > * { flex: 1; min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <div class="harness">
+
+      <!-- ================= CANVAS: active directive ================= -->
+      <figure class="frame">
+        <figcaption>canvas · directive</figcaption>
+        <div class="phone">
+          <div class="wl-root">
+            <div class="wl-float-layer">
+              <button class="wl-circle-btn wl-float-menu" aria-label="Open navigation">
+                <svg class="wl-icon wl-icon-menu" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
+              </button>
+            </div>
+            <main class="wl-directive-container">
+              <div class="wl-directive-card wl-card-enter">
+                <div class="wl-directive-step-badge">Phase 1 of 3 · 25 min</div>
+                <h1 class="wl-directive-title">Draft the initial schema migrations for SQLite persistence</h1>
+                <p class="wl-directive-instruction">Define tables for <code class="wl-code">identity_config</code> and <code class="wl-code">crdt_outbox</code>. Keep primary keys as deterministic UUIDv4. Do not wire API sync yet.</p>
+                <div class="wl-progress-track"><div class="wl-progress-bar" style="width: 34%"></div></div>
+              </div>
+            </main>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= CANVAS: empty ================= -->
+      <figure class="frame">
+        <figcaption>canvas · empty</figcaption>
+        <div class="phone">
+          <div class="wl-root">
+            <div class="wl-float-layer">
+              <button class="wl-circle-btn wl-float-menu" aria-label="Open navigation">
+                <svg class="wl-icon wl-icon-menu" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
+              </button>
+            </div>
+            <main class="wl-directive-container">
+              <div class="wl-directive-card">
+                <h1 class="wl-serif-title">No active directive.</h1>
+                <p class="wl-body-muted">Open the menu to create a goal or review settings.</p>
+              </div>
+            </main>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= CONTROL PANEL: with goals ================= -->
+      <figure class="frame">
+        <figcaption>control panel</figcaption>
+        <div class="phone" style="padding: 0">
+          <div class="wl-modal-backdrop wl-nav-backdrop" style="position: absolute">
+            <div class="wl-nav-sheet">
+              <div class="wl-nav-top">
+                <h2 class="wl-nav-wordmark">Worldline</h2>
+                <button class="wl-nav-close" aria-label="Close control panel">
+                  <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+                </button>
+              </div>
+              <div class="wl-scroll-region wl-nav-scroll">
+                <button class="wl-nav-primary">
+                  <span class="wl-nav-primary-glyph">
+                    <svg class="wl-icon wl-icon-new" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M9 3.75v10.5M3.75 9h10.5" /></svg>
+                  </span>
+                  <span>New goal</span>
+                </button>
+                <div class="wl-nav-group">
+                  <div class="wl-nav-label">System</div>
+                  <button class="wl-nav-row">
+                    <span class="wl-nav-row-icon">
+                      <svg class="wl-icon wl-icon-entropy" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12.5 6 9l2.5 2.2" /><path d="M11.5 9.5 15.5 6" /><path d="M6 9 8.5 11.2 10 9.5" /></svg>
+                    </span>
+                    <span class="wl-nav-row-label">Entropy Log</span>
+                    <span class="wl-nav-chevron">
+                      <svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg>
+                    </span>
+                  </button>
+                  <button class="wl-nav-row">
+                    <span class="wl-nav-row-icon">
+                      <svg class="wl-icon wl-icon-velocity" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.75 13.25a7.5 7.5 0 0 1 12.5 0" /><path d="M9 13.25 12.4 7.9" /><path d="M9 13.25h.01" /></svg>
+                    </span>
+                    <span class="wl-nav-row-label">Trajectory</span>
+                    <span class="wl-nav-chevron">
+                      <svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg>
+                    </span>
+                  </button>
+                </div>
+                <div class="wl-nav-group">
+                  <div class="wl-nav-label">Active worldlines</div>
+                  <div class="wl-worldline">
+                    <div class="wl-worldline-top">
+                      <span class="wl-worldline-title">Ship Worldline v0.1</span>
+                      <span class="wl-worldline-count">3 / 7</span>
+                    </div>
+                    <div class="wl-worldline-track"><div class="wl-worldline-fill" style="width: 43%"></div></div>
+                  </div>
+                  <div class="wl-worldline">
+                    <div class="wl-worldline-top">
+                      <span class="wl-worldline-title">Learn to sail properly</span>
+                      <span class="wl-worldline-count">0 / 4</span>
+                    </div>
+                    <div class="wl-worldline-track"><div class="wl-worldline-fill" style="width: 0%"></div></div>
+                  </div>
+                  <p class="wl-nav-more">+2 more</p>
+                </div>
+              </div>
+              <div class="wl-nav-foot">
+                <button class="wl-nav-row">
+                  <span class="wl-nav-row-icon">
+                    <svg class="wl-icon wl-icon-settings" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M19.05 9.15 L22.23 9.64 A10.5 10.5 0 0 1 22.23 14.36 L19.05 14.85 A7.6 7.6 0 0 1 17.99 16.68 M17.99 16.68 L19.16 19.68 A10.5 10.5 0 0 1 15.07 22.04 L13.06 19.53 A7.6 7.6 0 0 1 10.94 19.53 M10.94 19.53 L8.93 22.04 A10.5 10.5 0 0 1 4.84 19.68 L6.01 16.68 A7.6 7.6 0 0 1 4.95 14.85 M4.95 14.85 L1.77 14.36 A10.5 10.5 0 0 1 1.77 9.64 L4.95 9.15 A7.6 7.6 0 0 1 6.01 7.32 M6.01 7.32 L4.84 4.32 A10.5 10.5 0 0 1 8.93 1.96 L10.94 4.47 A7.6 7.6 0 0 1 13.06 4.47 M13.06 4.47 L15.07 1.96 A10.5 10.5 0 0 1 19.16 4.32 L17.99 7.32 A7.6 7.6 0 0 1 19.05 9.15 M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0Z" /></svg>
+                  </span>
+                  <span class="wl-nav-row-label">Settings</span>
+                  <span class="wl-nav-chevron">
+                    <svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= SETTINGS: top ================= -->
+      <figure class="frame">
+        <figcaption>settings · top</figcaption>
+        <div class="phone">
+          <div class="wl-page">
+            <div class="wl-page-head">
+              <button class="wl-circle-btn wl-back" aria-label="Back to the line">
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+              </button>
+              <h1 class="wl-page-title">Settings</h1>
+            </div>
+            <div class="wl-scroll-region">
+              <section class="wl-section">
+                <h2 class="wl-section-title">Identity</h2>
+                <div class="wl-fieldset">
+                  <p class="wl-status"><span class="wl-status-dot wl-status-dot-sealed"></span>unlocked · phrase held in memory</p>
+                  <p class="wl-hint">The phrase is never written to the database or the relay. Local directives work without it; sync and AI keys need it unlocked.</p>
+                </div>
+              </section>
+              <section class="wl-section">
+                <h2 class="wl-section-title">Appearance</h2>
+                <div class="wl-fieldset">
+                  <button class="wl-switch" role="switch" aria-checked="true">
+                    <span class="wl-switch-label">Dark graphite</span>
+                    <span class="wl-switch-track">
+                      <span class="wl-switch-knob">
+                        <svg class="wl-icon wl-icon-moon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" /></svg>
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              </section>
+              <section class="wl-section">
+                <h2 class="wl-section-title">Intelligence</h2>
+                <div class="wl-fieldset">
+                  <button class="wl-value-row">
+                    <span class="wl-value-row-label">AI provider</span>
+                    <span class="wl-value-row-value">OpenRouter</span>
+                    <span class="wl-value-row-go"><svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg></span>
+                  </button>
+                  <p class="wl-hint">Manual mode plans goals from your own words and makes no API calls. Choosing a provider lets the architect name the goal and build the milestone tree.</p>
+                </div>
+                <div class="wl-fieldset">
+                  <button class="wl-value-row">
+                    <span class="wl-value-row-label">Architect model</span>
+                    <span class="wl-value-row-value">nvidia/nemotron-3.5-lightning:free</span>
+                    <span class="wl-value-row-meta">128k context</span>
+                    <span class="wl-value-row-go"><svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg></span>
+                  </button>
+                </div>
+                <div class="wl-fieldset">
+                  <button class="wl-value-row">
+                    <span class="wl-value-row-label">Dispatcher model</span>
+                    <span class="wl-value-row-value wl-value-row-value--empty">Not selected</span>
+                    <span class="wl-value-row-go"><svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg></span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= SETTINGS: bottom ================= -->
+      <figure class="frame">
+        <figcaption>settings · bottom</figcaption>
+        <div class="phone">
+          <div class="wl-page">
+            <div class="wl-page-head">
+              <button class="wl-circle-btn wl-back" aria-label="Back to the line">
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+              </button>
+              <h1 class="wl-page-title">Settings</h1>
+            </div>
+            <div class="wl-scroll-region" style="padding-top: 320px">
+              <section class="wl-section">
+                <h2 class="wl-section-title">Intelligence</h2>
+                <div class="wl-fieldset">
+                  <div class="wl-catalog-status">
+                    <span class="wl-mono">443 models · cached</span>
+                    <button class="wl-btn-ghost wl-btn-compact">Refresh models</button>
+                  </div>
+                </div>
+                <div class="wl-fieldset">
+                  <span class="wl-fieldset-label">API key</span>
+                  <input class="wl-input wl-input--mono" type="password" placeholder="Sealed into this device's vault" />
+                  <div class="wl-inline-actions">
+                    <button class="wl-btn-ghost">Replace vault key</button>
+                    <span class="wl-chip">sealed</span>
+                    <button class="wl-btn-ghost wl-btn-compact wl-btn-danger">Remove</button>
+                  </div>
+                  <p class="wl-hint">Sealed into the local Stronghold vault, then cleared from this field. Never written to the database, never sent to the relay.</p>
+                </div>
+              </section>
+              <section class="wl-section">
+                <h2 class="wl-section-title">Sync</h2>
+                <div class="wl-fieldset">
+                  <span class="wl-fieldset-label">Relay URL</span>
+                  <input class="wl-input wl-input--mono" type="text" value="http://127.0.0.1:8080" />
+                  <div class="wl-inline-actions">
+                    <button class="wl-btn-ghost wl-btn-compact">Test connection</button>
+                  </div>
+                </div>
+                <div class="wl-fieldset">
+                  <button class="wl-sync-cta">
+                    <span class="wl-sync-cta-icon">
+                      <svg class="wl-icon wl-icon-sync" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7.25a6 6 0 0 1 10.2-2.6l1.3 1.35" /><path d="M14 3.25v2.9h-2.9" /><path d="M15.5 10.75a6 6 0 0 1-10.2 2.6L4 12" /><path d="M4 14.75v-2.9h2.9" /></svg>
+                    </span>
+                    <span>Sync now</span>
+                  </button>
+                  <p class="wl-status wl-sync-meta">SYNCED · 42s ago</p>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= COMPOSE ================= -->
+      <figure class="frame">
+        <figcaption>compose</figcaption>
+        <div class="phone">
+          <div class="wl-page">
+            <div class="wl-page-bar">
+              <button class="wl-circle-btn wl-back" aria-label="Back to the line">
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+              </button>
+              <select class="wl-horizon" aria-label="Target date">
+                <option>1 month</option>
+              </select>
+            </div>
+            <h1 class="wl-page-title wl-page-title--compose">State the Objective</h1>
+            <textarea class="wl-compose" rows="1" placeholder="What do you want to accomplish?"></textarea>
+            <div class="wl-actions-row">
+              <button class="wl-btn-primary">Generate</button>
+              <button class="wl-btn-ghost">Create manually</button>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= CHOICE SHEET ================= -->
+      <figure class="frame">
+        <figcaption>choice sheet</figcaption>
+        <div class="phone" style="padding: 0">
+          <div class="wl-modal-backdrop wl-picker-backdrop" style="position: absolute">
+            <div class="wl-picker-sheet">
+              <div class="wl-picker-head">
+                <h2 class="wl-picker-title">Architect model</h2>
+                <button class="wl-picker-close" aria-label="Close">
+                  <svg class="wl-icon wl-icon-close" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4.75 4.75 13.25 13.25M13.25 4.75 4.75 13.25" /></svg>
+                </button>
+              </div>
+              <p class="wl-picker-sub">openrouter · 443 models · cached</p>
+              <div class="wl-picker-search">
+                <input class="wl-input wl-picker-input" type="search" placeholder="Search models…" />
+              </div>
+              <div class="wl-picker-list">
+                <div class="wl-picker-group">Recommended</div>
+                <button class="wl-picker-row">
+                  <span class="wl-picker-row-id">anthropic/claude-sonnet-5</span>
+                  <span class="wl-picker-row-name">Anthropic: Claude Sonnet 5</span>
+                  <span class="wl-picker-row-ctx">1.0M</span>
+                </button>
+                <button class="wl-picker-row">
+                  <span class="wl-picker-row-id">openai/gpt-5.4</span>
+                  <span class="wl-picker-row-name">OpenAI: GPT-5.4</span>
+                  <span class="wl-picker-row-ctx">1.1M</span>
+                </button>
+                <div class="wl-picker-group">All models</div>
+                <button class="wl-picker-row">
+                  <span class="wl-picker-row-id">nvidia/nemotron-3.5-lightning:free</span>
+                  <span class="wl-picker-row-name">NVIDIA: Nemotron 3.5 Lightning</span>
+                  <span class="wl-picker-row-ctx">128k</span>
+                </button>
+                <p class="wl-picker-more">60 of 443 — keep typing to narrow</p>
+              </div>
+              <div class="wl-picker-manual">
+                <button class="wl-picker-manual-toggle">Enter a model id instead</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= ESCAPE HATCH ================= -->
+      <figure class="frame">
+        <figcaption>escape hatch</figcaption>
+        <div class="phone" style="padding: 0">
+          <div class="wl-modal-backdrop wl-modal-centered" style="position: absolute">
+            <div class="wl-modal-sheet wl-modal-centered-sheet">
+              <h2 class="wl-modal-header">Diagnostic: escape hatch</h2>
+              <p class="wl-modal-sub">Select stall cause. Worldline will recalibrate your velocity with zero punitive alarms.</p>
+              <input class="wl-input" type="text" placeholder="Optional context (max 140 chars)" />
+              <p class="wl-char-count">0/140</p>
+              <button class="wl-bailout-reason" aria-pressed="false">
+                <div class="wl-bailout-reason-title">[1] Dependency blocked</div>
+                <div class="wl-bailout-reason-sub">Waiting for 3rd party API, merge, or response.</div>
+              </button>
+              <button class="wl-bailout-reason" aria-pressed="true">
+                <div class="wl-bailout-reason-title">[2] Scope miscalculation</div>
+                <div class="wl-bailout-reason-sub">Directive exceeds allotted time boundary (&gt;2x). Dispatcher splits it; quota untouched.</div>
+              </button>
+              <button class="wl-bailout-reason" aria-pressed="false">
+                <div class="wl-bailout-reason-title">[3] Cognitive / energy depletion</div>
+                <div class="wl-bailout-reason-sub">Focus ceiling reached; request a downscaled task + 10-minute rest.</div>
+              </button>
+              <button class="wl-btn-primary">Confirm bailout</button>
+              <button class="wl-btn-escape"><span>Resume execution directive</span><kbd class="wl-kbd-subtle">Esc</kbd></button>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= ENTROPY LOG ================= -->
+      <figure class="frame">
+        <figcaption>entropy log</figcaption>
+        <div class="phone">
+          <div class="wl-page">
+            <div class="wl-page-head">
+              <button class="wl-circle-btn wl-back" aria-label="Back to the line">
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+              </button>
+              <h1 class="wl-page-title">Entropy Log</h1>
+            </div>
+            <div class="wl-scroll-region">
+              <p class="wl-entropy-summary">4 events · 2 energy · 1 scope · 1 external · 1 still blocked</p>
+              <div class="wl-entropy-group">
+                <h2 class="wl-entropy-goal">Ship Worldline v0.1</h2>
+                <div class="wl-entropy-entry">
+                  <div class="wl-entropy-row">
+                    <span class="wl-entropy-date">21 Sep</span>
+                    <span class="wl-entropy-reason">Scope miscalculation</span>
+                    <span class="wl-chip">blocked</span>
+                  </div>
+                  <p class="wl-entropy-directive">Draft Section 2.1</p>
+                  <p class="wl-entropy-note">"kept re-reading, no forward motion"</p>
+                </div>
+                <div class="wl-entropy-entry">
+                  <div class="wl-entropy-row">
+                    <span class="wl-entropy-date">19 Sep</span>
+                    <span class="wl-entropy-reason">Cognitive / energy depletion</span>
+                  </div>
+                  <p class="wl-entropy-directive">Send the contract to legal</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= TRAJECTORY ================= -->
+      <figure class="frame">
+        <figcaption>trajectory</figcaption>
+        <div class="phone">
+          <div class="wl-page">
+            <div class="wl-page-head">
+              <button class="wl-circle-btn wl-back" aria-label="Back to the line">
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l3 3" /></svg>
+              </button>
+              <h1 class="wl-page-title">Trajectory</h1>
+            </div>
+            <div class="wl-scroll-region">
+              <div class="wl-directive-card wl-traj-card">
+                <div class="wl-traj-pace">
+                  <span class="wl-traj-pace-label">Easing</span>
+                  <span class="wl-traj-pace-note">observed</span>
+                </div>
+                <div class="wl-traj-grid">
+                  <div class="wl-traj-cell"><span class="wl-traj-k">Remaining scope</span><span class="wl-traj-v">3</span><span class="wl-traj-u">milestones</span></div>
+                  <div class="wl-traj-cell"><span class="wl-traj-k">Days to horizon</span><span class="wl-traj-v">21</span><span class="wl-traj-u">days</span></div>
+                  <div class="wl-traj-cell"><span class="wl-traj-k">Required velocity</span><span class="wl-traj-v">0.14</span><span class="wl-traj-u">per day</span></div>
+                  <div class="wl-traj-cell"><span class="wl-traj-k">Rolling average</span><span class="wl-traj-v">0.80</span><span class="wl-traj-u">completion</span></div>
+                </div>
+                <p class="wl-body-muted wl-traj-formula">V_target = remaining milestones / remaining days</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= SEED VAULT ================= -->
+      <figure class="frame">
+        <figcaption>seed vault</figcaption>
+        <div class="phone">
+          <div class="wl-scroll-region">
+            <section class="wl-seed-vault">
+              <div class="wl-seed-header">
+                <h2 class="wl-serif-title">Secret <span class="wl-italic-accent">recovery</span> phrase</h2>
+                <p class="wl-seed-sub">Write these down in exact sequence. Worldline has no email servers to recover them.</p>
+              </div>
+              <div class="wl-seed-grid">
+                <div class="wl-seed-token"><span class="wl-seed-num">01</span> beacon</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">02</span> orbit</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">03</span> silence</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">04</span> dynamic</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">05</span> marble</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">06</span> drift</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">07</span> lattice</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">08</span> kinetic</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">09</span> harbor</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">10</span> canyon</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">11</span> velvet</div>
+                <div class="wl-seed-token"><span class="wl-seed-num">12</span> anchor</div>
+              </div>
+              <button class="wl-btn-primary">I saved the words</button>
+            </section>
+          </div>
+        </div>
+      </figure>
+
+      <!-- ================= LIGHT THEME ================= -->
+      <figure class="frame">
+        <figcaption>light parchment</figcaption>
+        <div class="phone" data-theme="light" style="--wl-canvas: var(--wl-light-canvas); --wl-surface-card: var(--wl-light-card); --wl-surface-elevated: var(--wl-light-elevated); --wl-text-primary: var(--wl-light-text-primary); --wl-text-secondary: var(--wl-light-text-secondary); --wl-text-muted: var(--wl-light-text-muted); --wl-border-subtle: rgba(29,28,19,0.10); --wl-border-strong: rgba(29,28,19,0.18); --wl-accent-coral: #D8583B; --wl-cta-bg: var(--wl-light-cta); --wl-text-inverse: var(--wl-light-cta-text); color-scheme: light">
+          <div class="wl-page">
+            <div class="wl-page-head">
+              <button class="wl-circle-btn wl-back" aria-label="Back to the line">
+                <svg class="wl-icon wl-icon-back" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 3.5 5.5 9l5.5 5.5" /></svg>
+              </button>
+              <h1 class="wl-page-title">Settings</h1>
+            </div>
+            <div class="wl-scroll-region">
+              <section class="wl-section">
+                <h2 class="wl-section-title">Appearance</h2>
+                <div class="wl-fieldset">
+                  <button class="wl-switch" role="switch" aria-checked="false">
+                    <span class="wl-switch-label">Light parchment</span>
+                    <span class="wl-switch-track">
+                      <span class="wl-switch-knob">
+                        <svg class="wl-icon wl-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 1 0 0-10Z" /><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" /></svg>
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              </section>
+              <section class="wl-section">
+                <h2 class="wl-section-title">Intelligence</h2>
+                <div class="wl-fieldset">
+                  <button class="wl-value-row">
+                    <span class="wl-value-row-label">AI provider</span>
+                    <span class="wl-value-row-value wl-value-row-value--empty">None — manual mode</span>
+                    <span class="wl-value-row-go"><svg class="wl-icon wl-icon-chevron" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.25 4.5 12.75 9l-5.5 4.5" /></svg></span>
+                  </button>
+                  <p class="wl-hint">Manual mode plans goals from your own words and makes no API calls.</p>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </figure>
+
+    </div>
+  </body>
+</html>

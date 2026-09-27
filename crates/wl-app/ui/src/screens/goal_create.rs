@@ -235,12 +235,19 @@ pub fn GoalCreateScreen() -> Element {
             // a row with the title.
             div { class: "wl-page-bar",
                 button {
-                    class: "wl-back",
+                    class: "wl-circle-btn wl-back",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
                     IconBack {}
-                }
+                },
+                // The last native `<select>` in the app. It is the one
+                // that earns the exemption: a small closed control with no
+                // catalog to search, no row to render, and — unlike the
+                // provider select that used to sit in Settings — it has
+                // never painted a white box. The provider needed a sheet
+                // for its own reasons (a native widget cannot host the
+                // model list, and could not be trusted to restyle at all).
                 select {
                     class: "wl-horizon",
                     aria_label: "Target date",

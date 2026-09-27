@@ -87,13 +87,13 @@ pub fn TrajectoryScreen() -> Element {
         div { class: "wl-page",
             div { class: "wl-page-head",
                 button {
-                    class: "wl-back",
+                    class: "wl-circle-btn wl-back",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
                     IconBack {}
                 }
-                div { h1 { class: "wl-page-title", "Trajectory" } }
+                h1 { class: "wl-page-title", "Trajectory" }
             }
 
             div { class: "wl-scroll-region",
@@ -147,7 +147,7 @@ pub fn TrajectoryScreen() -> Element {
                             "No debt carried forward. The plan is recalculated from where you actually are, not from where you said you would be."
                         }
                 } else if loaded.is_none() {
-                    p { class: "wl-body-muted wl-traj-empty", "Computing the vector…" }
+                    p { class: "wl-body-muted", "Computing the vector…" }
                 } else {
                     div { class: "wl-directive-card",
                         h2 { class: "wl-traj-empty-title", "No vector to plot yet." }

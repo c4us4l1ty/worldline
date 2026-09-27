@@ -6,15 +6,30 @@
 //! browser, and the product's whole premise is that you should never be
 //! browsing — you should be looking at one directive.
 //!
-//! So the drawer stops being navigation and becomes the **map of the
+//! So the panel stops being navigation and becomes the **map of the
 //! user's operational reality**: where every active goal stands, and two
 //! read-outs about the system's own behaviour. Everything here answers
 //! "where am I?" without leaving the surface you are already on.
 //!
-//! Layout follows the reference the user pointed at (a sidebar with a
-//! primary action on top, grouped rows beneath, then a "Pinned"-style
-//! section at the bottom): a primary action, a System Telemetry group, an
-//! Active Worldlines readout, then Settings.
+//! The 2026-09-27 redesign fixed three things that made it read as
+//! inconsistent rather than as a system:
+//!
+//! * **The group labels were louder than the rows they headed.** The
+//!   `wl-nav-label` rule set `color: var(--wl-text-tertiary)`, and that
+//!   token is used thirteen times in `wl.css` and **defined in none of
+//!   them**. A declaration naming an undefined custom property is
+//!   invalid at computed-value time, so the property inherited — and
+//!   "SYSTEM TELEMETRY" rendered at full `--wl-text-primary` linen,
+//!   brighter than the 15px rows below it. The token does not exist any
+//!   more; group labels are the mono eyebrow at the 12px floor in
+//!   `--wl-text-muted`, which is genuinely quieter than what it labels.
+//! * **The sheet was 273px for 15px rows**, leaving ~200px of label
+//!   column after the icon gutter — too narrow for a goal title and a
+//!   count on one line. It is 312px now.
+//! * **The primary action and the trailing chevrons were font glyphs**
+//!   (`✚`, `›`), so their weight and colour came from the font stack
+//!   rather than from the theme. Both are inline SVG like everything
+//!   else in the app.
 //!
 //! **The worldlines are not buttons.** They are a readout. Making them
 //! navigable would promise a goal detail page that does not exist, and a
@@ -24,12 +39,18 @@
 use dioxus::prelude::*;
 
 use crate::app::{invoke, transport, AppCtx, GoalView, Screen};
+// Imported for their side effect on the macro namespace rather than by
+// name: these are referenced as `crate::icons::Icon… {}` at the call site
+// so the markup reads as the thing it renders, and a `use` here would be an
+// unused import warning for a type that is in fact used.
+#[allow(unused_imports)]
+use crate::icons::{IconBack, IconChevron, IconEntropy, IconNew, IconSettings, IconVelocity};
 
 /// How many worldlines the panel shows before folding the rest into a
-/// count. Four fills the panel with the telemetry group still fully
-/// visible; a fifth row would push Settings off the bottom, and Settings
+/// count. Three fills the panel with the telemetry group still fully
+/// visible; a fourth row would push Settings off the bottom, and Settings
 /// is not optional.
-pub const WORLDLINE_CAP: usize = 4;
+pub const WORLDLINE_CAP: usize = 3;
 
 /// Fraction of a goal's milestones completed, as a 0–100 percentage.
 ///
@@ -108,7 +129,7 @@ pub fn NavDrawer() -> Element {
                 onclick: move |e| e.stop_propagation(),
 
                 div { class: "wl-nav-top",
-                    h2 { class: "wl-nav-appname", "Worldline" }
+                    h2 { class: "wl-nav-wordmark", "Worldline" }
                     button {
                         class: "wl-nav-close",
                         aria_label: "Close control panel",
@@ -122,13 +143,13 @@ pub fn NavDrawer() -> Element {
                     button {
                         class: "wl-nav-primary",
                         onclick: go(Screen::GoalCreate),
-                        span { class: "wl-nav-primary-glyph", "✚" }
-                        span { "Create a goal" }
+                        span { class: "wl-nav-primary-glyph", crate::icons::IconNew {} }
+                        span { "New goal" }
                     }
 
-                    div { class: "wl-nav-section",
+                    div { class: "wl-nav-group",
                         div { class: "wl-nav-label",
-                            "System Telemetry"
+                            "System"
                             if mock {
                                 span { class: "wl-nav-mock", "· MOCK" }
                             }
@@ -138,30 +159,30 @@ pub fn NavDrawer() -> Element {
                             onclick: go(Screen::EntropyLog),
                             span { class: "wl-nav-row-icon", crate::icons::IconEntropy {} }
                             span { class: "wl-nav-row-label", "Entropy Log" }
-                            span { class: "wl-nav-chevron", "›" }
+                            span { class: "wl-nav-chevron", crate::icons::IconChevron {} }
                         }
                         button {
                             class: "wl-nav-row",
                             onclick: go(Screen::Trajectory),
                             span { class: "wl-nav-row-icon", crate::icons::IconVelocity {} }
                             span { class: "wl-nav-row-label", "Trajectory" }
-                            span { class: "wl-nav-chevron", "›" }
+                            span { class: "wl-nav-chevron", crate::icons::IconChevron {} }
                         }
                     }
 
-                    div { class: "wl-nav-section",
-                        div { class: "wl-nav-label", "Active Worldlines" }
+                    div { class: "wl-nav-group",
+                        div { class: "wl-nav-label", "Active worldlines" }
                         if let Some(list) = &loaded {
                             if list.is_empty() {
                                 p { class: "wl-nav-empty",
-                                    "No active goals. Create one and it appears here with a progress bar."
+                                    "No active goals yet. Create one and it appears here."
                                 }
                             } else {
                                 for g in shown.iter() {
                                     div { key: "{g.id}", class: "wl-worldline",
                                         div { class: "wl-worldline-top",
                                             span { class: "wl-worldline-title", "{g.title}" }
-                                            span { class: "wl-worldline-count wl-mono",
+                                            span { class: "wl-worldline-count",
                                                 "{g.milestone_done} / {g.milestone_total}"
                                             }
                                         }
@@ -174,7 +195,7 @@ pub fn NavDrawer() -> Element {
                                     }
                                 }
                                 if hidden > 0 {
-                                    p { class: "wl-nav-more wl-mono", "+{hidden} more" }
+                                    p { class: "wl-nav-more", "+{hidden} more" }
                                 }
                             }
                         } else {
@@ -189,7 +210,7 @@ pub fn NavDrawer() -> Element {
                         onclick: go(Screen::Settings),
                         span { class: "wl-nav-row-icon", crate::icons::IconSettings {} }
                         span { class: "wl-nav-row-label", "Settings" }
-                        span { class: "wl-nav-chevron", "›" }
+                        span { class: "wl-nav-chevron", crate::icons::IconChevron {} }
                     }
                 }
             }
@@ -235,11 +256,27 @@ mod tests {
         let goals: Vec<GoalView> = (0..6).map(|i| goal(&format!("G{i}"), i, 6)).collect();
         let (shown, hidden) = visible_worldlines(&goals);
         assert_eq!(shown.len(), WORLDLINE_CAP);
-        assert_eq!(hidden, 2);
+        assert_eq!(hidden, 3);
         // Order is preserved: the shell returns newest-first and the
         // panel must not reshuffle it.
         assert_eq!(shown[0].title, "G0");
-        assert_eq!(shown[3].title, "G3");
+        assert_eq!(shown[2].title, "G2");
+    }
+
+    /// The cap is load-bearing, not a preference. It is the only thing
+    /// keeping Settings — which is pinned to the floor of a 747px sheet
+    /// and is not optional — on screen when a user has six goals. Three
+    /// rows plus their bars is the most that fits under both group
+    /// headers with the panel scrolled to the top; a fourth pushes the
+    /// readout into the scroll region for no benefit, since there is no
+    /// goal detail page to navigate to anyway.
+    #[test]
+    fn the_cap_leaves_room_for_the_groups_above_and_settings_below() {
+        assert!(WORLDLINE_CAP >= 2, "one row is not a readout");
+        assert!(
+            WORLDLINE_CAP <= 4,
+            "past four, the panel scrolls and Settings falls off the bottom"
+        );
     }
 
     #[test]

@@ -60,7 +60,6 @@ fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         commands::sync_now,
         commands::master_plan,
         commands::list_models,
-        commands::set_always_on_top,
     ])
 }
 
@@ -74,22 +73,17 @@ fn main() {
             // for the snapshot format + Stronghold type.
             .setup(|app| {
                 let state = AppState::new(app.handle())?;
-                // The window pin is the only persisted window preference.
-                let pinned = state
-                    .repos
-                    .settings()
-                    .map(|s| s.always_on_top)
-                    .unwrap_or(false);
                 app.manage(Arc::new(state));
                 // Dark boot background: the webview paints #131312 before the
                 // first WASM frame instead of WebKit's white default, so the
-                // fixed 9:16 window never flashes a blank white page. The same
-                // handle restores the persisted pinned-window preference.
+                // fixed 9:16 window never flashes a blank white page.
+                //
+                // This handle used to also restore a persisted
+                // always-on-top preference. That setting is gone with its
+                // switch (PRD delta 175), so there is nothing to restore and
+                // the window is a plain floating window from here on.
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.set_background_color(Some(tauri::window::Color(19, 19, 18, 255)));
-                    if pinned {
-                        let _ = win.set_always_on_top(true);
-                    }
                 }
                 Ok(())
             }),

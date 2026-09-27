@@ -373,15 +373,55 @@ fn settings_default_and_save() {
     let r = setup();
     let s = r.settings().unwrap();
     assert_eq!(s.theme, "dark");
-    assert!(!s.always_on_top);
+    assert!(s.ai_provider.is_none());
+    assert!(s.relay_url.is_none());
 
     let mut s2 = s.clone();
-    s2.always_on_top = true;
+    s2.theme = "light".into();
     s2.tier1_model = Some("claude-sonnet".into());
+    s2.relay_url = Some("http://127.0.0.1:8080".into());
     r.save_settings(&s2, None).unwrap();
     let s3 = r.settings().unwrap();
-    assert!(s3.always_on_top);
+    assert_eq!(s3.theme, "light");
     assert_eq!(s3.tier1_model.as_deref(), Some("claude-sonnet"));
+    assert_eq!(s3.relay_url.as_deref(), Some("http://127.0.0.1:8080"));
+}
+
+/// The `hotkey` and `always_on_top` columns were removed as features
+/// without a schema migration: each keeps its `NOT NULL DEFAULT` and is
+/// simply never named in the INSERT or the SELECT.
+///
+/// The consequence worth pinning is that a row written by an OLD build —
+/// which does still set `always_on_top` — must be readable by this one
+/// without error, because a synced install is a mixed-version fleet for as
+/// long as any device is un-updated. If the SELECT ever starts naming the
+/// column, or starts requiring it, this test is what notices.
+#[test]
+fn settings_survive_a_row_written_by_a_build_that_still_had_the_pin() {
+    let r = setup();
+    // Exactly the statement the previous build used, pin column included.
+    r.lock_conn()
+        .execute(
+            "INSERT INTO app_settings (id, theme, always_on_top, ai_provider, tier1_model, tier2_model, relay_url, hlc_timestamp)
+             VALUES (1, 'dark', 1, 'openrouter', 'old/model', NULL, 'http://old:8080', '0.0.1:1:1')",
+            [],
+        )
+        .unwrap();
+
+    // Readable, and the retired field is simply not surfaced.
+    let s = r.settings().unwrap();
+    assert_eq!(s.theme, "dark");
+    assert_eq!(s.ai_provider.as_deref(), Some("openrouter"));
+    assert_eq!(s.tier1_model.as_deref(), Some("old/model"));
+    assert_eq!(s.relay_url.as_deref(), Some("http://old:8080"));
+
+    // And rewriting the row from this build does not fail on the column
+    // this build no longer names.
+    r.save_settings(&s, None).unwrap();
+    assert_eq!(
+        r.settings().unwrap().tier1_model.as_deref(),
+        Some("old/model")
+    );
 }
 
 #[test]

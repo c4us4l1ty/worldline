@@ -305,8 +305,6 @@ impl BailoutReason {
 pub struct AppSettings {
     /// Theme: `dark` (default) or `light`.
     pub theme: String,
-    /// `true` = window floats above other apps.
-    pub always_on_top: bool,
     /// AI provider: `openrouter` | `google` | `bytez.com` (BYOK).
     pub ai_provider: Option<String>,
     /// User-configurable model ids per tier (Tier 1 architect).
@@ -321,7 +319,6 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: "dark".into(),
-            always_on_top: false,
             ai_provider: None,
             tier1_model: None,
             tier2_model: None,
