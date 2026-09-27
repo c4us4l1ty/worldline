@@ -16,9 +16,9 @@
 //! silently-defaulted field.
 //!
 //! Snake_case is the convention the rest of the repo already speaks: the
-//! Rust params, the browser mock in `ui/public/invoke-shim.js`, the
-//! `AGENTS.md` rule, and the manual `create_manual_*` commands. Keeping
-//! it means a new multi-word parameter cannot break the app by existing.
+//! Rust params, the browser mock in `ui/public/invoke-shim.js`, and the
+//! `AGENTS.md` rule. Keeping it means a new multi-word parameter cannot
+//! break the app by existing.
 //! Single-word parameters are unaffected either way, so this changes
 //! nothing that already worked. `src/ipc_tests.rs` drives the real
 //! `generate_handler!` over a mock runtime to keep it that way.
@@ -369,77 +369,6 @@ pub struct GoalJson {
     pub target_date: Option<String>,
     pub milestone_done: usize,
     pub milestone_total: usize,
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn create_manual_milestone(
-    state: State<'_, std::sync::Arc<AppState>>,
-    goal_id: String,
-    title: String,
-    description: Option<String>,
-) -> ShellResult<String> {
-    let next = state
-        .repos
-        .lock_conn()
-        .query_row(
-            "SELECT COALESCE(MAX(order_index) + 1, 0) FROM milestones WHERE goal_id = ?1",
-            [&goal_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(|e| ShellError::Store(e.into()))?;
-    let m = state.with_identity_opt(|identity| {
-        state
-            .repos
-            .create_milestone(&goal_id, &title, description.as_deref(), next, identity)
-            .map_err(ShellError::from)
-    })?;
-    Ok(m.id)
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn create_manual_directive(
-    state: State<'_, std::sync::Arc<AppState>>,
-    milestone_id: String,
-    title: String,
-    execution_context: Option<String>,
-    estimated_minutes: i64,
-    scheduled_for_date: Option<String>,
-) -> ShellResult<String> {
-    let date = scheduled_for_date.unwrap_or_else(today_local);
-    let phases: Vec<(String, Option<String>, i64)> =
-        if estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES {
-            vec![
-                (format!("{title} — open and start (5 min)"), None, 5),
-                (
-                    format!("{title} — deep execution"),
-                    None,
-                    (estimated_minutes - 5).max(10),
-                ),
-            ]
-        } else {
-            vec![]
-        };
-    let total = if phases.is_empty() {
-        1
-    } else {
-        phases.len() as i64
-    };
-    let d = state.with_identity_opt(|identity| {
-        state
-            .repos
-            .create_directive(
-                &milestone_id,
-                &title,
-                execution_context.as_deref(),
-                estimated_minutes,
-                total,
-                &date,
-                &phases,
-                identity,
-            )
-            .map_err(ShellError::from)
-    })?;
-    Ok(d.id)
 }
 
 // ---------------------------------------------------------------------------

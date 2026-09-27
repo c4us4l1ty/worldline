@@ -143,8 +143,6 @@
         milestone_done: 0, milestone_total: 1,
       });
     },
-    create_manual_milestone: function (args) { return Promise.resolve('ms-' + Date.now()); },
-    create_manual_directive: function (args) { return Promise.resolve('dir-' + Date.now()); },
     sync_now: function () { return Promise.resolve({ pushed: 0, pulled: 0, applied: 0, pending: 0, quarantined: 0, cursor: '' }); },
     relay_authenticate: function () {
       // Real shell returns RelayAuthView { account_id, expires_at }

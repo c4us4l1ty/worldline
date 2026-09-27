@@ -63,10 +63,10 @@ unless `dx serve --port 1420` is already up.
   `missing required key`; an `Option<T>` param fails **silently** —
   `create_goal` bound without a deadline and the compose screen's
   horizon picker looked like it worked. Snake_case is what the Rust
-  params, `invoke-shim.js`, and the manual `create_manual_*` commands all
-  already spoke, so the shell is where the conversion belongs. Keep the
-  attribute on new commands; `src/ipc_tests.rs` drives the real
-  `generate_handler!` over a mock runtime and will fail if it is dropped.
+  params and `invoke-shim.js` already spoke, so the shell is where the
+  conversion belongs. Keep the attribute on new commands; `src/ipc_tests.rs`
+  drives the real `generate_handler!` over a mock runtime and will fail if it
+  is dropped.
   Struct params must still be wrapped (e.g. `{"settings": {...}}`); flat
   objects fail deserialization. The browser mock in `invoke-shim.js`
   ignores shapes — the shell test is the gate, not `dx serve`.

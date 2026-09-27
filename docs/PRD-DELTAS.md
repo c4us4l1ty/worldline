@@ -321,9 +321,10 @@ Locked decisions from the planning session are marked [approved].
     `Engine::current` activates it on the next canvas load with NO API
     key and NO unlocked identity. Core `Repos::create_goal` is
     unchanged (AI `persist_plan` must not inherit seeds). Directive
-    authoring UI is deferred to Phase-2 MVP-1; the
+    authoring UI was deferred to Phase-2 MVP-1, and the
     `create_manual_milestone` / `create_manual_directive` shell
-    commands already exist for it.
+    commands existed for it (both deleted in delta 157 — the compose
+    screen never called them; `create_goal` does the whole job).
 
 75. **`estimate_adjustment` is observed, not applied (MVP-3 honesty)** —
     `engine::velocity::compute` returns `adjustment = 0.6 + 0.4·ratio`
@@ -1576,3 +1577,39 @@ reproduction. If the hamburger still blinks, the next suspects are the
 backdrop fade itself (`160ms` on `--ease-tactile`, which front-loads
 almost all its motion into the first ~30ms) and the canvas's
 `wl-card-enter` re-running behind the scrim.
+
+## Dead shell surface (2026-09-27)
+
+157. **`create_manual_milestone` / `create_manual_directive` are
+    deleted.** Delta 74 shipped both as the authoring surface for
+    "Phase-2 MVP-1", and delta 118 counted them among the four
+    commands with multi-word parameters that needed
+    `rename_all = "snake_case"`. Nothing ever called them: the compose
+    screen's manual path sends the whole plan to the single
+    `create_goal`, which seeds the starter milestone + directive
+    itself (B-002). The commands were reachable from `generate_handler!`
+    and mocked in `invoke-shim.js`, so they read as a live contract —
+    but the only thing exercising them was `ipc_tests.rs`, i.e. the
+    test was the sole proof of a feature no user could reach. The
+    same dead-code call as delta 119 (`Screen::ByokSetup`), from the
+    other direction: that one was unreachable *in the UI*, these two
+    were uncalled *from* it.
+
+    Removed: both `#[tauri::command]` fns, their two
+    `generate_handler!` entries (`src/main.rs`), their two
+    `invoke-shim.js` fixtures, and the `create_manual_*` half of the
+    manual-path IPC test. `Repos::create_milestone` /
+    `Repos::create_directive` are **untouched** — `AiDispatcher::persist_plan`,
+    `persist_briefing`, and most of the core/engine/store/sync test
+    suites call them directly, so no core surface was orphaned.
+
+    The IPC test keeps the coverage that actually mattered. The two
+    commands' distinctive risk was a *silently* defaulted optional or
+    integer field — the delta-118 failure mode, where the call
+    succeeds and the data is simply gone. That risk survives on the
+    path users take: `create_goal`'s `target_date` is asserted in the
+    response **and** read back off the persisted goal row, and the
+    seeded directive's `execution_context` (an `Option`, sourced from
+    the goal description) and `estimated_minutes` (never sent by the
+    UI) are asserted off the row. `master_plan` covers the remaining
+    multi-word key set.

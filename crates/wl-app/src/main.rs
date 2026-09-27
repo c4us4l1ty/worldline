@@ -47,8 +47,6 @@ fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         commands::has_api_key,
         commands::delete_api_key,
         commands::create_goal,
-        commands::create_manual_milestone,
-        commands::create_manual_directive,
         commands::current_directive,
         commands::complete_directive,
         commands::bail_out,

@@ -28,6 +28,8 @@ use tauri::test::{get_ipc_response, MockRuntime};
 use tauri::webview::InvokeRequest;
 use tauri::Manager;
 
+use wl_core::domain::today_local;
+
 use crate::add_commands;
 use crate::app_state::AppState;
 use crate::vault::Vault;
@@ -128,8 +130,12 @@ fn assert_bound(result: &Result<serde_json::Value, String>, cmd: &str) {
     }
 }
 
-/// The manual authoring path, end to end through IPC: the compose
-/// screen's `create_goal`, then the two authoring commands behind it.
+/// The manual authoring path, end to end through IPC: the compose screen's
+/// `create_goal`, which is the ONLY shell entry point for authoring — it
+/// seeds the starter milestone + directive itself (B-002). The
+/// `create_manual_milestone` / `create_manual_directive` commands that used
+/// to sit behind it had no caller in `ui/src` and were deleted (PRD delta
+/// 157); the coverage they carried lives on in the two assertions below.
 ///
 /// Every step asserts a real success, so an unbound parameter is not a
 /// silent pass but a hard failure at the first step that uses it.
@@ -153,62 +159,36 @@ fn manual_authoring_binds_snake_case_payloads_through_ipc() {
     assert_eq!(created["title"], "Ship the relay");
     // The horizon picker resolves to a real calendar date before it
     // crosses the wire, so the store's shape-exact date check must
-    // accept what the UI produced.
+    // accept what the UI produced. This IS the silent-loss regression:
+    // `target_date` is an `Option`, so a key mismatch binds `None`, the
+    // goal persists with no deadline, and nothing anywhere errors.
     assert_eq!(created["target_date"], "2026-12-31");
 
-    // `create_manual_milestone(goal_id, title, description)`.
-    let milestone = call(
-        &app,
-        "create_manual_milestone",
-        serde_json::json!({
-            "goal_id": goal_id,
-            "title": "Wire format",
-            "description": serde_json::Value::Null,
-        }),
-    )
-    .expect("create_manual_milestone must bind and succeed");
-    assert_bound(&Ok(milestone.clone()), "create_manual_milestone");
-    let milestone_id = milestone.as_str().expect("milestone id").to_string();
-
-    // `create_manual_directive(milestone_id, title, execution_context,
-    // estimated_minutes, scheduled_for_date)` — four multi-word keys.
-    let scheduled = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let directive = call(
-        &app,
-        "create_manual_directive",
-        serde_json::json!({
-            "milestone_id": milestone_id,
-            "title": "Write the push validator",
-            "execution_context": "crates/wl-protocol/src/lib.rs",
-            "estimated_minutes": 25,
-            "scheduled_for_date": scheduled,
-        }),
-    )
-    .expect("create_manual_directive must bind and succeed");
-    let directive_id = directive.as_str().expect("directive id").to_string();
-
-    // The manual directive must be persisted with the exact field values
-    // the payload carried. `execution_context` and `estimated_minutes`
-    // are the two a key mismatch would quietly lose: both are
-    // `Option`/integer at the store boundary, so a row with them
-    // defaulted still satisfies every constraint the store checks.
-    //
-    // Not asserted through `current_directive`: `create_goal` seeds a
-    // runnable directive titled from the goal (B-002), and that one
-    // legitimately owns the canvas for today. Read the row back instead.
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let stored = state
+    let goal = state
         .repos
-        .directive(&directive_id)
-        .expect("directive lookup")
-        .expect("manual directive was persisted");
-    assert_eq!(stored.title, "Write the push validator");
+        .goal(&goal_id)
+        .expect("goal lookup")
+        .expect("manual goal was persisted");
+    assert_eq!(goal.target_date.as_deref(), Some("2026-12-31"));
+
+    // The seeded starter set is what the canvas actually renders, so its
+    // optional and integer fields are the ones a key mismatch would
+    // quietly default: `execution_context` comes from the goal's
+    // description, and the estimate is a bare number the UI never sends.
+    // Asserted through the row, not `current_directive`, because the
+    // seeded directive legitimately owns the canvas for today.
+    let seeded = state
+        .repos
+        .next_runnable_directive(&today_local())
+        .expect("runnable lookup")
+        .expect("create_goal seeds a runnable directive");
+    assert_eq!(seeded.title, "Ship the relay");
     assert_eq!(
-        stored.execution_context.as_deref(),
-        Some("crates/wl-protocol/src/lib.rs")
+        seeded.execution_context.as_deref(),
+        Some("Manual goal, no API key.")
     );
-    assert_eq!(stored.estimated_minutes, 25);
-    assert_eq!(stored.scheduled_for_date, scheduled);
+    assert_eq!(seeded.estimated_minutes, 25);
 }
 
 /// `master_plan(provider, model, intent, target_date)` cannot succeed in
