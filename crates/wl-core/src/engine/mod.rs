@@ -15,6 +15,16 @@ use crate::domain::*;
 use crate::store::repo::Repos;
 use crate::store::StoreError;
 
+/// The most steps a progressive directive is allowed to have.
+///
+/// Mirrors the planner's own ceiling (`2..=4`, PRD §5.2) with a little
+/// headroom, and exists so the phase-closing loop in `mark_complete` has a
+/// bound that does not come from a replicated integer. `progressive_total`
+/// arrives from a sealed payload with no cross-field check, so a step past
+/// the total is possible in principle and a loop that trusted it would be
+/// a spin on the ledger's one write.
+const MAX_PROGRESSIVE_STEPS: i64 = 8;
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("store: {0}")]
@@ -203,48 +213,47 @@ impl<'a> Engine<'a> {
     ) -> Result<EngineOutcome, EngineError> {
         crate::domain::check_date("date", date).map_err(StoreError::Invalid)?;
         let Some(d) = self.repos.directive(directive_id)? else {
-            return Err(StoreError::NotFound(format!(
-                "directive {directive_id}"
-            ))
-            .into());
+            return Err(StoreError::NotFound(format!("directive {directive_id}")).into());
         };
         if d.state == DirectiveState::Completed {
-            return Ok(EngineOutcome::DirectiveCompleted {
-                directive_id: d.id,
-            });
+            return Ok(EngineOutcome::DirectiveCompleted { directive_id: d.id });
         }
-        // Self-heal first, for the same reason `complete` does: a
-        // progressive directive whose phase rows went missing would make
-        // every `advance_progressive_step` fail, and the ledger would be
-        // the one surface that cannot tick a task off.
+        // Everything phase-related is inside this branch. It used to be a
+        // bare `while` afterwards, which sent a MONOLITHIC task — no phase
+        // rows at all — through `advance_progressive_step` and failed with
+        // "current or next phase missing". Ticking a 20-minute task is the
+        // single most common thing the ledger can be asked to do.
         if d.uses_progressive_activation() {
+            // Self-heal first, for the same reason `complete` does: a
+            // progressive directive whose phase rows went missing would
+            // make every `advance_progressive_step` fail, and the ledger
+            // would be the one surface that cannot tick a task off.
             self.current_phase_minutes(&d)?;
-        }
-        while d.progressive_step < d.progressive_total {
-            // `false` means the row moved under us (a concurrent sync
-            // merge). Re-read rather than trusting the snapshot, and bound
-            // the loop by the total so a peer that inflated
-            // `progressive_total` cannot spin it.
-            if !self
-                .repos
-                .advance_progressive_step(&d.id, self.identity)?
-            {
-                break;
+            // Advance until the LAST step is the current one, then close it.
+            // Two steps, not one loop: `advance_progressive_step` marks the
+            // step it leaves, so a loop alone ends with the final phase
+            // still `active` while the directive reads `completed`.
+            // `complete` has the same two-part shape for the same reason.
+            //
+            // The bound is explicit rather than reading `d.progressive_step`
+            // in the condition, because that field is NOT mutated in the
+            // body: the loop is driven by the store returning `true`, and a
+            // `progressive_total` a peer inflated would otherwise make
+            // "cannot spin" an argument rather than a fact.
+            for _ in 0..d.progressive_total.clamp(0, MAX_PROGRESSIVE_STEPS) {
+                // `false` means the row moved under us (a concurrent sync
+                // merge). Stop rather than spin; the directive still gets
+                // marked complete, which is what the user asked for.
+                if !self.repos.advance_progressive_step(&d.id, self.identity)? {
+                    break;
+                }
             }
-            let fresh = self
-                .repos
-                .directive(&d.id)?
-                .ok_or_else(|| StoreError::NotFound(format!("directive {}", d.id)))?;
-            if fresh.progressive_step >= d.progressive_total {
-                break;
-            }
+            self.repos.advance_progressive_step(&d.id, self.identity)?;
         }
         self.repos
             .set_directive_state(&d.id, DirectiveState::Completed, self.identity)?;
         self.maybe_complete_milestone(&d.milestone_id)?;
-        Ok(EngineOutcome::DirectiveCompleted {
-            directive_id: d.id,
-        })
+        Ok(EngineOutcome::DirectiveCompleted { directive_id: d.id })
     }
 
     // ------------------------------------------------------------------

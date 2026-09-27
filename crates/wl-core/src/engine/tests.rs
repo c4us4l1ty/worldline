@@ -2,7 +2,7 @@
 
 use crate::crypto::identity::Identity;
 use crate::domain::*;
-use crate::engine::{Engine, EngineOutcome, RecoveryAction};
+use crate::engine::{Engine, EngineOutcome};
 use crate::store::open_in_memory;
 use crate::store::repo::Repos;
 
@@ -11,7 +11,13 @@ pub(crate) fn setup_full() -> Repos {
     let conn = open_in_memory().unwrap();
     let r = Repos::new(conn, 1);
     let g = r
-        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), crate::domain::COMPLEXITY_DEFAULT, None)
+        .create_goal(
+            "Ship Worldline v0.1",
+            None,
+            Some("2026-10-01"),
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
         .unwrap();
     let m1 = r
         .create_milestone(&g.id, "Crypto core", None, 0, None)
@@ -28,9 +34,11 @@ pub(crate) fn setup_full() -> Repos {
         None,
         20,
         1,
-        "2026-09-13", None,
+        "2026-09-13",
+        None,
         &[],
-        None)
+        None,
+    )
     .unwrap();
     // Progressive 60-min directive today (2 phases).
     r.create_directive(
@@ -39,7 +47,8 @@ pub(crate) fn setup_full() -> Repos {
         Some("Draft prose, no editing"),
         60,
         2,
-        "2026-09-13", None,
+        "2026-09-13",
+        None,
         &[
             (
                 "Open IDE and write the function signature".into(),
@@ -48,7 +57,8 @@ pub(crate) fn setup_full() -> Repos {
             ),
             ("Implement core loop logic".into(), None, 25),
         ],
-        None)
+        None,
+    )
     .unwrap();
     r
 }
@@ -168,106 +178,163 @@ fn progressive_phases_advance_then_complete() {
     assert_eq!(d.state, DirectiveState::Completed);
 }
 
+// ---------------------------------------------------------------------------
+// mark_complete — the ledger's only write (2026-09-27)
+// ---------------------------------------------------------------------------
+
+/// A tick closes the WHOLE task, not one phase of it.
+///
+/// The ledger is task-level and a tick is a statement about the task, so
+/// four taps to say "done" would be a different control wearing the same
+/// clothes. The loop is what makes `phase` come out at `total` rather than
+/// wherever it happened to be.
 #[test]
-fn escape_hatch_requires_reason_and_downsizes() {
+fn marking_a_progressive_task_done_closes_every_phase() {
     let r = setup_full();
     let e = engine(&r);
     e.activate_next(TODAY).unwrap();
     let active_id = r.active_directive().unwrap().unwrap().id;
-
-    // Scope miscalculation → estimate halved (floor 15), requeued tomorrow.
-    let out = e
-        .bail_out(
-            TODAY,
-            BailoutReason::MiscalculatedScope,
-            Some("way bigger than planned"),
+    // Make the active directive progressive so the loop has work to do.
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE directives SET estimated_minutes = 30, progressive_total = 3 WHERE id = ?1",
+            [&active_id],
         )
         .unwrap();
-    let EngineOutcome::BailedOut {
-        directive_id,
-        reason,
-        recovery,
-    } = out
-    else {
-        panic!("expected bailout outcome");
-    };
-    assert_eq!(directive_id, active_id);
-    assert_eq!(reason, BailoutReason::MiscalculatedScope);
-    let Some(RecoveryAction::DownsizeAndRequeue { new_minutes, .. }) = recovery else {
-        panic!("expected downsize");
-    };
-    assert_eq!(new_minutes, 15); // 20/2 = 10, floored at 15
 
+    let out = e.mark_complete(TODAY, &active_id).unwrap();
+    assert!(matches!(out, EngineOutcome::DirectiveCompleted { .. }));
     let d = r.directive(&active_id).unwrap().unwrap();
-    assert_eq!(d.state, DirectiveState::Queued);
-    assert_eq!(d.scheduled_for_date, "2026-09-14");
-    assert_eq!(d.estimated_minutes, 15);
-
-    // A bailout ledger row exists with the categorized reason.
-    let conn = r.conn.lock().unwrap();
-    let reasons: Vec<String> = conn
-        .prepare("SELECT reason FROM bailouts WHERE directive_id = ?1")
+    assert_eq!(d.state, DirectiveState::Completed);
+    assert_eq!(
+        d.progressive_step, d.progressive_total,
+        "every phase must be closed, not just the current one"
+    );
+    let closed: i64 = r
+        .conn
+        .lock()
         .unwrap()
-        .query_map([&active_id], |x| x.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
+        .query_row(
+            "SELECT COUNT(*) FROM directive_phases WHERE directive_id = ?1 AND state = 'done'",
+            [&active_id],
+            |x| x.get(0),
+        )
         .unwrap();
-    assert_eq!(reasons, vec!["miscalculated_scope".to_string()]);
+    assert_eq!(closed, 3, "all three phase rows are done");
 }
 
+/// The ledger can tick a task that is NOT the active one, and doing so
+/// leaves the canvas alone. This is the case the canvas-only completion
+/// path could not express at all.
 #[test]
-fn bailout_external_dependency_blocks_and_advances() {
+fn a_queued_task_can_be_marked_done_without_disturbing_the_canvas() {
     let r = setup_full();
     let e = engine(&r);
     e.activate_next(TODAY).unwrap();
     let active_id = r.active_directive().unwrap().unwrap().id;
+    let other = r
+        .runnable_directives(TODAY)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id != active_id)
+        .expect("setup_full seeds a second directive")
+        .id;
 
-    let out = e
-        .bail_out(
-            TODAY,
-            BailoutReason::ExternalDependency,
-            Some("waiting on client"),
-        )
+    e.mark_complete(TODAY, &other).unwrap();
+    assert_eq!(
+        r.directive(&other).unwrap().unwrap().state,
+        DirectiveState::Completed
+    );
+    // The active directive is untouched — the canvas still has its task.
+    assert_eq!(
+        r.active_directive().unwrap().unwrap().id,
+        active_id,
+        "ticking a queued task must not steal the canvas"
+    );
+}
+
+/// A tick on a task with NO phases — the most common thing the ledger can
+/// be asked to do, and the case the first version of `mark_complete` got
+/// wrong: its phase-closing loop sat outside the progressive branch, so
+/// every 20-minute task was sent through `advance_progressive_step` and
+/// failed with "current or next phase missing".
+#[test]
+fn a_monolithic_task_can_be_ticked() {
+    let r = setup_full();
+    let e = engine(&r);
+    e.activate_next(TODAY).unwrap();
+    let id = r.active_directive().unwrap().unwrap().id;
+    let d = r.directive(&id).unwrap().unwrap();
+    assert_eq!(
+        d.progressive_total, 1,
+        "this test is only meaningful on a task with no phase rows"
+    );
+    assert!(r.phases_for_directive(&id).unwrap().is_empty());
+    e.mark_complete(TODAY, &id).unwrap();
+    assert_eq!(
+        r.directive(&id).unwrap().unwrap().state,
+        DirectiveState::Completed
+    );
+}
+
+/// A tick is a checkbox. A second tap on a ticked row is a person
+/// confirming, not a mistake, and must not produce an error the UI would
+/// have to render as a failure.
+#[test]
+fn marking_an_already_done_task_twice_is_a_no_op() {
+    let r = setup_full();
+    let e = engine(&r);
+    e.activate_next(TODAY).unwrap();
+    let id = r.active_directive().unwrap().unwrap().id;
+    e.mark_complete(TODAY, &id).unwrap();
+    let out = e.mark_complete(TODAY, &id).unwrap();
+    assert!(matches!(out, EngineOutcome::DirectiveCompleted { .. }));
+    assert_eq!(
+        r.directive(&id).unwrap().unwrap().state,
+        DirectiveState::Completed
+    );
+}
+
+/// The milestone rule from delta 200 survives the new writer: a milestone
+/// is not reported done while work it contains is still unreachable.
+#[test]
+fn a_milestone_with_blocked_work_is_not_reported_done() {
+    let r = setup_full();
+    let e = engine(&r);
+    e.activate_next(TODAY).unwrap();
+    let ids: Vec<String> = r
+        .runnable_directives(TODAY)
+        .unwrap()
+        .into_iter()
+        .chain(std::iter::once(r.active_directive().unwrap().unwrap()))
+        .map(|d| d.id)
+        .collect();
+    let milestone_id = r.directive(&ids[0]).unwrap().unwrap().milestone_id;
+    // One finishes; the other is parked.
+    r.set_directive_state(&ids[0], DirectiveState::Blocked, None)
         .unwrap();
-    let EngineOutcome::BailedOut {
-        recovery: Some(RecoveryAction::AdvanceUnblocked { next_directive_id }),
-        ..
-    } = out
-    else {
-        panic!("expected advance-unblocked");
-    };
-    // The other directive exists to advance to.
-    assert!(!next_directive_id.is_empty());
-    assert_ne!(next_directive_id, active_id);
-    let d = r.directive(&active_id).unwrap().unwrap();
-    assert_eq!(d.state, DirectiveState::Blocked);
-
-    // Engine advances to the unblocked thread.
-    let out = e.activate_next(TODAY).unwrap();
-    assert!(
-        matches!(out, EngineOutcome::DirectiveActive { directive_id, .. } if directive_id == next_directive_id)
+    e.mark_complete(TODAY, &ids[1]).unwrap();
+    let m = r.milestone(&milestone_id).unwrap().unwrap();
+    assert_ne!(
+        m.status,
+        MilestoneStatus::Completed,
+        "a milestone with a blocked task inside it is not done"
     );
 }
 
 #[test]
-fn bailout_energy_offers_low_cognitive_recovery() {
+fn marking_a_missing_task_is_an_error_that_names_it() {
     let r = setup_full();
     let e = engine(&r);
-    e.activate_next(TODAY).unwrap();
-    let active_id = r.active_directive().unwrap().unwrap().id;
-
-    let out = e
-        .bail_out(TODAY, BailoutReason::EnergyDepletion, None)
-        .unwrap();
-    let EngineOutcome::BailedOut {
-        recovery: Some(RecoveryAction::LowCognitiveTask { .. }),
-        ..
-    } = out
-    else {
-        panic!("expected low-cognitive recovery");
-    };
-    let d = r.directive(&active_id).unwrap().unwrap();
-    assert_eq!(d.state, DirectiveState::Skipped); // velocity event, not failure
+    let err = e.mark_complete(TODAY, "dir-nope").unwrap_err();
+    assert!(
+        err.to_string().contains("dir-nope"),
+        "the error must name the id the caller sent: {err}"
+    );
+    // A malformed date is refused before anything is written.
+    assert!(e.mark_complete("not-a-date", "dir-nope").is_err());
 }
 
 #[test]
@@ -295,10 +362,22 @@ fn idle_when_queue_empty() {
     let e = Engine::new(&r, None);
     assert_eq!(e.activate_next(TODAY).unwrap(), EngineOutcome::Idle);
     // Future-scheduled directives do not activate early.
-    let g = r.create_goal("G", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let m = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
-    r.create_directive(&m.id, "Tomorrow task", None, 20, 1, "2026-09-14", None, &[], None)
+    let g = r
+        .create_goal("G", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
         .unwrap();
+    let m = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
+    r.create_directive(
+        &m.id,
+        "Tomorrow task",
+        None,
+        20,
+        1,
+        "2026-09-14",
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
     assert_eq!(e.activate_next(TODAY).unwrap(), EngineOutcome::Idle);
     assert!(matches!(
         e.activate_next("2026-09-14").unwrap(),
@@ -316,8 +395,18 @@ fn overdue_directives_surface_first() {
         .into_iter()
         .nth(1)
         .unwrap();
-    r.create_directive(&m2.id, "Overdue task", None, 10, 1, "2026-09-10", None, &[], None)
-        .unwrap();
+    r.create_directive(
+        &m2.id,
+        "Overdue task",
+        None,
+        10,
+        1,
+        "2026-09-10",
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
     let e = engine(&r);
     let out = e.activate_next(TODAY).unwrap();
     assert!(
@@ -363,9 +452,17 @@ fn engine_rejects_malformed_dates_before_any_write() {
         .check_in("2026-02-30", CheckInOutcome::Done, None)
         .is_err());
     assert!(r.check_in_for_date("09/18/2026").unwrap().is_none());
-    assert!(e
-        .bail_out("not-a-date", BailoutReason::EnergyDepletion, None)
-        .is_err());
+    // The ledger's writer refuses a malformed date before touching a row.
+    // It is checked at all because the date is not stored on the directive
+    // — it is used to decide what runs next — so a bad one could otherwise
+    // slip past the write boundary entirely.
+    let id = r.runnable_directives(TODAY).unwrap()[0].id.clone();
+    assert!(e.mark_complete("not-a-date", &id).is_err());
+    assert_eq!(
+        r.directive(&id).unwrap().unwrap().state,
+        DirectiveState::Queued,
+        "a refused date must not have written anything"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +471,15 @@ fn engine_rejects_malformed_dates_before_any_write() {
 
 /// Builds a 2-phase, 60-minute progressive directive.
 fn progressive_directive(r: &Repos, identity: Option<&Identity>) -> Directive {
-    let g = r.create_goal("Long haul", None, None, crate::domain::COMPLEXITY_DEFAULT, identity).unwrap();
+    let g = r
+        .create_goal(
+            "Long haul",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            identity,
+        )
+        .unwrap();
     let m = r
         .create_milestone(&g.id, "Phase work", None, 0, identity)
         .unwrap();
@@ -384,9 +489,11 @@ fn progressive_directive(r: &Repos, identity: Option<&Identity>) -> Directive {
         None,
         60,
         2,
-        "2099-01-01", None,
+        "2099-01-01",
+        None,
         &[("Warm up".into(), None, 20), ("Push".into(), None, 40)],
-        identity)
+        identity,
+    )
     .unwrap()
 }
 
@@ -461,7 +568,15 @@ fn ensure_phases_is_idempotent_and_preserves_good_rows() {
 #[test]
 fn a_directive_too_short_to_split_fails_with_an_actionable_error() {
     let r = setup_full();
-    let g = r.create_goal("Impossible", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal(
+            "Impossible",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     let m = r
         .create_milestone(&g.id, "Too many steps", None, 0, None)
         .unwrap();
@@ -473,9 +588,11 @@ fn a_directive_too_short_to_split_fails_with_an_actionable_error() {
             None,
             5,
             10,
-            "2099-01-01", None,
+            "2099-01-01",
+            None,
             &vec![("s".into(), None, 1); 10],
-            None)
+            None,
+        )
         .unwrap();
     r.conn
         .lock()

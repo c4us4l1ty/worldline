@@ -272,9 +272,7 @@ mod tests {
     /// more than it means cannot catch a double count, which is the bug this
     /// helper was rewritten for.
     fn seed(r: &Repos, complexity: i64, completed: i64, blocked: i64, overdue: i64) -> String {
-        let g = r
-            .create_goal("G", None, None, complexity, None)
-            .unwrap();
+        let g = r.create_goal("G", None, None, complexity, None).unwrap();
         let m = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
         let mut n = 0;
         let mut add = |state: Option<DirectiveState>, date: &str| {
@@ -397,9 +395,7 @@ mod tests {
         // A fifth task, live on the canvas. It must not move any number.
         let m = r.create_milestone(&g, "M2", None, 1, None).unwrap();
         let live = r
-            .create_directive(
-                &m.id, "in flight", None, 20, 1, TODAY, None, &[], None,
-            )
+            .create_directive(&m.id, "in flight", None, 20, 1, TODAY, None, &[], None)
             .unwrap();
         r.set_directive_state(&live.id, DirectiveState::Active, None)
             .unwrap();
@@ -521,10 +517,9 @@ mod tests {
     /// because `create_goal`'s column default and this must agree.
     #[test]
     fn the_default_rating_is_the_middle_stop() {
-        assert_eq!(COMPLEXITY_DEFAULT, 3);
+        assert_eq!(crate::domain::COMPLEXITY_DEFAULT, 3);
         let r = repos();
         let c = calibration(&r, TODAY);
         assert!(c.is_ok());
     }
-
 }

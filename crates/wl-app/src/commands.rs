@@ -30,10 +30,10 @@ use tauri::State;
 use zeroize::Zeroizing;
 
 use wl_core::ai::catalog::ModelInfo;
-use wl_core::ai::dispatch::{AiDispatcher, ProviderAdapter};
+use wl_core::ai::dispatch::{self, AiDispatcher, ProviderAdapter, PlanPreview};
 use wl_core::crypto::identity::Identity;
 use wl_core::domain::*;
-use wl_core::engine::{Engine, EngineOutcome, RecoveryAction};
+use wl_core::engine::{calibration, Engine, EngineOutcome};
 use wl_core::poison::LockRecover;
 use wl_core::store::repo::Repos;
 
@@ -300,6 +300,7 @@ pub(crate) async fn create_goal(
     title: String,
     description: Option<String>,
     target_date: Option<String>,
+    complexity: i64,
 ) -> ShellResult<GoalJson> {
     // Identity is optional here: logged-out goal drafts still work, but
     // only an unlocked vault write-throughs to the outbox.
@@ -309,6 +310,7 @@ pub(crate) async fn create_goal(
             &title,
             description.as_deref(),
             target_date.as_deref(),
+            complexity,
             identity,
         )
         .map_err(ShellError::from)
@@ -330,9 +332,10 @@ fn create_seeded_goal(
     title: &str,
     description: Option<&str>,
     target_date: Option<&str>,
+    complexity: i64,
     identity: Option<&Identity>,
 ) -> Result<Goal, wl_core::store::StoreError> {
-    let goal = repos.create_goal(title, description, target_date, identity)?;
+    let goal = repos.create_goal(title, description, target_date, complexity, identity)?;
     repos.archive_other_active_goals(&goal.id, identity)?;
     // B-002 (option b): a manual goal must never be a dead end. Seed
     // one milestone + one directive from the goal title so the canvas
@@ -361,6 +364,7 @@ fn seed_first_steps(
         25,
         1,
         &today_local(),
+        None,
         &[],
         identity,
     )?;
@@ -392,30 +396,92 @@ pub struct GoalJson {
     pub milestone_total: usize,
 }
 
-/// One row of the entropy log the Control Panel drawer renders.
+/// One row of the Entropy Log, mirrored from `wl_core`'s `LedgerRow`.
 ///
-/// A mirror of wl-core's `EntropyEntry` with `BailoutReason` flattened
-/// to its snake_case id — the shell's own domain types are not part of
-/// the JSON contract, so the enum crosses as a plain string. Kept as a
-/// separate struct rather than deriving `Serialize` on the wl-core type
-/// so the wire format is declared here, at the edge that owns it.
+/// A mirror rather than a derived `Serialize` on the wl-core type: the
+/// shell's own domain types are not part of the JSON contract, so the wire
+/// format is declared here, at the edge that owns it.
 #[derive(Serialize, Clone)]
-pub struct EntropyView {
-    pub id: String,
+pub struct TaskView {
+    pub directive_id: String,
     pub goal_id: String,
     pub goal_title: String,
-    pub directive_id: String,
-    pub directive_title: String,
-    /// `BailoutReason::as_str()` — one of the three snake_case reasons
-    /// the bailout modal offers, so the UI can key its icon off it.
-    pub reason: String,
-    pub note: Option<String>,
-    /// Local `YYYY-MM-DD`, formatted in wl-core where the HLC is.
-    pub date: String,
-    /// The directive is still parked right now, as opposed to having
-    /// been requeued or skipped by the recovery. This flag, not the
-    /// reason, is what separates "needs the user" from "already handled".
-    pub still_blocked: bool,
+    pub milestone_title: String,
+    pub title: String,
+    pub instruction: Option<String>,
+    pub estimated_minutes: i64,
+    /// `queued` | `active` | `completed` | `blocked` | `skipped`
+    pub state: String,
+    /// The goal's *Estimated Complexity* word, resolved in the core so the
+    /// UI cannot invent a second table of them.
+    pub complexity_label: Option<String>,
+    /// The title of the unfinished task this one is waiting on.
+    pub blocked_by: Option<String>,
+    /// `(step, total)`, already filtered by the store so a corrupt
+    /// replicated `progressive_step` cannot render "Phase 9 of 4".
+    pub phase: Option<(i64, i64)>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn mark_task_done(
+    state: State<'_, std::sync::Arc<AppState>>,
+    directive_id: String,
+) -> ShellResult<DirectiveView> {
+    let today = today_local();
+    let out = state.with_identity(|identity| {
+        let e = Engine::new(&state.repos, Some(identity));
+        e.mark_complete(&today, &directive_id)?;
+        // Same two-step shape as `complete_directive`: mark, then re-read
+        // the canvas. The ledger is where a task is resolved, and the
+        // canvas is what shows the next one — so a tick that resolved the
+        // ACTIVE directive has to advance it here, or the canvas is left
+        // showing a task that is already done.
+        e.current(&today).map_err(ShellError::from)
+    })?;
+    Ok(outcome_view(&out, &state.repos))
+}
+
+/// How many tasks the ledger asks for.
+///
+/// The ledger is a glance, not an archive: a hundred rows is several
+/// screens of history on a bad stretch and still one cheap join, while
+/// several hundred would be a page the control panel has no UI for.
+/// Bounded so a long-lived install cannot make every panel open an
+/// unbounded three-table join; `wl-core` clamps to its own ceiling as
+/// well, so the two limits cannot drift into a footgun.
+const TASK_LEDGER_LIMIT: usize = 100;
+
+/// Every task, open work first, joined up to its goal.
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn task_ledger(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ShellResult<Vec<TaskView>> {
+    let rows = state
+        .repos
+        .task_ledger(TASK_LEDGER_LIMIT)
+        .map_err(ShellError::from)?;
+    Ok(rows.into_iter().map(task_view).collect())
+}
+
+fn task_view(row: wl_core::store::repo::LedgerRow) -> TaskView {
+    // Every derived field is read before any field is moved out. Two of
+    // these are methods on the row rather than raw field reads precisely so
+    // the order stops mattering.
+    let complexity_label = row.complexity_label().map(str::to_string);
+    let phase = row.phase_view();
+    TaskView {
+        directive_id: row.directive_id,
+        goal_id: row.goal_id,
+        goal_title: row.goal_title,
+        milestone_title: row.milestone_title,
+        title: row.title,
+        instruction: row.execution_context,
+        estimated_minutes: row.estimated_minutes,
+        state: row.state.as_str().into(),
+        complexity_label,
+        blocked_by: row.blocked_by,
+        phase,
+    }
 }
 
 /// Every active goal with its milestone progress, newest first.
@@ -545,95 +611,6 @@ pub(crate) async fn complete_directive(
         e.current(&today).map_err(ShellError::from)
     })?;
     Ok(outcome_view(&out, &state.repos))
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn bail_out(
-    state: State<'_, std::sync::Arc<AppState>>,
-    reason: String,
-    note: Option<String>,
-) -> ShellResult<BailoutOutcome> {
-    let reason = BailoutReason::from_str(&reason)
-        .ok_or_else(|| ShellError::Invalid("unknown bailout reason".into()))?;
-    let today = today_local();
-    let out = state.with_identity(|identity| {
-        let e = Engine::new(&state.repos, Some(identity));
-        e.bail_out(&today, reason, note.as_deref())
-            .map_err(ShellError::from)
-    })?;
-    match out {
-        EngineOutcome::BailedOut {
-            directive_id,
-            reason,
-            recovery,
-        } => Ok(BailoutOutcome {
-            directive_id,
-            reason: reason.as_str().into(),
-            recovery: recovery.as_ref().map(recovery_summary),
-        }),
-        _ => Ok(BailoutOutcome {
-            directive_id: String::new(),
-            reason: reason.as_str().into(),
-            recovery: Some("idle".into()),
-        }),
-    }
-}
-
-#[derive(Serialize)]
-pub struct BailoutOutcome {
-    pub directive_id: String,
-    pub reason: String,
-    pub recovery: Option<String>,
-}
-
-/// Human-readable recovery summary for the UI. (A `Display` impl is
-/// impossible here: orphan rule — `RecoveryAction` lives in wl-core.)
-fn recovery_summary(r: &RecoveryAction) -> String {
-    match r {
-        RecoveryAction::DownsizeAndRequeue { new_minutes, .. } => {
-            format!("downsized:{new_minutes}")
-        }
-        RecoveryAction::AdvanceUnblocked { next_directive_id } => {
-            format!("advanced:{next_directive_id}")
-        }
-        RecoveryAction::LowCognitiveTask { .. } => "low-cognitive".into(),
-    }
-}
-
-/// How many bailouts the drawer asks for.
-///
-/// The drawer is a glance, not an archive: fifty rows is several screens
-/// of history on a bad stretch and still one cheap query, while a few
-/// hundred would be a second page the drawer has no UI for. Bounded so a
-/// long-lived install cannot make every drawer open an unbounded
-/// four-table join. wl-core clamps to its own ceiling as well, so the two
-/// limits cannot drift into a footgun.
-const ENTROPY_LOG_LIMIT: usize = 50;
-
-/// Recent bailouts, newest first, joined to the goal and directive they
-/// happened on.
-#[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn entropy_log(
-    state: State<'_, std::sync::Arc<AppState>>,
-) -> ShellResult<Vec<EntropyView>> {
-    let rows = state
-        .repos
-        .bailout_log(ENTROPY_LOG_LIMIT)
-        .map_err(ShellError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(|e| EntropyView {
-            id: e.id,
-            goal_id: e.goal_id,
-            goal_title: e.goal_title,
-            directive_id: e.directive_id,
-            directive_title: e.directive_title,
-            reason: e.reason.as_str().into(),
-            note: e.note,
-            date: e.date,
-            still_blocked: e.still_blocked,
-        })
-        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -968,6 +945,49 @@ pub struct SyncStatsView {
 }
 
 // ---------------------------------------------------------------------------
+// Difficulty calibration (the *Estimated Complexity* estimator)
+// ---------------------------------------------------------------------------
+
+/// One difficulty bucket, with the evidence behind it.
+#[derive(Serialize, Clone)]
+pub struct CalibrationView {
+    /// 1–5, as the user rated it.
+    pub complexity: i64,
+    /// `light` … `deep`, resolved in the core.
+    pub label: String,
+    /// Posterior mean, 0–100. Meaningless without `evidence`, which is why
+    /// both are always returned together.
+    pub percent: i64,
+    /// `"4 of 9"` — the raw counts, deliberately. "44%" is not checkable
+    /// against the ledger; "4 of 9" is.
+    pub evidence: String,
+    pub observations: i64,
+}
+
+/// The estimator's current state, one row per bucket the user has rated.
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn calibration_view(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ShellResult<Vec<CalibrationView>> {
+    let buckets = calibration::calibration(&state.repos, &today_local())?;
+    Ok(buckets
+        .values()
+        .filter_map(|b| {
+            // A bucket with no label means the replicated rating was out of
+            // range in a way the clamp could not hide, and a row with no
+            // word is worse than no row.
+            Some(CalibrationView {
+                complexity: b.complexity,
+                label: complexity_label(b.complexity)?.to_string(),
+                percent: (b.posterior_mean() * 100.0).round() as i64,
+                evidence: b.evidence(),
+                observations: b.observations,
+            })
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // AI tiers (BYOK — keys injected per-call from the vault, never stored
 // in SQLite, never logged)
 // ---------------------------------------------------------------------------
@@ -1004,24 +1024,116 @@ fn require_model(provider: &str, model: &str) -> ShellResult<()> {
     Ok(())
 }
 
+/// How long one Tier-1 call may take before the shell gives up on it.
+///
+/// The old shape had NO bound of its own: the only ceiling anywhere on the
+/// path was reqwest's 120 s client timeout, which is a number chosen for
+/// "don't hang forever", not one a person can wait through. A two-minute
+/// button with no stage text and no cancel is the shape of the bug this
+/// whole command surface was rebuilt for.
+///
+/// 75 s is above a real plan request (a 4 096-token completion over a
+/// consumer link is seconds) and below a wait a user reads as broken. The
+/// bounds are compile-time rather than a test, in the same spirit as
+/// `BOOT_TIMEOUT_MS` on the UI side.
+// `Duration`'s comparison operators are not `const`, so the bounds are
+// stated over the seconds the value is built from — which is also the
+// thing the reader cares about.
+const TIER1_TIMEOUT_SECS: u64 = 75;
+const _: () = assert!(
+    TIER1_TIMEOUT_SECS >= 30,
+    "a cold start plus a real completion must fit inside the budget"
+);
+const _: () = assert!(
+    TIER1_TIMEOUT_SECS <= 120,
+    "and must not exceed the HTTP client timeout, or the transport error is what the user sees"
+);
+pub const TIER1_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(TIER1_TIMEOUT_SECS);
+
+/// Whether the architect can be called at all, and what is missing if not.
+///
+/// A local, instant, **non-billable** check that runs before the call.
+/// Every configuration mistake — no provider, no key, no model — used to be
+/// discovered after a request had already left, or in the case of a missing
+/// model, after a 2.2-second toast had come and gone. This turns the
+/// common failures into an answer in milliseconds.
+///
+/// Returns the ready state rather than erroring, because the compose screen
+/// wants to show "not configured" as a state, not an exception.
 #[tauri::command(rename_all = "snake_case")]
-/// Tier-1 planning from the compose screen's single free-text field.
+pub(crate) async fn ai_readiness(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ShellResult<AiReadiness> {
+    let settings = state.repos.settings()?;
+    let provider = settings
+        .ai_provider
+        .clone()
+        .filter(|p| KNOWN_PROVIDERS.contains(&p.as_str()))
+        .unwrap_or_else(|| "openrouter".to_string());
+    let model = settings.tier1_model.clone().unwrap_or_default();
+    let has_key = state
+        .vault
+        .has_api_key(&provider)
+        .map_err(|e| ShellError::Vault(e.to_string()))?;
+    Ok(AiReadiness {
+        provider,
+        model_set: !model.trim().is_empty(),
+        model,
+        key_set: has_key,
+    })
+}
+
+#[derive(Serialize, Clone)]
+pub struct AiReadiness {
+    pub provider: String,
+    pub model: String,
+    pub model_set: bool,
+    pub key_set: bool,
+}
+
+impl AiReadiness {
+    /// The first thing that is missing, phrased for the page rather than
+    /// for a log.
+    ///
+    /// Ordered by what the user has to do first: a provider is implied by
+    /// the default, a key is a paste, and a model is a long list to scroll.
+    /// Both are reported so the page can disable the button and say why in
+    /// one line rather than making the user press it to find out.
+    pub fn missing(&self) -> Option<String> {
+        if !self.model_set {
+            return Some("Choose an architect model in Settings.".into());
+        }
+        if !self.key_set {
+            return Some(format!("No API key stored for {}.", self.provider));
+        }
+        None
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Tier 1, stage one: fetch a plan and return it **without writing
+/// anything**.
 ///
 /// `intent` is raw user text, NOT a title: the architect names the goal
-/// from it (see `AiDispatcher::master_plan`).
+/// from it. `complexity` is the compose screen's *Estimated Complexity*
+/// rating, 1–5, and it goes into both the prompt and the returned preview
+/// so `commit_plan` cannot lose it.
 ///
 /// The wire keys are these parameter names verbatim, snake_case included —
 /// see the module header for why `rename_all` is not optional.
-pub(crate) async fn master_plan(
+pub(crate) async fn master_plan_preview(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
     model: String,
     intent: String,
     target_date: Option<String>,
-) -> ShellResult<String> {
+    complexity: i64,
+) -> ShellResult<PlanPreview> {
     require_model(&provider, &model)?;
+    check_complexity("complexity", complexity).map_err(ShellError::Invalid)?;
     let shared: std::sync::Arc<AppState> = (*state).clone();
-    tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
         let api_key = vault_api_key(&shared, &provider)?;
         // Move the Zeroizing wrapper straight into the adapter: no
         // intermediate plain-String clone (the old `.to_string()` left a
@@ -1047,23 +1159,81 @@ pub(crate) async fn master_plan(
         let execute = move |url: &str, h: &[(String, String)], b: &serde_json::Value| {
             http_execute(&err_provider, url, h, b)
         };
-        // A handle, not a guard: the provider call below has a 120 s
-        // timeout, and holding the identity lock across it blocked
-        // every other identity-gated command in the app.
-        let identity = shared.identity_handle();
-        let (goal_id, _plan) = AiDispatcher::master_plan(
+        // The estimator's read of the bucket the user just picked, as one
+        // sentence for the prompt. This is the number's ONLY consumer, and
+        // without it the calibration figure is a display with no effect.
+        let record = calibration::prompt_line(
+            &calibration::calibration(&shared.repos, &today_local())?,
+            complexity,
+        );
+        AiDispatcher::master_plan_preview(
             &adapter,
             &intent,
             target_date.as_deref(),
+            complexity,
+            record.as_deref(),
             execute,
-            &shared.repos,
-            identity.as_deref(),
         )
-        .map_err(ShellError::from)?;
-        Ok(goal_id)
+        .map_err(ShellError::from)
+    });
+    // The deadline is applied HERE rather than inside the blocking task, so
+    // the shell can stop waiting and answer even if the task is wedged in
+    // something the HTTP timeout does not cover. The task is abandoned, not
+    // cancelled — `spawn_blocking` cannot be cancelled — which is exactly
+    // why the UI needs its own watchdog: this is a bound on the shell's
+    // patience, not a guarantee about the thread.
+    match tokio::time::timeout(TIER1_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(ShellError::Io(format!("architect task: {e}"))),
+        Err(_) => Err(ShellError::Provider(format!(
+            "the architect did not answer within {}s — the plan was not created",
+            TIER1_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Tier 1, stage two: write the plan the user approved.
+///
+/// The `preview` is a `struct` parameter, so the UI has to wrap it as
+/// `{"preview": {...}}` — see the module header. It is a parameter that
+/// must NOT be `Option`: a missing `preview` here would silently commit
+/// nothing and report success, and the user would be told their plan was
+/// on the line while the canvas was empty.
+pub(crate) async fn commit_plan(
+    state: State<'_, std::sync::Arc<AppState>>,
+    preview: PlanPreview,
+    target_date: Option<String>,
+    intent: Option<String>,
+) -> ShellResult<CommitOutcome> {
+    let shared: std::sync::Arc<AppState> = (*state).clone();
+    // Cheap and local, so no spawn_blocking: this is SQLite work on an
+    // in-memory plan.
+    let out = shared.with_identity_opt(|identity| {
+        dispatch::persist_plan(
+            &shared.repos,
+            intent
+                .as_deref()
+                .map(|i| (i, None, target_date.as_deref())),
+            &preview,
+            identity,
+        )
+        .map_err(ShellError::from)
+    })?;
+    Ok(CommitOutcome {
+        goal_id: out.goal_id,
+        warnings: out.warnings,
     })
-    .await
-    .map_err(|e| ShellError::Io(format!("master plan task: {e}")))?
+}
+
+#[derive(Serialize)]
+pub struct CommitOutcome {
+    pub goal_id: String,
+    /// What repair changed, plus any edge that had to be dropped. Shown on
+    /// the canvas as a receipt, because a plan the user approved and a row
+    /// that was written are allowed to differ — and they should never
+    /// differ silently.
+    pub warnings: Vec<String>,
 }
 
 /// OpenAI-compatible base URL per approved provider id.

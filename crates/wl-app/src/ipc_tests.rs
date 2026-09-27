@@ -150,6 +150,7 @@ fn manual_authoring_binds_snake_case_payloads_through_ipc() {
             "title": "Ship the relay",
             "description": "Manual goal, no API key.",
             "target_date": "2026-12-31",
+            "complexity": 4,
         }),
     )
     .expect("create_goal must bind and succeed");
@@ -170,6 +171,12 @@ fn manual_authoring_binds_snake_case_payloads_through_ipc() {
         .expect("goal lookup")
         .expect("manual goal was persisted");
     assert_eq!(goal.target_date.as_deref(), Some("2026-12-31"));
+    // The rating is an INTEGER, not an `Option`, so a key mismatch fails
+    // loudly here — but it is the one the estimator buckets on, and a goal
+    // written at the default when the user chose 4 poisons those numbers
+    // permanently. Asserted off the row for the same reason `target_date`
+    // is.
+    assert_eq!(goal.complexity, 4);
 
     // The seeded starter set is what the canvas actually renders, so its
     // optional and integer fields are the ones a key mismatch would

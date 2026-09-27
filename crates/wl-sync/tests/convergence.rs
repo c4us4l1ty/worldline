@@ -203,7 +203,13 @@ async fn offline_write_then_sync_converges_two_devices() {
     let a = Repos::new(conn_a, 1);
     a.insert_identity(&identity, true, &[]).unwrap();
     let g = a
-        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), wl_core::domain::COMPLEXITY_DEFAULT, None)
+        .create_goal(
+            "Ship Worldline v0.1",
+            None,
+            Some("2026-10-01"),
+            wl_core::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
         .unwrap();
     let ms = a
         .create_milestone(&g.id, "Crypto core", None, 0, None)
@@ -215,12 +221,14 @@ async fn offline_write_then_sync_converges_two_devices() {
             None,
             60,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[
                 ("Signature first".into(), None, 5),
                 ("Core loop".into(), None, 25),
             ],
-            None)
+            None,
+        )
         .unwrap();
     // CRDT write-through: enqueue state of every mutated row.
     a.enqueue_outbox(
@@ -294,7 +302,15 @@ async fn delete_replicates_and_stays_deleted() {
     let id = Some(&identity);
 
     let a = Repos::new(open_in_memory().unwrap(), 1);
-    let g = a.create_goal("Doomed goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, id).unwrap();
+    let g = a
+        .create_goal(
+            "Doomed goal",
+            None,
+            None,
+            wl_core::domain::COMPLEXITY_DEFAULT,
+            id,
+        )
+        .unwrap();
     let goal_hlc = g.hlc_timestamp.to_string();
     let ms = a
         .create_milestone(&g.id, "Doomed milestone", None, 0, id)
@@ -306,9 +322,11 @@ async fn delete_replicates_and_stays_deleted() {
             None,
             10,
             1,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[],
-            id)
+            id,
+        )
         .unwrap();
     sync_cycle(&a, &identity, &transport, 100).unwrap();
 
@@ -393,7 +411,15 @@ async fn equal_hlc_ops_converge_regardless_of_delivery_order() {
     let transport = AxumTransport { app, token };
 
     let maker = Repos::new(open_in_memory().unwrap(), 1);
-    let g = maker.create_goal("Forked goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = maker
+        .create_goal(
+            "Forked goal",
+            None,
+            None,
+            wl_core::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     // One tick, reused for both ops: identical full HLC, like two live
     // replicas forked from one data dir under a stopped clock.
     let hlc = maker.hlc.now(maker.device_id()).to_string();
@@ -459,7 +485,15 @@ async fn idempotent_repull_applies_nothing_twice() {
 
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Solo Goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = a
+        .create_goal(
+            "Solo Goal",
+            None,
+            None,
+            wl_core::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -498,7 +532,15 @@ async fn lww_conflict_resolves_identically_on_both_sides() {
     let conn_b = open_in_memory().unwrap();
     let b = Repos::new(conn_b, 2);
 
-    let g = a.create_goal("Same Goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = a
+        .create_goal(
+            "Same Goal",
+            None,
+            None,
+            wl_core::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     let goal_json = |status: &str, dev: u16| {
         serde_json::json!({"id": g.id, "title": "Same Goal", "description": null,
             "target_date": null, "status": status, "_dev": dev})
@@ -538,7 +580,7 @@ async fn lww_conflict_resolves_identically_on_both_sides() {
 /// phases, which the manual-enqueue era left local-only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_through_syncs_all_tables() {
-    use wl_core::domain::{AppSettings, BailoutReason, CheckInOutcome, DirectiveState};
+    use wl_core::domain::{AppSettings, CheckInOutcome, DirectiveState};
 
     let app = relay_app();
     let identity = Identity::from_phrase(PHRASE).unwrap();
@@ -550,7 +592,9 @@ async fn write_through_syncs_all_tables() {
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
     let g = a
-        .create_goal("Write-through goal", Some("ctx"), Some("2026-10-01"), wl_core::domain::COMPLEXITY_DEFAULT, id)
+        // 5, not the default 3: a rating that arrives as 3 would be
+        // indistinguishable from one that never arrived.
+        .create_goal("Write-through goal", Some("ctx"), Some("2026-10-01"), 5, id)
         .unwrap();
     let ms = a
         .create_milestone(&g.id, "Milestone one", Some("desc"), 0, id)
@@ -562,20 +606,36 @@ async fn write_through_syncs_all_tables() {
             Some("with care"),
             60,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[
                 ("Phase one".into(), Some("first".into()), 5),
                 ("Phase two".into(), None, 25),
             ],
-            id)
+            id,
+        )
         .unwrap();
     a.set_directive_state(&d.id, DirectiveState::Active, id)
         .unwrap();
     assert!(a.advance_progressive_step(&d.id, id).unwrap());
     a.upsert_check_in("2026-09-13", CheckInOutcome::Partial, Some("half"), id)
         .unwrap();
-    a.record_bailout(&d.id, BailoutReason::EnergyDepletion, Some("tired"), id)
+    // A second task carrying an edge, so the round trip has to prove the
+    // EDGE survived and not merely that a directive row did (2026-09-27).
+    let d2 = a
+        .create_directive(
+            &ms.id,
+            "Then the other thing",
+            None,
+            25,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            id,
+        )
         .unwrap();
+    a.set_directive_depends_on(&d2.id, Some(&d.id), id).unwrap();
     let settings = AppSettings {
         relay_url: Some("http://127.0.0.1:8080".into()),
         theme: "light".into(),
@@ -587,13 +647,16 @@ async fn write_through_syncs_all_tables() {
     let pending = a.pending_outbox(100).unwrap();
     let tables: std::collections::HashSet<&str> =
         pending.iter().map(|o| o.table_name.as_str()).collect();
+    // `bailouts` left this list with the escape hatch (2026-09-27): the
+    // table is still in the schema and a peer that has not been updated
+    // still pushes into it, but nothing this build writes, so there is
+    // nothing to round trip.
     for t in [
         "goals",
         "milestones",
         "directives",
         "directive_phases",
         "check_ins",
-        "bailouts",
         "app_settings",
     ] {
         assert!(tables.contains(t), "no write-through op for table {t}");
@@ -615,6 +678,10 @@ async fn write_through_syncs_all_tables() {
     let goal_b = b.active_goal().unwrap().unwrap();
     assert_eq!(goal_b.title, "Write-through goal");
     assert_eq!(goal_b.target_date.as_deref(), Some("2026-10-01"));
+    // The rating, on a goal whose rating is not the column default. A
+    // `complexity` that arrives as 3 would be indistinguishable from one
+    // that arrived, which is why this is 5.
+    assert_eq!(goal_b.complexity, 5);
     let ms_b = b.milestones_for_goal(&goal_b.id).unwrap();
     assert_eq!(ms_b.len(), 1);
     assert_eq!(ms_b[0].order_index, 0);
@@ -624,6 +691,24 @@ async fn write_through_syncs_all_tables() {
     assert_eq!(dir_b.progressive_step, 2);
     assert_eq!(dir_b.progressive_total, 2);
     assert_eq!(dir_b.estimated_minutes, 60);
+    assert_eq!(dir_b.depends_on, None, "the head has no prerequisite");
+
+    // The EDGE, which is the field most likely to be added to the JSON and
+    // forgotten on the apply side — and which, being a plain `Option`, a
+    // key mismatch would drop silently rather than loudly.
+    let dir2_b = b.directive(&d2.id).unwrap().unwrap();
+    assert_eq!(
+        dir2_b.depends_on.as_deref(),
+        Some(d.id.as_str()),
+        "a dependency edge must survive the round trip, or two devices disagree about what runs next"
+    );
+    // And the dependency filter must agree with the stored edge on the far
+    // side: with the head unfinished, the tail is not runnable there either.
+    let runnable_b = b.runnable_directives("2026-09-13").unwrap();
+    assert!(
+        runnable_b.iter().all(|x| x.id != d2.id),
+        "device B must reach the same conclusion about what is blocked"
+    );
 
     let phases_b = b.phases_for_directive(&d.id).unwrap();
     assert_eq!(phases_b.len(), 2);
@@ -632,18 +717,6 @@ async fn write_through_syncs_all_tables() {
 
     let chk_b = b.check_in_for_date("2026-09-13").unwrap().unwrap();
     assert_eq!(chk_b.outcome, CheckInOutcome::Partial);
-
-    let bail_count: i64 = b
-        .conn
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM bailouts WHERE reason = 'energy_depletion'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(bail_count, 1);
 
     // The settings row converged. `always_on_top` was the field this
     // assertion used to check; it is gone with the pin feature (PRD delta
@@ -790,4 +863,133 @@ async fn poison_constraint_op_quarantines_without_wedging_sync() {
     // The move never wedges later cycles.
     let s2 = sync_cycle(&a, &identity, &transport, 100).unwrap();
     assert_eq!((s2.pulled, s2.quarantined, s2.applied), (0, 0, 0));
+}
+
+/// A goal or directive op pushed by a peer that has NOT been updated still
+/// applies.
+///
+/// This is the guarantee migration 0007 rests on: `complexity` and
+/// `depends_on` were added additively and the apply path has to read an
+/// absent key as "the default" and "no prerequisite" rather than
+/// quarantining the op. Rejecting would leave that device permanently
+/// unable to sync — the same wedge as delta 188, one migration later.
+///
+/// The payload is hand-crafted because that is the whole point: it is a
+/// row the current build could not have written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ops_from_an_unupdated_peer_still_apply() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    // Exactly the payloads the build before 0007 produced: every column it
+    // knew about, and neither of the two that were added.
+    a.enqueue_outbox(
+        &identity,
+        "goals",
+        "goal-legacy",
+        &serde_json::json!({
+            "title": "Legacy goal",
+            "description": "from an unupdated device",
+            "target_date": "2026-12-31",
+            "status": "active",
+        }),
+    )
+    .unwrap();
+    a.enqueue_outbox(
+        &identity,
+        "milestones",
+        "ms-legacy",
+        &serde_json::json!({
+            "goal_id": "goal-legacy",
+            "title": "M",
+            "order_index": 0,
+            "status": "pending",
+        }),
+    )
+    .unwrap();
+    a.enqueue_outbox(
+        &identity,
+        "directives",
+        "dir-legacy",
+        &serde_json::json!({
+            "milestone_id": "ms-legacy",
+            "title": "Legacy task",
+            "estimated_minutes": 25,
+            "progressive_step": 1,
+            "progressive_total": 1,
+            "state": "queued",
+            "scheduled_for_date": "2026-09-13",
+        }),
+    )
+    .unwrap();
+    let pushed = sync_cycle(&a, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        pushed.pushed, 3,
+        "every legacy op must be pushed, not dropped"
+    );
+
+    let b = Repos::new(open_in_memory().unwrap(), 2);
+    let pulled = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        pulled.applied, 3,
+        "every legacy op must apply, not be quarantined"
+    );
+
+    // The absent keys read as the documented defaults, and everything the
+    // old payload did carry arrived intact.
+    let goal = b.goal("goal-legacy").unwrap().expect("goal applied");
+    assert_eq!(goal.complexity, wl_core::domain::COMPLEXITY_DEFAULT);
+    assert_eq!(goal.target_date.as_deref(), Some("2026-12-31"));
+    let dir = b
+        .directive("dir-legacy")
+        .unwrap()
+        .expect("directive applied");
+    assert_eq!(dir.depends_on, None, "no edge means nothing blocks it");
+    assert_eq!(dir.estimated_minutes, 25);
+    // And a legacy task is runnable here, so an unupdated peer cannot
+    // wedge the OTHER device out of its queue either.
+    let runnable = b.runnable_directives("2026-09-13").unwrap();
+    assert_eq!(runnable.len(), 1);
+    assert_eq!(runnable[0].id, "dir-legacy");
+}
+
+/// A hostile peer's `complexity` is clamped, not quarantined.
+///
+/// The column has no CHECK (see migration 0007: a CHECK here would make
+/// this build reject a rating a future build widens the scale to), so the
+/// apply path is the only thing standing between a sealed payload and a
+/// rating of 99. Clamping loses nothing — the value is an opinion — and
+/// quarantining would lose the whole goal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_out_of_range_peer_rating_is_clamped_not_quarantined() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    a.enqueue_outbox(
+        &identity,
+        "goals",
+        "goal-odd",
+        &serde_json::json!({
+            "title": "Odd rating",
+            "status": "active",
+            "complexity": 99,
+        }),
+    )
+    .unwrap();
+    let _ = sync_cycle(&a, &identity, &transport, 100).unwrap();
+
+    let b = Repos::new(open_in_memory().unwrap(), 2);
+    let pulled = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        pulled.quarantined, 0,
+        "a nonsensical rating must not cost the device the goal"
+    );
+    let goal = b.goal("goal-odd").unwrap().expect("goal applied");
+    assert_eq!(goal.complexity, wl_core::domain::COMPLEXITY_MAX);
 }

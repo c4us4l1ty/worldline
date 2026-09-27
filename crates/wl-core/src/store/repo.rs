@@ -606,7 +606,17 @@ impl Repos {
                 estimated_minutes, progressive_step, progressive_total, state, scheduled_for_date,
                 depends_on, hlc_timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'queued', ?7, ?8, ?9)",
-            params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, depends_on, ts.to_string()],
+            params![
+                id,
+                milestone_id,
+                title,
+                execution_context,
+                estimated_minutes,
+                progressive_total,
+                scheduled_for_date,
+                depends_on,
+                ts.to_string()
+            ],
         )?;
         Self::emit_on(
             &tx,
@@ -988,18 +998,15 @@ impl Repos {
         let conn = self.lock_conn();
         let mut out = HashMap::new();
         for id in ids {
-            let Some(dep) = (|| {
-                conn.query_row(
+            let dep: Option<Option<String>> = conn
+                .query_row(
                     "SELECT depends_on FROM directives WHERE id = ?1",
                     [id],
-                    |r| r.get::<_, Option<String>>(0),
+                    |r| r.get(0),
                 )
                 .optional()
-                .map_err(StoreError::Sqlite)
-            })()?
-            else {
-                continue;
-            };
+                .map_err(StoreError::Sqlite)?;
+            let Some(dep) = dep else { continue };
             let Some(dep) = dep else { continue };
             let state: Option<String> = conn
                 .query_row("SELECT state FROM directives WHERE id = ?1", [&dep], |r| {
@@ -1283,7 +1290,8 @@ impl Repos {
             "SELECT d.id, g.id, g.title, g.complexity, m.id, m.title, d.title,
                     d.execution_context, d.estimated_minutes, d.state,
                     d.scheduled_for_date, d.progressive_step, d.progressive_total,
-                    (SELECT p.title FROM directives p WHERE p.id = d.depends_on) AS blocker
+                    (SELECT p.title FROM directives p
+                     WHERE p.id = d.depends_on AND p.state != 'completed') AS blocker
              FROM directives d
              JOIN milestones m ON m.id = d.milestone_id
              JOIN goals g ON g.id = m.goal_id
@@ -2234,9 +2242,13 @@ pub struct LedgerRow {
     /// The title of this task's prerequisite when that prerequisite is not
     /// `completed`, else `None`.
     ///
-    /// The subquery is a correlated `SELECT` on `depends_on` and NOT a
-    /// join: a task with no prerequisite must still appear, and an inner
-    /// join would drop exactly the rows that need explaining most.
+    /// A correlated subquery on `depends_on` rather than a join, because a
+    /// task with no prerequisite must still appear and an inner join would
+    /// drop exactly the rows that need explaining most. The `state <>` is
+    /// inside the subquery and not left to the reader: an edge to a task
+    /// that is now finished is not a blocker, and filtering it here is what
+    /// stops a finished task from being re-derived as outstanding work.
+    ///
     /// `None` is therefore ambiguous between "blocked by nothing" and
     /// "blocked by a row this device never pulled", and the UI resolves it
     /// against `state` — the wording differs, the fact that it is blocked
@@ -2264,6 +2276,12 @@ impl LedgerRow {
     pub fn phase_view(&self) -> Option<(i64, i64)> {
         let (step, total) = self.phase;
         (total > 1 && step >= 1 && step <= total).then_some((step, total))
+    }
+
+    /// The rating's word, or `None` when the replicated value was out of
+    /// range and has already been clamped away from it.
+    pub fn complexity_label(&self) -> Option<&'static str> {
+        crate::domain::complexity_label(self.complexity)
     }
 }
 
@@ -2337,9 +2355,11 @@ fn depends_on_reaches(
         return Ok(true);
     }
     let next: Option<Option<String>> = conn
-        .query_row("SELECT depends_on FROM directives WHERE id = ?1", [from], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT depends_on FROM directives WHERE id = ?1",
+            [from],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()
         .map_err(StoreError::Sqlite)?;
     match next {
@@ -2366,8 +2386,7 @@ fn goal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Goal> {
 /// carry. Adding `complexity` meant editing all five, and the failure mode
 /// of missing one is a `column index out of range` at runtime on whichever
 /// path was missed — the class of bug this repo keeps paying for.
-const GOAL_COLUMNS: &str =
-    "id, title, description, target_date, status, complexity, hlc_timestamp";
+const GOAL_COLUMNS: &str = "id, title, description, target_date, status, complexity, hlc_timestamp";
 
 fn milestone_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Milestone> {
     Ok(Milestone {

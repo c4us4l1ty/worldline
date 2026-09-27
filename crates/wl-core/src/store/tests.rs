@@ -37,9 +37,11 @@ fn directive_creation_rolls_back_when_phase_outbox_fails() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &phases,
-            Some(&identity))
+            Some(&identity)
+        )
         .is_err());
     assert!(r.runnable_directives("2026-09-13").unwrap().is_empty());
     assert!(r.pending_outbox(100).unwrap().is_empty());
@@ -56,9 +58,11 @@ fn directive_creation_rolls_back_when_phase_outbox_fails() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &phases,
-            Some(&identity))
+            Some(&identity),
+        )
         .unwrap();
     let outbox = r.pending_outbox(100).unwrap();
     let directive_op = outbox
@@ -90,9 +94,11 @@ fn reschedule_directive_rolls_back_when_phase_outbox_fails() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[("Start".into(), None, 5), ("Finish".into(), None, 25)],
-            None)
+            None,
+        )
         .unwrap();
     r.conn
         .lock()
@@ -140,7 +146,13 @@ fn reschedule_directive_rolls_back_when_phase_outbox_fails() {
 
 fn goal_with_milestones(r: &Repos) -> (Goal, Vec<Milestone>) {
     let g = r
-        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), crate::domain::COMPLEXITY_DEFAULT, None)
+        .create_goal(
+            "Ship Worldline v0.1",
+            None,
+            Some("2026-10-01"),
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
         .unwrap();
     let m1 = r
         .create_milestone(&g.id, "Crypto core", None, 0, None)
@@ -224,7 +236,8 @@ fn goal_milestone_directive_roundtrip() {
             Some("Focus on the CRDT merge semantics"),
             45,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[
                 (
                     "Open IDE, write function signature".into(),
@@ -233,7 +246,8 @@ fn goal_milestone_directive_roundtrip() {
                 ),
                 ("Implement core loop logic".into(), None, 25),
             ],
-            None)
+            None,
+        )
         .unwrap();
     assert_eq!(d.progressive_step, 1);
     assert_eq!(d.progressive_total, 2);
@@ -255,10 +269,30 @@ fn directive_state_transitions_and_query() {
     let r = setup();
     let (_, ms) = goal_with_milestones(&r);
     let d1 = r
-        .create_directive(&ms[0].id, "Task A", None, 20, 1, "2026-09-13", None, &[], None)
+        .create_directive(
+            &ms[0].id,
+            "Task A",
+            None,
+            20,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
+        )
         .unwrap();
     let d2 = r
-        .create_directive(&ms[1].id, "Task B", None, 20, 1, "2026-09-14", None, &[], None)
+        .create_directive(
+            &ms[1].id,
+            "Task B",
+            None,
+            20,
+            1,
+            "2026-09-14",
+            None,
+            &[],
+            None,
+        )
         .unwrap();
     let d3 = r
         .create_directive(
@@ -267,9 +301,11 @@ fn directive_state_transitions_and_query() {
             None,
             20,
             1,
-            "2026-09-12", None,
+            "2026-09-12",
+            None,
             &[],
-            None)
+            None,
+        )
         .unwrap();
 
     // runnable = queued AND scheduled_for <= today's probe date,
@@ -329,39 +365,6 @@ fn check_in_upsert_one_per_day() {
     let recent = r.recent_check_ins(10).unwrap();
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].date, "2026-09-13"); // date desc
-}
-
-#[test]
-fn bailout_ledger() {
-    let r = setup();
-    let (_, ms) = goal_with_milestones(&r);
-    let d = r
-        .create_directive(
-            &ms[0].id,
-            "Blocked task",
-            None,
-            30,
-            1,
-            "2026-09-13", None,
-            &[],
-            None)
-        .unwrap();
-    let b = r
-        .record_bailout(
-            &d.id,
-            BailoutReason::ExternalDependency,
-            Some("waiting on client"),
-            None,
-        )
-        .unwrap();
-    assert_eq!(b.reason, BailoutReason::ExternalDependency);
-    let rows: i64 = r
-        .conn
-        .lock()
-        .unwrap()
-        .query_row("SELECT COUNT(*) FROM bailouts", [], |x| x.get(0))
-        .unwrap();
-    assert_eq!(rows, 1);
 }
 
 #[test]
@@ -480,7 +483,15 @@ fn applied_watermark_idempotent() {
 #[test]
 fn goal_status_transitions() {
     let r = setup();
-    let g = r.create_goal("Learn Rust", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal(
+            "Learn Rust",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     assert_eq!(g.status, GoalStatus::Active);
     assert!(r.active_goal().unwrap().is_some());
     r.conn
@@ -714,15 +725,53 @@ fn observe_cannot_drag_the_persisted_head_out_of_range() {
 fn write_paths_reject_blank_oversized_and_malformed_input() {
     let r = setup();
     // Goals.
-    assert!(r.create_goal("   ", None, None, crate::domain::COMPLEXITY_DEFAULT, None).is_err());
-    assert!(r.create_goal(&"x".repeat(501), None, None, crate::domain::COMPLEXITY_DEFAULT, None).is_err());
     assert!(r
-        .create_goal("Ok", Some(&"y".repeat(4001)), None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .create_goal("   ", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
         .is_err());
-    assert!(r.create_goal("Ok", None, Some("2026-13-40"), crate::domain::COMPLEXITY_DEFAULT, None).is_err());
-    assert!(r.create_goal("Ok", None, Some("2026-9-8"), crate::domain::COMPLEXITY_DEFAULT, None).is_err());
+    assert!(r
+        .create_goal(
+            &"x".repeat(501),
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None
+        )
+        .is_err());
+    assert!(r
+        .create_goal(
+            "Ok",
+            Some(&"y".repeat(4001)),
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None
+        )
+        .is_err());
+    assert!(r
+        .create_goal(
+            "Ok",
+            None,
+            Some("2026-13-40"),
+            crate::domain::COMPLEXITY_DEFAULT,
+            None
+        )
+        .is_err());
+    assert!(r
+        .create_goal(
+            "Ok",
+            None,
+            Some("2026-9-8"),
+            crate::domain::COMPLEXITY_DEFAULT,
+            None
+        )
+        .is_err());
     let g = r
-        .create_goal("Ok", Some("fine"), Some("2026-10-01"), crate::domain::COMPLEXITY_DEFAULT, None)
+        .create_goal(
+            "Ok",
+            Some("fine"),
+            Some("2026-10-01"),
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
         .unwrap();
     // Milestones.
     assert!(r.create_milestone(&g.id, "", None, 0, None).is_err());
@@ -739,10 +788,30 @@ fn write_paths_reject_blank_oversized_and_malformed_input() {
         .create_directive(&m.id, "T", None, 0, 1, "2026-09-13", None, &no_phases, None)
         .is_err());
     assert!(r
-        .create_directive(&m.id, "T", None, 1441, 1, "2026-09-13", None, &no_phases, None)
+        .create_directive(
+            &m.id,
+            "T",
+            None,
+            1441,
+            1,
+            "2026-09-13",
+            None,
+            &no_phases,
+            None
+        )
         .is_err());
     assert!(r
-        .create_directive(&m.id, "T", None, 10, 1, "not-a-date", None, &no_phases, None)
+        .create_directive(
+            &m.id,
+            "T",
+            None,
+            10,
+            1,
+            "not-a-date",
+            None,
+            &no_phases,
+            None
+        )
         .is_err());
     assert!(r
         .create_directive(
@@ -751,7 +820,8 @@ fn write_paths_reject_blank_oversized_and_malformed_input() {
             Some(&"z".repeat(4001)),
             10,
             1,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &no_phases,
             None
         )
@@ -763,7 +833,8 @@ fn write_paths_reject_blank_oversized_and_malformed_input() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[("P".into(), None, 0)],
             None
         )
@@ -784,31 +855,6 @@ fn write_paths_reject_blank_oversized_and_malformed_input() {
     assert!(r.goal(&g.id).unwrap().is_some());
     assert_eq!(r.milestones_for_goal(&g.id).unwrap().len(), 1);
     assert!(r.pending_outbox(100).unwrap().is_empty());
-}
-
-#[test]
-fn bailout_note_truncates_to_spec_cap() {
-    let r = setup();
-    let (_, milestones) = goal_with_milestones(&r);
-    let d = r
-        .create_directive(&milestones[0].id, "T", None, 10, 1, "2026-09-13", None, &[], None)
-        .unwrap();
-    let long = "n".repeat(500);
-    let b = r
-        .record_bailout(&d.id, BailoutReason::EnergyDepletion, Some(&long), None)
-        .unwrap();
-    assert_eq!(b.note.as_ref().unwrap().chars().count(), 140);
-    let count: i64 = r
-        .conn
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT LENGTH(note) FROM bailouts WHERE id = ?1",
-            [&b.id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 140);
 }
 
 #[test]
@@ -847,7 +893,17 @@ fn reschedule_rejects_out_of_range_estimates_and_dates() {
     let r = setup();
     let (_, milestones) = goal_with_milestones(&r);
     let d = r
-        .create_directive(&milestones[0].id, "T", None, 30, 1, "2026-09-13", None, &[], None)
+        .create_directive(
+            &milestones[0].id,
+            "T",
+            None,
+            30,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
+        )
         .unwrap();
     assert!(r
         .reschedule_directive(&d.id, 0, "2026-09-14", None)
@@ -867,7 +923,14 @@ fn pushed_outbox_rows_are_deleted_not_accumulated() {
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
     )
     .unwrap();
-    r.create_goal("G", None, None, crate::domain::COMPLEXITY_DEFAULT, Some(&identity)).unwrap();
+    r.create_goal(
+        "G",
+        None,
+        None,
+        crate::domain::COMPLEXITY_DEFAULT,
+        Some(&identity),
+    )
+    .unwrap();
     assert_eq!(r.pending_outbox(100).unwrap().len(), 1);
     let ids: Vec<String> = r
         .pending_outbox(100)
@@ -920,9 +983,11 @@ fn zero_backfill_migration_repairs_legacy_rows() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[("A".into(), None, 5), ("B".into(), None, 25)],
-            None)
+            None,
+        )
         .unwrap();
     r.save_settings(&AppSettings::default(), None).unwrap();
     {
@@ -999,7 +1064,15 @@ fn set_goal_status_persists_and_emits_a_crdt_op() {
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
     )
     .unwrap();
-    let g = r.create_goal("Ship v0.1", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal(
+            "Ship v0.1",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     assert_eq!(g.status, GoalStatus::Active);
 
     r.set_goal_status(&g.id, GoalStatus::Achieved, Some(&identity))
@@ -1031,9 +1104,15 @@ fn set_goal_status_rejects_unknown_goal() {
 #[test]
 fn archive_other_active_goals_leaves_exactly_one_active() {
     let r = setup();
-    let a = r.create_goal("A", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let b = r.create_goal("B", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let c = r.create_goal("C", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let a = r
+        .create_goal("A", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
+    let b = r
+        .create_goal("B", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
+    let c = r
+        .create_goal("C", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let active_count = |r: &Repos| -> i64 {
         r.conn
             .lock()
@@ -1061,8 +1140,10 @@ fn active_goal_is_deterministic_when_duplicates_exist() {
     // Even if a legacy data dir still carries two `active` goals,
     // `active_goal()` must not flip between them across calls.
     let r = setup();
-    r.create_goal("older", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    r.create_goal("newer", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    r.create_goal("older", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
+    r.create_goal("newer", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let first = r.active_goal().unwrap().unwrap().id;
     for _ in 0..20 {
         assert_eq!(r.active_goal().unwrap().unwrap().id, first);
@@ -1181,9 +1262,11 @@ fn delete_writers_emit_decryptable_tombstone_ops() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[("A".into(), None, 5), ("B".into(), None, 25)],
-            Some(&identity))
+            Some(&identity),
+        )
         .unwrap();
 
     // Before the delete: the insert ops decrypt as upserts, not tombstones.
@@ -1281,9 +1364,11 @@ fn delete_check_in_and_goal_tombstone_too() {
             None,
             10,
             1,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[],
-            Some(&identity))
+            Some(&identity),
+        )
         .unwrap();
     let ci = r
         .upsert_check_in("2026-09-13", CheckInOutcome::Done, None, Some(&identity))
@@ -1373,15 +1458,27 @@ fn an_oversized_write_is_rejected_rather_than_enqueued_undrainable() {
     let huge = "x".repeat(crate::domain::MAX_DESCRIPTION_CHARS + 1);
     // First line of defence: the write-boundary text budget (#64).
     assert!(
-        r.create_goal("Big", Some(&huge), None, crate::domain::COMPLEXITY_DEFAULT, Some(&identity))
-            .is_err(),
+        r.create_goal(
+            "Big",
+            Some(&huge),
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            Some(&identity)
+        )
+        .is_err(),
         "an over-budget description must be rejected at the text boundary"
     );
 
     // Second line of defence: bypass the text budget to prove the
     // sealed-size guard is live code, not an unreachable belt-and-braces.
     let g2 = r
-        .create_goal("Sealed cap", None, None, crate::domain::COMPLEXITY_DEFAULT, Some(&identity))
+        .create_goal(
+            "Sealed cap",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            Some(&identity),
+        )
         .unwrap();
     let payload = serde_json::json!({
         "title": "x".repeat(400 * 1024),
@@ -1422,7 +1519,15 @@ fn active_goals_with_progress_counts_only_completed_milestones() {
 #[test]
 fn active_goals_with_progress_keeps_a_goal_with_no_milestones() {
     let r = setup();
-    let g = r.create_goal("Unplanned", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal(
+            "Unplanned",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     let rows = r.active_goals_with_progress().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, g.id);
@@ -1433,9 +1538,27 @@ fn active_goals_with_progress_keeps_a_goal_with_no_milestones() {
 #[test]
 fn active_goals_with_progress_excludes_achieved_and_archived_goals() {
     let r = setup();
-    let kept = r.create_goal("Live", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let achieved = r.create_goal("Shipped", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let archived = r.create_goal("Dropped", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let kept = r
+        .create_goal("Live", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
+    let achieved = r
+        .create_goal(
+            "Shipped",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
+    let archived = r
+        .create_goal(
+            "Dropped",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
     r.set_goal_status(&achieved.id, GoalStatus::Achieved, None)
         .unwrap();
     r.set_goal_status(&archived.id, GoalStatus::Archived, None)
@@ -1451,244 +1574,212 @@ fn active_goals_with_progress_excludes_achieved_and_archived_goals() {
 #[test]
 fn active_goals_with_progress_is_newest_first() {
     let r = setup();
-    let a = r.create_goal("First", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let b = r.create_goal("Second", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
-    let c = r.create_goal("Third", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
+    let a = r
+        .create_goal("First", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
+    let b = r
+        .create_goal(
+            "Second",
+            None,
+            None,
+            crate::domain::COMPLEXITY_DEFAULT,
+            None,
+        )
+        .unwrap();
+    let c = r
+        .create_goal("Third", None, None, crate::domain::COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let rows = r.active_goals_with_progress().unwrap();
     let order: Vec<&str> = rows.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(order, vec![c.id.as_str(), b.id.as_str(), a.id.as_str()]);
 }
 
 #[test]
-fn bailout_log_round_trips_every_reason_and_joins_the_goal() {
-    let r = setup();
-    let (g, ms) = goal_with_milestones(&r);
-    let d1 = r
-        .create_directive(
-            &ms[0].id,
-            "Client sign-off",
-            None,
-            30,
-            1,
-            "2026-09-13", None,
-            &[],
-            None)
-        .unwrap();
-    let d2 = r
-        .create_directive(
-            &ms[1].id,
-            "Rewrite the parser",
-            None,
-            30,
-            1,
-            "2026-09-13", None,
-            &[],
-            None)
-        .unwrap();
-    let d3 = r
-        .create_directive(&ms[1].id, "Long day", None, 30, 1, "2026-09-13", None, &[], None)
-        .unwrap();
-    let recorded = [
-        r.record_bailout(
-            &d1.id,
-            BailoutReason::ExternalDependency,
-            Some("awaiting client"),
-            None,
-        )
-        .unwrap(),
-        r.record_bailout(&d2.id, BailoutReason::MiscalculatedScope, None, None)
-            .unwrap(),
-        r.record_bailout(&d3.id, BailoutReason::EnergyDepletion, None, None)
-            .unwrap(),
-    ];
-
-    let rows = r.bailout_log(10).unwrap();
-    assert_eq!(rows.len(), 3);
-    assert_eq!(
-        rows.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
-        vec![
-            recorded[2].id.as_str(),
-            recorded[1].id.as_str(),
-            recorded[0].id.as_str()
-        ],
-        "the ledger must read newest-first"
-    );
-    let by_id = |id: &str| rows.iter().find(|e| e.id == id).unwrap();
-    let mut reasons: Vec<BailoutReason> = rows.iter().map(|e| e.reason).collect();
-    reasons.sort_by_key(|reason| reason.as_str());
-    assert_eq!(
-        reasons,
-        vec![
-            BailoutReason::EnergyDepletion,
-            BailoutReason::ExternalDependency,
-            BailoutReason::MiscalculatedScope,
-        ],
-        "every CHECK-permitted reason must survive the enum mapping"
-    );
-    for b in &recorded {
-        let e = by_id(&b.id);
-        assert_eq!(e.reason, b.reason);
-        assert_eq!(e.note, b.note);
-        assert_eq!(e.goal_id, g.id);
-        assert_eq!(e.goal_title, "Ship Worldline v0.1");
-    }
-    assert_eq!(by_id(&recorded[0].id).directive_id, d1.id);
-    assert_eq!(by_id(&recorded[0].id).directive_title, "Client sign-off");
-    assert_eq!(by_id(&recorded[1].id).directive_title, "Rewrite the parser");
-    assert_eq!(by_id(&recorded[2].id).directive_title, "Long day");
-}
-
-#[test]
-fn bailout_log_flags_only_the_directives_still_parked() {
-    // Engine semantics decide which bailouts are permanent: an external
-    // dependency blocks the directive for good, a miscalculated scope
-    // is requeued, and an energy bailout is skipped. The panel badges on
-    // current state, so the reason alone must not set the flag.
+fn the_ledger_clamps_rather_than_rejects_an_oversized_limit() {
     let r = setup();
     let (_, ms) = goal_with_milestones(&r);
-    let parked = r
+    r.create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", None, &[], None)
+        .unwrap();
+    assert!(r.task_ledger(0).unwrap().is_empty());
+    // A page passing `usize::MAX` ("show everything") must get the ledger,
+    // not a `StoreError::Invalid` it cannot act on.
+    assert_eq!(r.task_ledger(usize::MAX).unwrap().len(), 1);
+}
+
+/// The ledger's ordering is the page's whole shape: open work first, then
+/// what is finished. A ledger that listed finished tasks at the top would
+/// bury the only rows anyone acts on.
+#[test]
+fn the_ledger_lists_open_work_before_finished_tasks() {
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let open = r
         .create_directive(
             &ms[0].id,
-            "Waiting on vendor",
+            "Open",
             None,
-            30,
+            10,
             1,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[],
-            None)
+            None,
+        )
         .unwrap();
-    let requeued = r
-        .create_directive(&ms[0].id, "Resized", None, 30, 1, "2026-09-13", None, &[], None)
+    let done = r
+        .create_directive(
+            &ms[0].id,
+            "Done",
+            None,
+            10,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
+        )
         .unwrap();
-    let skipped = r
-        .create_directive(&ms[1].id, "Ran dry", None, 30, 1, "2026-09-13", None, &[], None)
+    r.set_directive_state(&done.id, DirectiveState::Completed, None)
         .unwrap();
-    r.set_directive_state(&parked.id, DirectiveState::Blocked, None)
-        .unwrap();
-    r.set_directive_state(&requeued.id, DirectiveState::Queued, None)
-        .unwrap();
-    r.set_directive_state(&skipped.id, DirectiveState::Skipped, None)
-        .unwrap();
-    r.record_bailout(&parked.id, BailoutReason::ExternalDependency, None, None)
-        .unwrap();
-    r.record_bailout(&requeued.id, BailoutReason::MiscalculatedScope, None, None)
-        .unwrap();
-    r.record_bailout(&skipped.id, BailoutReason::EnergyDepletion, None, None)
-        .unwrap();
-
-    let rows = r.bailout_log(10).unwrap();
-    let flag = |id: &str| {
+    let rows = r.task_ledger(10).unwrap();
+    assert_eq!(
         rows.iter()
-            .find(|e| e.directive_id == id)
-            .unwrap()
-            .still_blocked
-    };
-    assert!(flag(&parked.id));
-    assert!(!flag(&requeued.id));
-    assert!(!flag(&skipped.id));
+            .map(|r| r.directive_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![open.id.as_str(), done.id.as_str()]
+    );
 }
 
+/// `blocked_by` is the field that makes the page worth more than a list:
+/// a task sitting in the queue with nothing visibly wrong with it is
+/// indistinguishable from a stalled app without it.
 #[test]
-fn bailout_log_derives_a_well_formed_local_date() {
+fn the_ledger_names_the_task_that_is_blocking_each_row() {
     let r = setup();
     let (_, ms) = goal_with_milestones(&r);
-    let d = r
-        .create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", None, &[], None)
-        .unwrap();
-    let b = r
-        .record_bailout(&d.id, BailoutReason::EnergyDepletion, None, None)
-        .unwrap();
-    let rows = r.bailout_log(10).unwrap();
-    let date = rows[0].date.clone();
-    assert!(
-        chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok(),
-        "derived date {date:?} is not YYYY-MM-DD"
-    );
-    // Recorded moments ago, so it is today — allow the midnight rollover.
-    let today = today_local();
-    let yesterday = date_plus_days(&today, -1).unwrap();
-    assert!(
-        date == today || date == yesterday,
-        "expected {today:?} (or {yesterday:?} across a rollover), got {date:?}"
-    );
-
-    // A degenerate clock (physical 0 — what migration 0004 backfills)
-    // must degrade to the epoch, not panic and not drop the row.
-    r.conn
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE bailouts SET hlc_timestamp = '00000000000000000000.00000.00000' WHERE id = ?1",
-            [&b.id],
+    let first = r
+        .create_directive(
+            &ms[0].id,
+            "Draft the outline",
+            None,
+            10,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
         )
         .unwrap();
-    let rows = r.bailout_log(10).unwrap();
+    let second = r
+        .create_directive(
+            &ms[0].id,
+            "Write the draft",
+            None,
+            10,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+    r.set_directive_depends_on(&second.id, Some(&first.id), None)
+        .unwrap();
+
+    let rows = r.task_ledger(10).unwrap();
+    let head = rows.iter().find(|r| r.directive_id == first.id).unwrap();
+    let tail = rows.iter().find(|r| r.directive_id == second.id).unwrap();
+    assert_eq!(head.blocked_by, None, "nothing blocks the head");
+    assert_eq!(tail.blocked_by.as_deref(), Some("Draft the outline"));
+    assert!(tail.is_blocked() && !head.is_blocked());
+
+    // Finishing the prerequisite clears the line, and the subquery checks
+    // the prerequisite's state rather than leaving it to the reader — an
+    // edge to a finished task is not a blocker.
+    r.set_directive_state(&first.id, DirectiveState::Completed, None)
+        .unwrap();
+    let rows = r.task_ledger(10).unwrap();
+    let tail = rows.iter().find(|r| r.directive_id == second.id).unwrap();
+    assert_eq!(tail.blocked_by, None);
+    assert!(!tail.is_blocked());
+    // A completed task is never reported as blocked either way: ticking it
+    // must not re-derive an outstanding obligation from a stale edge.
+    let done = rows.iter().find(|r| r.directive_id == first.id).unwrap();
+    assert!(!done.is_blocked() && done.blocked_by.is_none());
+}
+
+/// A task with no prerequisite must still APPEAR. The blocker is a
+/// correlated subquery rather than a join precisely so an inner join does
+/// not drop the rows that need explaining least.
+#[test]
+fn an_unchained_task_appears_in_the_ledger() {
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    r.create_directive(
+        &ms[0].id,
+        "Solo",
+        None,
+        10,
+        1,
+        "2026-09-13",
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+    let rows = r.task_ledger(10).unwrap();
     assert_eq!(rows.len(), 1);
-    assert!(
-        chrono::NaiveDate::parse_from_str(&rows[0].date, "%Y-%m-%d").is_ok(),
-        "a zeroed clock must still yield a parseable date, got {:?}",
-        rows[0].date
-    );
+    assert_eq!(rows[0].blocked_by, None);
 }
 
+/// A replicated `progressive_step` past the total must not render
+/// "Phase 9 of 4" on the ledger, for the same reason the canvas filters
+/// it.
 #[test]
-fn bailout_log_clamps_rather_than_rejects_an_oversized_limit() {
+fn a_corrupt_phase_number_renders_no_badge() {
     let r = setup();
     let (_, ms) = goal_with_milestones(&r);
     let d = r
-        .create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", None, &[], None)
-        .unwrap();
-    r.record_bailout(&d.id, BailoutReason::EnergyDepletion, None, None)
-        .unwrap();
-    assert!(r.bailout_log(0).unwrap().is_empty());
-    // A panel passing `usize::MAX` (e.g. "show everything") must get the
-    // ledger, not a `StoreError::Invalid` it cannot act on.
-    assert_eq!(r.bailout_log(usize::MAX).unwrap().len(), 1);
-}
-
-#[test]
-fn bailout_log_maps_a_corrupt_reason_to_an_error_not_a_panic() {
-    // The CHECK constraint is the first line of defence, but the mapper
-    // is what a row that predates it (or arrives via remote LWW apply)
-    // hits — it must surface `BadEnum` as a store error, never abort.
-    let r = setup();
-    let (_, ms) = goal_with_milestones(&r);
-    let d = r
-        .create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", None, &[], None)
-        .unwrap();
-    let b = r
-        .record_bailout(&d.id, BailoutReason::EnergyDepletion, None, None)
-        .unwrap();
-    r.conn
-        .lock()
-        .unwrap()
-        .execute_batch(
-            "ALTER TABLE bailouts RENAME TO bailouts_guarded;
-             CREATE TABLE bailouts (
-                 id TEXT PRIMARY KEY NOT NULL,
-                 directive_id TEXT NOT NULL,
-                 reason TEXT NOT NULL,
-                 note TEXT,
-                 hlc_timestamp TEXT NOT NULL
-             );
-             INSERT INTO bailouts SELECT * FROM bailouts_guarded;",
-        )
+        .create_directive(&ms[0].id, "P", None, 60, 1, "2026-09-13", None, &[], None)
         .unwrap();
     r.conn
         .lock()
         .unwrap()
         .execute(
-            "UPDATE bailouts SET reason = 'not_a_reason' WHERE id = ?1",
-            [&b.id],
+            "UPDATE directives SET progressive_step = 9, progressive_total = 2 WHERE id = ?1",
+            [&d.id],
         )
         .unwrap();
-    let err = r.bailout_log(10);
-    assert!(
-        matches!(err, Err(store::StoreError::Sqlite(_))),
-        "a corrupt reason must map to a store error, got {err:?}"
-    );
+    let row = r.task_ledger(10).unwrap().remove(0);
+    assert_eq!(row.phase_view(), None);
 }
 
+/// The goal's own rating rides on every row, because the ledger renders it
+/// as the task's complexity word and the estimator buckets by it.
+#[test]
+fn the_ledger_carries_the_goal_rating_and_the_phase_badge() {
+    let r = setup();
+    let g = r.create_goal("Ship", None, None, 5, None).unwrap();
+    let m = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
+    r.create_directive(
+        &m.id,
+        "P",
+        None,
+        60,
+        2,
+        "2026-09-13",
+        None,
+        &[("One".into(), None, 20), ("Two".into(), None, 40)],
+        None,
+    )
+    .unwrap();
+    let row = r.task_ledger(10).unwrap().remove(0);
+    assert_eq!(row.complexity, 5);
+    assert_eq!(row.complexity_label(), Some("deep"));
+    assert_eq!(row.phase_view(), Some((1, 2)));
+    assert_eq!(row.goal_title, "Ship");
+    assert_eq!(row.milestone_title, "M");
+}
 // ---------------------------------------------------------------------------
 // Dependency edges (migration 0007) and the Estimated Complexity rating.
 // ---------------------------------------------------------------------------
@@ -1702,17 +1793,31 @@ fn two_chained(r: &Repos) -> (String, String) {
     let g = r
         .create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None)
         .unwrap();
-    let m = r
-        .create_milestone(&g.id, "First", None, 0, None)
-        .unwrap();
+    let m = r.create_milestone(&g.id, "First", None, 0, None).unwrap();
     let a = r
         .create_directive(
-            &m.id, "Draft the outline", None, 20, 1, "2026-09-13", None, &[], None,
+            &m.id,
+            "Draft the outline",
+            None,
+            20,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
         )
         .unwrap();
     let b = r
         .create_directive(
-            &m.id, "Write the draft", None, 20, 1, "2026-09-13", None, &[], None,
+            &m.id,
+            "Write the draft",
+            None,
+            20,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            None,
         )
         .unwrap();
     (a.id, b.id)
@@ -1733,7 +1838,10 @@ fn a_directive_whose_prerequisite_is_unfinished_is_not_runnable() {
     let runnable = r.runnable_directives("2026-09-13").unwrap();
     assert_eq!(runnable.len(), 1, "only the chain head is runnable");
     assert_eq!(runnable[0].id, a);
-    assert_eq!(r.next_runnable_directive("2026-09-13").unwrap().unwrap().id, a);
+    assert_eq!(
+        r.next_runnable_directive("2026-09-13").unwrap().unwrap().id,
+        a
+    );
 }
 
 #[test]
@@ -1765,11 +1873,9 @@ fn a_chain_unlocks_exactly_one_link_at_a_time() {
         .unwrap();
     let m = r.create_milestone(&g.id, "Chain", None, 0, None).unwrap();
     let mk = |title: &str| {
-        r.create_directive(
-            &m.id, title, None, 20, 1, "2026-09-13", None, &[], None,
-        )
-        .unwrap()
-        .id
+        r.create_directive(&m.id, title, None, 20, 1, "2026-09-13", None, &[], None)
+            .unwrap()
+            .id
     };
     let a = mk("a");
     let b = mk("b");
@@ -1811,12 +1917,18 @@ fn a_dependency_cycle_does_not_hang_and_is_never_satisfied() {
     r.conn
         .lock()
         .unwrap()
-        .execute("UPDATE directives SET depends_on = ?2 WHERE id = ?1", [&a, &b])
+        .execute(
+            "UPDATE directives SET depends_on = ?2 WHERE id = ?1",
+            [&a, &b],
+        )
         .unwrap();
     r.conn
         .lock()
         .unwrap()
-        .execute("UPDATE directives SET depends_on = ?2 WHERE id = ?1", [&b, &a])
+        .execute(
+            "UPDATE directives SET depends_on = ?2 WHERE id = ?1",
+            [&b, &a],
+        )
         .unwrap();
     // Bounded because the loop is: without the hop limit this is the test
     // that hangs the suite rather than failing it.
@@ -1878,7 +1990,9 @@ fn a_self_reference_and_a_two_node_cycle_are_both_refused() {
 fn an_edge_to_a_missing_directive_is_refused_at_the_write_boundary() {
     let r = setup();
     let (a, _) = two_chained(&r);
-    assert!(r.set_directive_depends_on("dir-nope", Some(&a), None).is_err());
+    assert!(r
+        .set_directive_depends_on("dir-nope", Some(&a), None)
+        .is_err());
     // …and an over-long id cannot be smuggled in as an edge.
     let long = "x".repeat(crate::domain::MAX_TITLE_CHARS + 1);
     assert!(r.set_directive_depends_on(&a, Some(&long), None).is_err());
@@ -1891,9 +2005,7 @@ fn an_edge_to_a_missing_directive_is_refused_at_the_write_boundary() {
 #[test]
 fn complexity_is_checked_on_write_and_clamped_on_read() {
     let r = setup();
-    let g = r
-        .create_goal("Ship", None, None, 5, None)
-        .unwrap();
+    let g = r.create_goal("Ship", None, None, 5, None).unwrap();
     assert_eq!(g.complexity, 5);
     assert_eq!(r.goal(&g.id).unwrap().unwrap().complexity, 5);
     for bad in [0, 6, i64::MIN, i64::MAX] {
@@ -1939,12 +2051,28 @@ fn the_edge_and_the_rating_are_both_carried_by_a_crdt_op() {
         .unwrap();
     let a = r
         .create_directive(
-            &m.id, "a", None, 20, 1, "2026-09-13", None, &[], Some(&identity),
+            &m.id,
+            "a",
+            None,
+            20,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            Some(&identity),
         )
         .unwrap();
     let b = r
         .create_directive(
-            &m.id, "b", None, 20, 1, "2026-09-13", None, &[], Some(&identity),
+            &m.id,
+            "b",
+            None,
+            20,
+            1,
+            "2026-09-13",
+            None,
+            &[],
+            Some(&identity),
         )
         .unwrap();
     r.set_directive_depends_on(&b.id, Some(&a.id), Some(&identity))
@@ -1989,7 +2117,7 @@ fn unmet_prerequisites_name_the_blocker_including_one_we_do_not_have() {
     r.set_directive_depends_on(&b, Some(&a), None).unwrap();
     let ids = vec![a.clone(), b.clone()];
     let unmet = r.unmet_prerequisites(&ids).unwrap();
-    assert!(unmet.get(&a).is_none(), "nothing blocks the head");
+    assert!(!unmet.contains_key(&a), "nothing blocks the head");
     assert_eq!(
         unmet.get(&b).map(Vec::as_slice),
         Some([a.clone()].as_slice()),
@@ -1998,8 +2126,9 @@ fn unmet_prerequisites_name_the_blocker_including_one_we_do_not_have() {
 
     r.set_directive_state(&a, DirectiveState::Completed, None)
         .unwrap();
+    let unmet = r.unmet_prerequisites(&ids).unwrap();
     assert!(
-        r.unmet_prerequisites(&ids).unwrap().get(&b).is_none(),
+        !unmet.contains_key(&b),
         "a completed prerequisite is not a blocker"
     );
 }

@@ -13,7 +13,9 @@ const TODAY: &str = "2026-09-13";
 
 fn repo_with_two_phase_directive() -> (Repos, String) {
     let r = Repos::new(open_in_memory().unwrap(), 1);
-    let g = r.create_goal("G", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal("G", None, None, COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let ms = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
     let d = r
         .create_directive(
@@ -22,12 +24,14 @@ fn repo_with_two_phase_directive() -> (Repos, String) {
             None,
             30,
             2,
-            TODAY, None,
+            TODAY,
+            None,
             &[
                 ("Phase one".into(), None, 5),
                 ("Phase two".into(), None, 25),
             ],
-            None)
+            None,
+        )
         .unwrap();
     (r, d.id)
 }
@@ -107,7 +111,8 @@ fn defect_hlc_not_persisted_across_restarts() {
     let conn = open_in_memory().unwrap();
     let before = {
         let r1 = Repos::new(conn, 1);
-        r1.create_goal("G", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+        r1.create_goal("G", None, None, COMPLEXITY_DEFAULT, None)
+            .unwrap();
         let count: i64 = r1
             .conn
             .lock()
@@ -251,14 +256,17 @@ fn defect_read_path_activation_emits_no_outbox_op() {
 /// total). `reschedule_directive` resets progress to phase 1 and
 /// rescales phase minutes to the new total, so estimate and phases
 /// agree again.
+///
+/// Reached through `reschedule_directive` directly since 2026-09-27: the
+/// escape hatch that used to call it was deleted with the whole bailout
+/// path, and the property under test is the store's, not the modal's.
 #[test]
 fn defect_downsize_requeue_keeps_stale_phase_progress() {
     let (r, id) = repo_with_two_phase_directive();
     let e = Engine::new(&r, None);
     e.activate_next(TODAY).unwrap();
     e.complete(TODAY).unwrap(); // now on phase 2
-    e.bail_out(TODAY, BailoutReason::MiscalculatedScope, None)
-        .unwrap();
+    r.reschedule_directive(&id, 15, "2026-09-14", None).unwrap();
     let d = r.directive(&id).unwrap().unwrap();
     assert_eq!(d.state, DirectiveState::Queued);
     assert_eq!(d.estimated_minutes, 15, "halved with 15-min floor");
@@ -268,11 +276,10 @@ fn defect_downsize_requeue_keeps_stale_phase_progress() {
     );
     let phases = r.phases_for_directive(&id).unwrap();
     assert_eq!(phases[0].state, PhaseState::Active);
-    assert_eq!(phases[1].state, PhaseState::Pending);
-    let total: i64 = phases.iter().map(|p| p.minutes).sum();
+    let sum: i64 = phases.iter().map(|p| p.minutes).sum();
     assert_eq!(
-        total, 15,
-        "rescaled phase minutes must sum to the new estimate"
+        sum, 15,
+        "the phase table must be rescaled to the new total, not left at 30"
     );
 }
 
@@ -296,7 +303,9 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
     )
     .unwrap();
-    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, Some(&identity)).unwrap();
+    let g = r
+        .create_goal("Ship", None, None, COMPLEXITY_DEFAULT, Some(&identity))
+        .unwrap();
     let m = r
         .create_milestone(&g.id, "M1", None, 0, Some(&identity))
         .unwrap();
@@ -307,12 +316,14 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[
                 ("Write the spec".into(), Some("be thorough".into()), 5),
                 ("Ship it".into(), None, 25),
             ],
-            Some(&identity))
+            Some(&identity),
+        )
         .unwrap();
     // Mark step 1 done, as a real session would.
     assert_eq!(r.phases_for_directive(&d.id).unwrap().len(), 2);
@@ -376,7 +387,9 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
 #[test]
 fn defect_absurd_phase_count_is_rejected_before_allocating() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
-    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let d = r
         .create_directive(
@@ -385,9 +398,11 @@ fn defect_absurd_phase_count_is_rejected_before_allocating() {
             None,
             30,
             2,
-            "2026-09-13", None,
+            "2026-09-13",
+            None,
             &[("A".into(), None, 15), ("B".into(), None, 15)],
-            None)
+            None,
+        )
         .unwrap();
     r.conn
         .lock()
@@ -409,24 +424,36 @@ fn defect_absurd_phase_count_is_rejected_before_allocating() {
 /// `skipped` is outstanding work, not completion.
 ///
 /// The outstanding set was `('queued','active','blocked')`, so a
-/// milestone with two directives — one bailed out for energy (→
-/// `skipped`) and one completed — was marked `completed` with the
-/// skipped directive unstarted and unreachable: `next_runnable_directive`
-/// only selects `queued`, and nothing requeues a skip.
+/// milestone with two directives — one `skipped` and one completed — was
+/// marked `completed` with the skipped directive unstarted and
+/// unreachable: `next_runnable_directive` only selects `queued`, and
+/// nothing requeues a skip.
+///
+/// The escape hatch that used to produce `skipped` is gone (2026-09-27),
+/// but the state is still in the schema's CHECK and a peer can still write
+/// it through `apply_upsert`, so the rule that keeps it from being silently
+/// swallowed is still load-bearing and is still tested here.
 #[test]
 fn defect_milestone_is_not_completed_while_a_skipped_directive_remains() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
     let e = Engine::new(&r, None);
     let today = "2026-09-13";
-    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let d = r
         .create_directive(&m.id, "A", None, 20, 1, today, None, &[], None)
         .unwrap();
-    let _ = e.activate_next(today).unwrap();
-    // Energy bailout → skipped.
-    e.bail_out(today, BailoutReason::EnergyDepletion, None)
+    let d2 = r
+        .create_directive(&m.id, "B", None, 20, 1, today, None, &[], None)
         .unwrap();
+    let _ = e.activate_next(today).unwrap();
+    // A peer-equivalent `skipped`, then the other one finished through the
+    // ledger's writer.
+    r.set_directive_state(&d.id, DirectiveState::Skipped, None)
+        .unwrap();
+    e.mark_complete(today, &d2.id).unwrap();
     assert!(r.directive(&d.id).unwrap().is_some());
     let state: String = r
         .conn
@@ -463,7 +490,9 @@ fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
     let e = Engine::new(&r, None);
     let today = "2026-09-13";
-    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+    let g = r
+        .create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None)
+        .unwrap();
     let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let d = r
         .create_directive(
@@ -472,9 +501,11 @@ fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
             None,
             30,
             2,
-            today, None,
+            today,
+            None,
             &[("A".into(), None, 5), ("B".into(), None, 25)],
-            None)
+            None,
+        )
         .unwrap();
     let _ = e.activate_next(today).unwrap();
     r.conn

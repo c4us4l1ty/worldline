@@ -371,7 +371,9 @@ impl PlanResult {
 
     /// The same order, mutably — `repair_plan`'s edge pass.
     pub fn directives_mut(&mut self) -> impl Iterator<Item = &mut DirectiveDraft> {
-        self.milestones.iter_mut().flat_map(|m| m.directives.iter_mut())
+        self.milestones
+            .iter_mut()
+            .flat_map(|m| m.directives.iter_mut())
     }
 }
 
@@ -454,18 +456,48 @@ fn validate_text(field: &'static str, text: &str) -> Result<(), DispatchError> {
     Ok(())
 }
 
+/// Deserializes a reply into a plan, WITHOUT judging its shape.
+///
+/// Parsing and validating are separate questions, and the order matters
+/// more than it looks. This used to call [`validate_plan`] itself, which
+/// meant a plan the repair pass exists to fix was rejected before the
+/// repair pass could see it — the whole 2026-09-27 pass was dead code
+/// behind one line. The tier path is now
+/// `parse_plan` → [`repair_plan`] → [`validate_plan`], and the last of
+/// those is still run before anything is written.
+///
+/// The only things that can still fail here are the ones no amount of
+/// repair can address: no JSON object in the reply, or a field of the wrong
+/// type entirely.
 pub fn parse_plan(raw: &str) -> Result<PlanResult, DispatchError> {
     validate_response_size(raw)?;
     let cleaned = strip_fences(raw);
     let block = extract_json_block(cleaned)
         .ok_or_else(|| DispatchError::BadJson("no JSON object found".into()))?;
-    let plan: PlanResult =
-        serde_json::from_str(block).map_err(|e| DispatchError::BadJson(e.to_string()))?;
-    validate_plan(&plan)?;
-    Ok(plan)
+    serde_json::from_str(block).map_err(|e| DispatchError::BadJson(e.to_string()))
 }
 
-fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
+/// Parses and repairs in one step — the tier path's entry point.
+///
+/// Returns the report so the caller can tell the user what it changed
+/// without a second pass over the plan to work it out.
+pub fn parse_and_repair(
+    raw: &str,
+    intent: &str,
+) -> Result<(PlanResult, RepairReport), DispatchError> {
+    let mut plan = parse_plan(raw)?;
+    let report = repair_plan(&mut plan, intent);
+    Ok((plan, report))
+}
+
+/// The schema contract a plan has to meet before it can be written.
+///
+/// `pub` because it is the acceptance criterion for
+/// [`repair_plan`]: "repaired" means exactly "this now returns `Ok`", and a
+/// test that could not call it would have to approximate that. The tier
+/// path still runs it before persisting, so a repair pass that misses a
+/// case costs a rejected plan rather than a malformed row.
+pub fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
     // The architect names the goal, so its title is validated like every
     // other model-authored string. A title that is present but blank is
     // NOT an error: `persist_plan` reads that as "no title offered" and
@@ -780,10 +812,7 @@ pub fn persist_plan(
         }
     }
     warnings.extend(preview.repair.notes.iter().cloned());
-    Ok(PersistedPlan {
-        goal_id,
-        warnings,
-    })
+    Ok(PersistedPlan { goal_id, warnings })
 }
 
 // ---------------------------------------------------------------------------
@@ -875,9 +904,10 @@ pub fn repair_plan(plan: &mut PlanResult, intent: &str) -> RepairReport {
         m.title = repair_text(m.title.trim(), "Milestone", &mut report);
     }
     for m in plan.milestones.iter_mut() {
-        if let Some(clipped) =
-            clip(m.description.as_deref().unwrap_or(""), crate::domain::MAX_DESCRIPTION_CHARS)
-        {
+        if let Some(clipped) = clip(
+            m.description.as_deref().unwrap_or(""),
+            crate::domain::MAX_DESCRIPTION_CHARS,
+        ) {
             if clipped != m.description.as_deref().unwrap_or("") {
                 m.description = Some(clipped.to_string());
             }
@@ -978,28 +1008,174 @@ fn repair_directive(d: &mut DirectiveDraft, report: &mut RepairReport) {
             p.title = "Continue".into();
         }
     }
-    if !d.phases.is_empty() {
-        let sum: i64 = d.phases.iter().map(|p| p.minutes).sum();
-        // Rescale to the estimate so the badge and the phase table agree.
-        if sum != d.estimated_minutes {
-            rescale_phases(&mut d.phases, d.estimated_minutes);
-            report.note(format!(
-                "“{}” phases were rescaled to its {} minute estimate.",
-                d.title, d.estimated_minutes
-            ));
+    if d.phases.is_empty() {
+        if d.estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES {
+            // The one synthesis: a long task with no phases cannot be stored
+            // (`create_directive` requires progressive rows above the
+            // threshold), and the old code REJECTED the plan for it. Split
+            // it deterministically instead.
+            let (phases, total) = synthesise_phases(d.estimated_minutes);
+            if total < d.estimated_minutes {
+                report.note(format!(
+                    "“{}” is longer than {MAX_SYNTHESIS_PHASES} steps of {PHASE_MAX} \
+                     minutes can cover; it was capped at {total} minutes. Consider making \
+                     it several tasks.",
+                    d.title
+                ));
+            } else {
+                report.note(format!(
+                    "“{}” had no steps for a {total} minute task; it was split into {}.",
+                    d.title,
+                    phases.len()
+                ));
+            }
+            d.phases = phases;
+            d.estimated_minutes = total;
         }
-    } else if d.estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES {
-        // The one synthesis: a long task with no phases cannot be stored
-        // (`create_directive` requires progressive rows above the
-        // threshold), and the old code REJECTED the plan for it. Split it
-        // deterministically instead, exactly the way `ensure_phases` does.
-        split_phases(d, report);
+    } else {
+        let title = d.title.clone();
+        let total = reconcile_phases(&mut d.phases, d.estimated_minutes, &title, report);
+        d.estimated_minutes = total;
     }
 }
 
-/// Rescales phase minutes to `total`, keeping each phase's share of the
+/// The 5–25 minute band a phase is supposed to sit in (PRD §5.2).
+const PHASE_MIN: i64 = 1;
+const PHASE_MAX: i64 = 25;
+
+/// Most steps a synthesised task is split into — and the schema's own
+/// ceiling, which `validate_directive` enforces as `2..=4`.
+///
+/// This is a real limit rather than a preference, and it has a consequence
+/// worth stating: four steps of at most 25 minutes is 100 minutes, so a
+/// directive the model estimated at four hours cannot be represented as
+/// four phases. The old code rejected the entire plan for that. Now the
+/// task is capped at 100 minutes and the note tells the user it should
+/// have been several tasks — which is the actual advice, and the same
+/// thing the old bailout modal said when it split a scope downsize.
+const MAX_SYNTHESIS_PHASES: i64 = 4;
+
+/// Steps needed to hold `minutes` inside the per-phase band.
+fn phase_count_for(minutes: i64) -> i64 {
+    // Hand-rolled rather than `div_ceil`, which is still unstable on this
+    // toolchain (rust-lang#88581).
+    ((minutes + PHASE_MAX - 1) / PHASE_MAX).clamp(2, MAX_SYNTHESIS_PHASES)
+}
+
+/// Splits `estimate` into steps that all sit inside the band, returning the
+/// steps and the total they actually cover.
+///
+/// The total is **not** always the estimate: `count × 25` is a hard ceiling
+/// and a longer task is capped rather than split into out-of-band steps.
+/// That is why the caller compares the two and reports the difference.
+fn synthesise_phases(estimate: i64) -> (Vec<PhaseDraft>, i64) {
+    let count = phase_count_for(estimate);
+    let total = estimate.min(count * PHASE_MAX);
+    (even_phases(count, total), total)
+}
+
+/// `count` phases summing exactly to `total`, as even as possible.
+fn even_phases(count: i64, total: i64) -> Vec<PhaseDraft> {
+    let count = count.max(1);
+    let each = (total / count).clamp(PHASE_MIN, PHASE_MAX);
+    (0..count)
+        .map(|i| {
+            // The last absorbs the remainder so the sum is exact.
+            let minutes = if i == count - 1 {
+                (total - each * (count - 1)).clamp(PHASE_MIN, PHASE_MAX)
+            } else {
+                each
+            };
+            PhaseDraft {
+                title: format!("Step {}", i + 1),
+                instruction: None,
+                minutes,
+            }
+        })
+        .collect()
+}
+
+/// Brings a model-supplied phase table inside the band, and returns the
+/// total the steps now add up to.
+///
+/// Three operations, in this order, and the order is the point:
+/// distribute the estimate, then split anything still over 25, then clamp.
+/// Clamping first would silently eat time; distributing into more steps
+/// does not. And the returned total **becomes** the directive's estimate —
+/// `persist_plan` already lets the phase sum override the headline number,
+/// so making them agree here means the preview, the badge and the stored
+/// row cannot disagree.
+fn reconcile_phases(
+    phases: &mut Vec<PhaseDraft>,
+    estimate: i64,
+    title: &str,
+    report: &mut RepairReport,
+) -> i64 {
+    let before = phases.len();
+    let old_total: i64 = phases.iter().map(|p| p.minutes).sum();
+    if old_total <= 0 || estimate < phases.len() as i64 {
+        return old_total;
+    }
+    if old_total != estimate {
+        distribute(phases, estimate);
+        report.note(format!(
+            "“{title}” phases were rescaled to its {estimate} minute estimate."
+        ));
+    }
+    // Split any step still over the band, longest first, until nothing
+    // exceeds it or we run out of steps.
+    while let Some(widest) = phases
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.minutes > PHASE_MAX)
+        .max_by_key(|(_, p)| p.minutes)
+        .map(|(i, _)| i)
+    {
+        if phases.len() as i64 >= MAX_SYNTHESIS_PHASES {
+            break;
+        }
+        let half = phases[widest].minutes / 2;
+        let rest = phases[widest].minutes - half;
+        let at = widest + 1;
+        phases.insert(
+            at,
+            PhaseDraft {
+                title: format!("{} (cont.)", phases[widest].title),
+                instruction: None,
+                minutes: half.max(PHASE_MIN),
+            },
+        );
+        phases[widest].minutes = rest.max(PHASE_MIN);
+    }
+    // Anything still over the band is a task longer than eight steps can
+    // honestly cover. Clamp it, and say so, because the number the user
+    // approved just changed.
+    let mut clamped = false;
+    for p in phases.iter_mut() {
+        if p.minutes > PHASE_MAX {
+            p.minutes = PHASE_MAX;
+            clamped = true;
+        }
+    }
+    let total: i64 = phases.iter().map(|p| p.minutes).sum();
+    if clamped {
+        report.note(format!(
+            "“{title}” is longer than {MAX_SYNTHESIS_PHASES} steps allow; \
+             it was capped at {total} minutes. Consider splitting it into two tasks."
+        ));
+    }
+    if phases.len() != before {
+        report.note(format!(
+            "“{title}” was split into {} steps to keep each under {PHASE_MAX} minutes.",
+            phases.len()
+        ));
+    }
+    total
+}
+
+/// Redistributes `total` across `phases`, keeping each phase's share of the
 /// original and letting the last absorb the rounding.
-fn rescale_phases(phases: &mut [PhaseDraft], total: i64) {
+fn distribute(phases: &mut [PhaseDraft], total: i64) {
     let old: i64 = phases.iter().map(|p| p.minutes).sum();
     if old <= 0 || total < phases.len() as i64 {
         return;
@@ -1010,52 +1186,18 @@ fn rescale_phases(phases: &mut [PhaseDraft], total: i64) {
         p.minutes = if i == last {
             remaining
         } else {
-            let scaled = (i128::from(p.minutes) * i128::from(total) + i128::from(old) / 2)
-                / i128::from(old);
+            let scaled =
+                (i128::from(p.minutes) * i128::from(total) + i128::from(old) / 2) / i128::from(old);
             // One minute per remaining phase is the floor; anything less
             // would make `create_directive` reject the whole row. The i128
             // arithmetic is the same widening the store's own rescale uses,
             // for the same reason: `total` is bounded by MAX_MINUTES but the
             // product is not obviously so.
-            let headroom = (remaining - (last - i) as i64).max(1) as i128;
-            scaled.clamp(1, headroom) as i64
+            let headroom = (remaining - (last - i) as i64).max(PHASE_MIN) as i128;
+            scaled.clamp(PHASE_MIN as i128, headroom) as i64
         };
         remaining -= p.minutes;
     }
-}
-
-/// Splits a long directive into 2–4 even phases, in place.
-fn split_phases(d: &mut DirectiveDraft, report: &mut RepairReport) {
-    // Two phases for anything just over the threshold, three to four once
-    // there is enough time for the split to be worth the friction. The
-    // bounds are the same ones `validate_directive` used to enforce, so
-    // this cannot produce a row the store will reject.
-    let count = match d.estimated_minutes {
-        m if m <= 50 => 2,
-        m if m <= 120 => 3,
-        _ => 4,
-    }
-    .clamp(2, 4) as usize;
-    let each = (d.estimated_minutes / count as i64).max(1);
-    let mut phases = Vec::with_capacity(count);
-    for i in 0..count {
-        // The last phase absorbs the remainder so the sum is exact.
-        let minutes = if i + 1 == count {
-            d.estimated_minutes - each * (count as i64 - 1)
-        } else {
-            each
-        };
-        phases.push(PhaseDraft {
-            title: format!("Step {}", i + 1),
-            instruction: None,
-            minutes: minutes.max(1),
-        });
-    }
-    report.note(format!(
-        "“{}” had no steps for a {} minute task; it was split into {count}.",
-        d.title, d.estimated_minutes
-    ));
-    d.phases = phases;
 }
 
 /// A display name for something the model left blank.
@@ -1067,7 +1209,9 @@ fn repair_text(text: &str, fallback: &str, report: &mut RepairReport) -> String 
     if !text.is_empty() {
         return text.to_string();
     }
-    report.note(format!("{fallback} had no name and was labelled “{fallback}”."));
+    report.note(format!(
+        "{fallback} had no name and was labelled “{fallback}”."
+    ));
     fallback.to_string()
 }
 
@@ -1163,8 +1307,7 @@ impl AiDispatcher {
         let text = provider
             .extract_text(&resp)
             .ok_or_else(|| DispatchError::BadJson("no content in response".into()))?;
-        let mut plan = parse_plan(&text)?;
-        let repair = repair_plan(&mut plan, intent);
+        let (plan, repair) = super::dispatch::parse_and_repair(&text, intent)?;
         // A plan with nothing in it cannot be previewed, and the honest
         // answer to that is the seeded fallback rather than an error the
         // user cannot act on.
@@ -1173,7 +1316,7 @@ impl AiDispatcher {
         }
         // Belt and braces: repair is meant to make this unreachable, and if
         // it ever is not, the plan is still better than nothing.
-        validate_plan(&plan)?;
+        super::dispatch::validate_plan(&plan)?;
         Ok(PlanPreview {
             plan,
             repair,
@@ -1207,12 +1350,7 @@ impl AiDispatcher {
             Self::master_plan_preview(provider, intent, target_date, complexity, record, execute)?;
         // `intent` doubles as the title fallback: if the model named the
         // goal, this is ignored.
-        let persisted = persist_plan(
-            repos,
-            Some((intent, None, target_date)),
-            &preview,
-            identity,
-        )?;
+        let persisted = persist_plan(repos, Some((intent, None, target_date)), &preview, identity)?;
         Ok((persisted, preview.plan))
     }
 }
