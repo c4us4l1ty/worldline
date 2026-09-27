@@ -1479,3 +1479,100 @@ fault the report assumed.
     Not exercised: Google's and bytez.com's model endpoints (no keys),
     and a full `master_plan` round trip through the shell (needs the
     assembled binary). The parsing half of all three is fixture-tested.
+
+## Native-widget and cascade bugs (2026-09-27, user-reported from a screenshot)
+
+Six defects, five of them invisible to the test suite because they live
+in `wl.css` and none of them are behaviour the UI crate can assert on.
+All were found by reading the stylesheet against a screenshot of the
+running app rather than by reasoning about the design.
+
+150. **The provider `<select>` was painting a near-white box with
+    #E5E2E0 text on it.** Two compounding causes, and the first one is
+    the one that actually mattered:
+    * **The page never told the UA it was dark.** There was no
+      `color-scheme` anywhere in the stylesheet, so every NATIVE widget
+      rendered with the light system palette. A native `<select>` draws
+      its own closed state and its own popup, and ignores
+      `background-color` entirely — which is why restyling `.wl-select`
+      could never have fixed it, no matter how many properties were
+      added. `color-scheme: dark` is now on `:root` and
+      `color-scheme: light` on `[data-theme="light"]`, so the widgets
+      flip with the theme.
+    * `.wl-select` also lacked `appearance: none`, which
+      `.wl-horizon` on the compose screen already had. It now matches
+      that control exactly — same pill geometry, same inline SVG chevron,
+      plus explicit `.wl-select option` colours for the popup, which
+      `appearance: none` cannot reach. Near-white text on a light native
+      background is why the control read as "broken" rather than merely
+      unstyled.
+
+151. **`.wl-btn-compact` was silently defeated everywhere it was used.**
+    It and `.wl-btn-ghost` have equal specificity and both set `width`,
+    `height` and `font-size` — and `.wl-btn-compact` was declared ~550
+    lines *earlier*, so the ghost's `width: 100%` always won and every
+    compact button rendered full-width. The catalog's "Refresh models"
+    is the visible instance. Two of the three pre-existing call sites
+    had been rescued by one-off overrides (`.wl-inline-actions
+    .wl-btn-ghost`, `.wl-drawer-close`), which is the signature of
+    exactly this bug having been hit and patched locally before. The
+    block is now declared *after* `.wl-btn-ghost`, so the cascade is
+    honest and no new call site can hit it.
+
+152. **`prefers-reduced-motion` was decorative.** The block was
+    `* { transition: none !important; }` — transitions only. Every
+    `animation` in the file still ran for users who asked for none of
+    them: the backdrop fade, the nav slide, the sheet rise, the card
+    enter. Both properties are now disabled, on `*`, `*::before` and
+    `*::after`.
+
+153. **The hamburger "blink" was two overlapping fades.** `@keyframes
+    wl-nav-slide` animated `transform` **and** `opacity`, starting at
+    `opacity: 0.6`, while `.wl-modal-backdrop` independently faded from
+    `0` to `1` over 160ms underneath it. For the length of the animation
+    the drawer was translucent and the canvas showed *through* it,
+    superimposed on a still-lightening backdrop — a ghost of the page,
+    which reads as a flicker rather than as an animation. The sheet now
+    animates `transform` only; the backdrop's fade is the part that earns
+    its keep, because it is the dimming.
+
+    The nav drawer was the only sheet doing this: `.wl-drawer-sheet`
+    (telemetry) has no animation at all, which is why the report named
+    the hamburger specifically.
+
+154. **Scrollbars were styled with Firefox-only properties.**
+    `.wl-scroll-region` set `scrollbar-width` and `scrollbar-color`,
+    which **WebKitGTK ignores entirely** — and WebKitGTK is what the
+    Linux shell renders in. The result was the engine's default scrollbar,
+    a bright light-grey bar down the right edge of a #131312 canvas,
+    visible in the report's screenshot. `::-webkit-scrollbar`,
+    `-track` and `-thumb` rules are now present, and `.wl-picker-list`
+    (also a scroll container, and previously unstyled for this) inherits
+    the same treatment. The Firefox properties are kept — they cost
+    nothing and the browser harness may not always be WebKit.
+
+155. **The model picker shared a z-index with the toast.** Both were 60,
+    and the sheet is bottom-anchored while `.wl-toast` sits at
+    `bottom: 86px` — squarely on top of the model list. The picker's
+    backdrop is now 80. The other overlays are deliberately left BELOW
+    the toast at 40: the telemetry drawer flashes a toast when you sync
+    from inside it, and raising its backdrop would hide the result of
+    the button you just pressed.
+
+156. **The embedded release bundle was 8 hours stale.** `frontendDist`
+    still held the 12:57 build — predating the model picker entirely, so
+    a `cargo tauri build` binary would have shipped a UI without any of
+    it. `scripts/build-ui.sh` has been re-run (wasm 942 810 B, 90% of
+    the 1 MiB budget, prune + size check passed) and the minified
+    output was inspected to confirm the fixes above survive
+    minification *and* keep their cascade order — `.wl-btn-compact` is
+    emitted after `.wl-btn-ghost`, which was the whole point of 151.
+
+**Not verified interactively.** No desktop browser was attached, so
+none of this was observed rendering. The fixes are verified by reading
+the source and by confirming them in the built artefact; 153 in
+particular is a diagnosis of the animation from the CSS, not a
+reproduction. If the hamburger still blinks, the next suspects are the
+backdrop fade itself (`160ms` on `--ease-tactile`, which front-loads
+almost all its motion into the first ~30ms) and the canvas's
+`wl-card-enter` re-running behind the scrim.

@@ -4,6 +4,17 @@
    ========================================================================== */
 
 :root {
+  /* Tell the UA this page is dark. Without it every NATIVE widget —
+     the provider `<select>`'s closed state and its dropdown popup,
+     scrollbars, the search field's clear button, autofill — renders
+     with the light system palette. The settings provider select was
+     painting a near-white field carrying #E5E2E0 text on it: a light
+     box with almost invisible lettering, and no amount of restyling
+     `.wl-select` fixed it because the widget never used our background
+     in the first place. This is the root cause; the `appearance: none`
+     below is the follow-through. */
+  color-scheme: dark;
+
   /* Typography */
   --font-directive: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -75,6 +86,10 @@
 
 /* Light theme overrides via [data-theme="light"] on <html> */
 [data-theme="light"] {
+  /* The mirror of `color-scheme: dark` in `:root`: native widgets have
+     to flip with the theme or a light-mode `<select>` popup appears in a
+     parchment page. */
+  color-scheme: light;
   --wl-canvas: var(--wl-light-canvas);
   --wl-surface-card: var(--wl-light-card);
   --wl-surface-elevated: var(--wl-light-elevated);
@@ -544,12 +559,6 @@ body {
    (Restore beside the phrase input, Remove beside the sealed chip). The
    old approach was an inline `style: "width: auto; padding: 0 16px"` on
    every call site, which is why the sizes had drifted apart. */
-.wl-btn-compact {
-  width: auto;
-  flex: 0 0 auto;
-  height: 46px;
-  padding: 0 16px;
-}
 .wl-btn-danger { color: var(--wl-accent-coral); }
 .wl-btn-danger:hover { color: var(--wl-accent-coral); }
 
@@ -813,7 +822,14 @@ body {
    text-output models and a 420px WebKit popup with that many options is
    unusable. The sheet also has room for a search field and a
    "Recommended" group, neither of which a `<select>` can express. */
-.wl-picker-backdrop { align-items: flex-end; z-index: 60; }
+/* z-index 80, above `.wl-toast` (60). The sheet is anchored to the
+   bottom of the frame and the toast sits at `bottom: 86px`, so at equal
+   z-index the toast landed on top of the model list. The other overlays
+   (nav 40, telemetry 40) are deliberately left BELOW the toast: the
+   telemetry drawer flashes a toast when you sync from inside it, and
+   raising its backdrop would hide the result of the thing you just
+   clicked. */
+.wl-picker-backdrop { align-items: flex-end; z-index: 80; }
 .wl-picker-sheet {
   width: 100%;
   max-height: 84%;
@@ -882,6 +898,11 @@ body {
   gap: 2px;
   margin: 0 -6px;
   padding: 0 6px;
+  /* Same reasoning as `.wl-scroll-region`: the model list is a scroll
+     container, so it needs the WebKit scrollbar rules too, not just the
+     Firefox ones. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--wl-surface-high) transparent;
 }
 .wl-picker-group {
   font-family: var(--font-mono);
@@ -1102,6 +1123,23 @@ body {
 }
 .wl-btn-ghost:hover { background-color: var(--wl-surface-elevated); }
 
+/* `.wl-btn-compact` — a ghost that hugs its label instead of filling its
+   container. It MUST be declared after `.wl-btn-ghost`, because the two
+   have equal specificity and set the same properties (`width`,
+   `height`, `font-size`): while this block sat earlier in the file, the
+   ghost's `width: 100%` silently won and every compact button rendered
+   full-width. Two call sites had been rescued with one-off overrides
+   (`.wl-inline-actions .wl-btn-ghost`, `.wl-drawer-close`) and the rest
+   were broken — including the model catalog's "Refresh models". Ordering
+   is the fix; the overrides stay because they change other properties
+   too. */
+.wl-btn-compact {
+  width: auto;
+  flex: 0 0 auto;
+  height: 46px;
+  padding: 0 16px;
+}
+
 /* Text inputs (settings / goal creation) */
 .wl-input, .wl-textarea, .wl-select {
   width: 100%;
@@ -1117,6 +1155,33 @@ body {
 }
 .wl-input:focus, .wl-textarea:focus, .wl-select:focus {
   border-color: rgba(226, 109, 82, 0.45);
+}
+
+/* The provider `<select>`, styled like `.wl-horizon` on the compose
+   screen: same pill geometry, same inline chevron, same reasoning.
+   `appearance: none` is REQUIRED here, not cosmetic — a native select
+   ignores the background above and paints its own closed state, which
+   is how this control shipped as a near-white box with light-grey text
+   in a graphite panel. `color-scheme` (in `:root`) darkens the dropdown
+   *popup*, which `appearance: none` cannot reach. */
+.wl-select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  /* Room for the chevron; the horizontal padding matches the pill. */
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23949087' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 9px 6px;
+  transition: border-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-select:hover { border-color: var(--wl-border-strong); }
+/* Options are rendered by the OS popup, which `appearance: none` does
+   not touch — so they are styled explicitly as well. */
+.wl-select option {
+  background-color: var(--wl-surface-elevated);
+  color: var(--wl-text-primary);
 }
 .wl-textarea { resize: none; min-height: 72px; }
 .wl-label {
@@ -1301,6 +1366,29 @@ body {
   padding-right: 2px;
 }
 
+/* Scrollbars, WebKitGTK edition.
+   `scrollbar-width` / `scrollbar-color` above are FIREFOX properties.
+   The Linux shell is WebKitGTK, which ignores both and draws its own
+   default scrollbar — a bright light-grey bar against a #131312 canvas,
+   visible down the right edge of Settings. These pseudo-elements are
+   the only thing that reaches the engine that actually renders the
+   app, so they are not optional polish.
+   `::-webkit-scrollbar-track` is transparent rather than
+   `--wl-canvas` so the track does not draw a visible seam where the
+   scroll region ends. */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--wl-surface-high);
+  border-radius: 4px;
+  /* A transparent border keeps the thumb off the container edge, so it
+     reads as inset rather than as a bar flush with the frame. */
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #45453F; }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background-color: #CFC8BA; }
+
 /* Morning brief greeting (Doppio One editorial) */
 .wl-brief-greeting {
   font-family: var(--font-serif);
@@ -1441,9 +1529,17 @@ body {
   flex-direction: column;
   animation: wl-nav-slide var(--duration-modal) var(--ease-tactile);
 }
+/* Transform ONLY. The previous keyframes also faded the sheet from
+   `opacity: 0.6`, so for the length of the animation the drawer was
+   translucent and the canvas showed *through* it, while the backdrop
+   underneath was separately fading from 0 over 160ms. Two overlapping
+   fades = a visible ghost of the page, which is what made opening the
+   hamburger read as a blink-then-open. The backdrop's fade is the part
+   that earns its keep (it is the dimming); the sheet only needs to
+   move. */
 @keyframes wl-nav-slide {
-  from { transform: translateX(-24px); opacity: 0.6; }
-  to { transform: none; opacity: 1; }
+  from { transform: translateX(-24px); }
+  to { transform: none; }
 }
 .wl-nav-appname {
   font-family: var(--font-directive);
@@ -1529,6 +1625,15 @@ body {
 }
 
 /* Reduced motion respect */
+/* Reduced motion. This disabled `transition` only, so every `animation`
+   in this file — the backdrop fade, the nav slide, the sheet rise, the
+   card enter — still ran for users who asked for none of it. Both
+   properties have to go, or the setting is decorative. */
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }
