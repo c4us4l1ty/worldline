@@ -1,6 +1,6 @@
 ---
 name: worldline
-description: Worldline Design System — Stackelberg single-directive 9:16 viewport (420px × 747px), tactile matte graphite tokens (#131312 / #20201F / #E26D52), calm zero-guilt velocity UI. Enforces directive command hierarchy, BIP-39 seed vault, and friction-controlled escape hatch.
+description: Worldline Design System — Stackelberg single-directive 9:16 viewport (420px × 747px), tactile matte graphite tokens (#131312 / #20201F / #E26D52), calm zero-guilt velocity UI. Enforces directive command hierarchy, a read-only canvas with the task ledger as the only writer, a staged plan preview with a dependency spine, and the BIP-39 seed vault.
 ---
 
 ## What I do
@@ -17,7 +17,7 @@ description: Worldline Design System — Stackelberg single-directive 9:16 viewp
 Use this skill when:
 - Designing or coding any UI in Worldline (Stackelberg active directive canvas, the control panel, evening audit, BIP-39 recovery screen).
 - Styling the 9:16 desktop viewport container (`420px × 747px`), preventing maximization and full-screen layouts.
-- Implementing the single-command HUD, progressive disclosure steps, or the frictionful escape hatch modal.
+- Implementing the single-command canvas, the task ledger, the staged plan preview, or the difficulty-calibration track.
 - Reviewing PRs for contrast compliance, zero-guilt feedback styling, and local-first typography performance.
 
 ---
@@ -386,16 +386,22 @@ have moved the hamburger. A control belongs to the surface it floats over.
 ```
 
 **`Escape` closes exactly one layer, and the layers have an order.** The
-escape hatch's categorisation sheet is above the control panel, which is
-above the `Ctrl+,` telemetry drawer, which is above nothing. This is data
-(`topmost_overlay` / `dismiss_topmost` in `app.rs`), not a chain of `if`s,
-because it used to be implicit and wrong: the canvas and the app root each
-ran an `Escape` handler and both fired on the same bubbled keydown, so one
-press could open the bailout modal *and* dismiss a panel. From outside that
-is indistinguishable from a menu that does not open. `Ctrl+,` is likewise
-refused while another layer is up — the telemetry drawer is a later sibling
-with a higher z-index, so summoning it over the control panel buried the
-panel rather than failing visibly, which is the same symptom again.
+control panel is above the `Ctrl+,` telemetry drawer, which is above
+nothing. This is data (`topmost_overlay` / `dismiss_topmost` in `app.rs`),
+not a chain of `if`s, because it used to be implicit and wrong: the canvas
+and the app root each ran an `Escape` handler and both fired on the same
+bubbled keydown, so one press could open the bailout modal *and* dismiss a
+panel. From outside that is indistinguishable from a menu that does not
+open. `Ctrl+,` is likewise refused while another layer is up — the telemetry
+drawer is a later sibling with a higher z-index, so summoning it over the
+control panel buried the panel rather than failing visibly, which is the
+same symptom again.
+
+**The ladder is two deep, and the test says so.** The categorisation sheet
+was its top rung until 2026-09-27, when the escape hatch was deleted. A
+third layer added back without a rule for it fails
+`escape_closes_exactly_the_topmost_layer` — which is the whole reason the
+order is data.
 
 ```css
 .wl-circle-btn {
@@ -549,18 +555,23 @@ The focal heart of the application. Presents only one directive.
 }
 ```
 
-### C. Execution & the Escape Hatch
+### C. The Canvas Is Read-Only, and the Ledger Is the Only Writer
 
-**The canvas carries no action buttons at all** (2026-09-27). The footer
-that held "Complete Directive" and "Bailout / Blocked" is gone. The
-canvas is the directive; completion is `⌘+Enter` and the escape hatch is
-`Escape`, and the menu is the only control on the surface. A second pair
-of buttons under the card competed with the one thing the product is
-for. The trade is deliberate and worth stating: discoverability now rests
-on the two shortcuts, so any new surface must re-teach them.
+**The canvas carries no controls at all** (2026-09-27, and this is the
+second time). The footer that held "Complete Directive" and "Bailout /
+Blocked" went first; then the two keyboard gestures that reached the same
+state changes went too — `⌘+Enter` and `Escape`. The menu is now the only
+thing on the surface, and there is **no keydown handler on the canvas root
+at all**: not a hidden one, not a documented one. A task is worked here and
+resolved on the ledger, one hamburger row away.
 
-The escape modal itself is unchanged and still required — categorising the
-reason is the friction, and the friction did not move, only the trigger.
+**The escape hatch is gone, and it is not coming back as a shortcut.**
+PRD §5.3 is superseded. With no trigger left, so went `bail_out`,
+`BailoutReason`, `RecoveryAction`, the categorisation sheet, and the reason
+column on the ledger. What is lost is real and is recorded in PRD delta 225:
+the frictionful sheet was the mechanism that made a stall *informative*, and
+without it the system can no longer say *why* something did not happen. It
+can only say that it did not.
 
 ```html
 <!-- removed; kept as the record of what the canvas no longer renders -->
@@ -576,9 +587,17 @@ reason is the friction, and the friction did not move, only the trigger.
 </footer>
 ```
 
-`.wl-btn-primary` and `.wl-btn-escape` are still the CTA and the
-frictionful bail everywhere else — the compose and dormant
-screens. Only the canvas footer is gone.
+`.wl-btn-primary` is the CTA everywhere — compose, plan preview, dormant,
+check-in. `.wl-btn-escape` and `.wl-kbd` are **dead classes** and were
+deleted with the sheet; do not reintroduce them.
+
+The one rule this section replaces: **a control must have an engine
+transition behind it, or it does not ship.** The ledger's tick is the only
+verb `Engine::mark_complete` implements, so the ledger has exactly one
+control. There is deliberately **no cross** on a task — "not done" would
+have to mean something, and the honest candidate needs a category to be
+useful, which is the escape hatch under a new name.
+
 ```css
 /* Warm Cream Primary CTA */
 .wl-btn-primary {
@@ -589,31 +608,54 @@ screens. Only the canvas footer is gone.
   display: flex; justify-content: center; align-items: center; gap: 10px;
   transition: background-color 120ms ease, transform 120ms ease;
 }
-.wl-btn-primary:hover {
+.wl-btn-primary:hover:not(:disabled) {
   background-color: var(--wl-cta-hover); transform: translateY(-1px);
 }
-.wl-kbd {
-  font-family: var(--font-mono-telemetry); font-size: 11px;
-  background: rgba(0, 0, 0, 0.12); padding: 2px 6px; border-radius: 4px;
-}
-
-/* Frictionful Escape Hatch Button */
-.wl-btn-escape {
-  width: 100%; height: 42px;
-  background-color: transparent; color: var(--wl-text-muted);
-  font-family: var(--font-sans-directive); font-size: 13px; font-weight: 500;
-  border-radius: var(--wl-radius-btn); border: 1px solid var(--wl-border-subtle);
-  cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 8px;
-  transition: background-color 120ms ease, color 120ms ease;
-}
-.wl-btn-escape:hover {
-  background-color: var(--wl-surface-card); color: var(--wl-accent-coral);
-  border-color: rgba(226, 109, 82, 0.3);
-}
-.wl-kbd-subtle {
-  font-family: var(--font-mono-telemetry); font-size: 10px; opacity: 0.7;
-}
+.wl-btn-primary:disabled { opacity: 0.5; }
 ```
+
+### C2. The Task Ledger (the Entropy Log page)
+
+Every task, grouped by goal, with **one** control per row. This is the only
+surface in the product that resolves anything, and it is a list — which is
+the one place the "no scrollable list of future tasks" rule is narrowed
+rather than obeyed (PRD delta 227).
+
+Two rules this section encodes:
+
+- **`blocked_by` is the field that earns the page.** A task sitting in the
+  queue with nothing visibly wrong with it is indistinguishable from a
+  stalled app. The row names the unfinished task it is waiting on, in
+  words: *"waiting on Draft the outline"*. A chip or a count would say
+  nothing a person can act on.
+- **A finished task is quieter, never struck through.** A line through text
+  is a verdict, and this product does not deliver them. The tick's pressed
+  state is cream, **not coral** — coral is a beacon for something live, and
+  a finished task is neither live nor an alarm.
+
+### C3. The Plan Preview (Generate does not write)
+
+Generate is **staged**: it fetches a plan, shows it, and writes nothing
+until Commit. So the preview is a page like any other, and backing out of
+it is free.
+
+- **The graph is a vertical spine, not a force layout.** At 420×747 a
+  force-directed graph is unreadable and a layered one gets worse fast —
+  five milestones of four tasks is twenty nodes and fifteen edges with no
+  room to draw either. The ORDER is the graph: a rail with a dot per task,
+  filled for one that can run and hollow for one that is waiting.
+- **An edge is said in words on the node it points into** — *"after Draft
+  the outline"* — not drawn as a dashed rail, which says nothing extra.
+- **Every field is editable in place.** A correction costs nothing; a
+  re-generate costs a billable call and throws away the four things you were
+  happy with.
+- **"Nothing is saved until you commit" is stated on the page.** It is the
+  one promise the staging makes, and a promise the user cannot verify from
+  the outside is one they should be told about.
+- **A generated plan is never silently reshaped.** Whatever the shell
+  repaired or the seeded fallback replaced is printed above the plan, with
+  the count. A plan you approved a preview of must not differ from the one
+  that gets written without saying so.
 
 ### D. Zero-Knowledge BIP-39 Seed Vault (Onboarding Card)
 Tactile 12-word recovery display during cryptographic account initialization.
@@ -732,7 +774,8 @@ an error message.
 - **Enforce the Single-Command Rule:** Only one active directive container may be rendered in the DOM at any given execution cycle.
 - **Emphasize Primary CTA Contrast:** The execution button (`.wl-btn-primary`) must always be rendered in warm cream `#DAD5C7` to act as an unequivocal behavioral magnet.
 - **Render Telemetry in Monospace:** All durations, HLC sequence stamps, and sync counts must use `var(--font-mono)` at `var(--t-mono)` to prevent tabular jitter. Exact strings the user must verify — model ids, seed words, relay URLs — use `--t-mono-lead` instead. (Countdowns no longer exist — the session timer was removed 2026-09-26 — but the rule stands for whatever numeric readout comes next.)
-- **Require Confirmation on Escape Hatch:** The escape hatch (now `Escape`, formerly the `.wl-btn-escape` button) must open a modal requiring the user to categorize the stall (`Blocked`, `Scope`, `Energy`) before unmounting the directive.
+- **Every control needs an engine transition behind it, or it does not ship.** This replaces "require confirmation on escape hatch", which required a feature that no longer exists. A tap target for something the engine cannot do is a control that lies, and it is why the ledger has a tick and no cross: `Engine::mark_complete` is the only verb, so a tick is the only honest control.
+- **A long wait is always Cancel-able and always names its stage.** The Generate button used to read "Planning…" for two minutes with no way out and no idea what it was doing, which is indistinguishable from a hang. Two rules came out of it: the button label names the **command actually being awaited** (never a percentage, never invented progress — this webview has no event channel), and a Cancel sits beside it while a call is in flight.
 - **Use switches for boolean preferences.** Theme is `.wl-switch[role=switch]` with `aria-checked`, not a `<select>` and not a label-bearing button. It applies **and persists immediately** — a theme toggle that only takes effect on save is a broken control, because you cannot evaluate a theme you are not allowed to see. (The window-pin switch is gone with the feature; PRD delta 175.)
 - **Every settings field commits on `change`, and every commit is scoped to one field.** See §4.F. A commit sends the last shell-confirmed state with one field applied — never the whole draft, and never the whole row.
 - **Switch state colours are absolute, not theme-derived.** The switch encodes "which theme is selected", not "what is currently rendered"; flipping its tokens with `data-theme` would invert the control the instant it took effect.
@@ -741,11 +784,11 @@ an error message.
 - **Never fabricate a read-out under the mock.** Every `dx serve` response is canned. Anything the panel renders from a command says `· MOCK` when `transport()` reports the mock, as the model catalog already does (PRD delta 148).
 
 ### Don't:
-- **Never display a scrollable list of future tasks:** The home screen must never show what's coming up this afternoon or tomorrow.
+- **Never display a scrollable list of future tasks on the home screen:** the canvas shows exactly one directive and resolves nothing. The **ledger** (the Entropy Log page) is the one place a task list exists, because a person opens it deliberately to answer "what is outstanding and what am I done with" — and its rows name what each unfinished task is waiting on, which is the fact a bare list cannot give. PRD delta 227.
 - **Never use streaks or red failure states:** Missing a directive is a velocity adjustment event, never an alarm. Avoid punitive UI red `#FF0000`.
 - **Never use pure white (`#FFF`) or deep black (`#000`):** Use the specified slate canvas (`#131312`) and muted text tones (`#E5E2E0` / `#CAC6BC`). This holds for switch knobs and tracks too.
 - **No decorative background illustrations or icons:** Maintain tactile, terminal-level discipline. Avoid extraneous emojis and marketing illustrations. UI icons are functional inline SVG (see §4.A); emoji are not UI iconography.
-- **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately, and the Complete/Bailout footer was removed entirely; the canvas keeps exactly one floating control.
+- **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately, the Complete/Bailout footer was removed, and the two canvas shortcuts went with the escape hatch; the canvas keeps exactly one floating control and **no keydown handler at all**.
 - **Never split a compose field into a title field plus a details field.** The user types intent in their own words and the architect names the goal; see §4.A3. Corollary: a goal title derived from a raw fragment must be clipped before it reaches `create_goal`, because the manual path seeds the first directive with that title verbatim.
 - **Never accent a page title.** Page titles are one plain serif line in `--wl-text-primary`. The coral beacon belongs to the active step badge, the create-goal button, and cryptographic security badges — not to a heading, and not to a decorative word inside one.
 - **Never label a group with something smaller or louder than what it labels.** A 10px uppercase group heading above 15px rows is the exact failure that made the control panel read as inconsistent: the group became the loudest object on screen. Labels are 12px mono muted; content is 15px primary.
@@ -753,7 +796,7 @@ an error message.
 - **Never style the same class twice.** A duplicate selector is not a style, it is a coin flip on which one the engine picks — and it is invisible until someone notices the two call sites disagree.
 - **Never balance a panel by manufacturing empty space.** No `flex: 1` spacer, no centring to "fill" a stretched sheet. Content ends where it ends.
 - **Never name a token you have not defined.** `var(--foo)` with no `--foo` is invalid at computed-value time and silently inherits. That one bug inverted the control panel's entire hierarchy, and it was invisible in the source because the stylesheet parsed cleanly.
-- **Never ring a container.** The focus ring is for things a keyboard user can *operate*. `.wl-root` carries `tabindex="0"` and `autofocus` only so it can receive ⌘+Enter and Escape, which makes it an event target rather than a control — and a bare `[tabindex]:focus-visible` selector (specificity 0,2,0) beat its own `outline: none` (0,1,0), drawing a coral ring around the entire 420×747 frame on every launch. The rule excludes `.wl-root` explicitly; do not "simplify" that back to a bare `[tabindex]`, which would also un-ring a future real custom control. Suppressing the ring does not suppress focus, so the shortcuts are unaffected.
+- **Never ring a container.** The focus ring is for things a keyboard user can *operate*. `.wl-root` carries `tabindex="0"` and `autofocus` — the canvas took them to receive ⌘+Enter and Escape, and it no longer binds either, so they are now inherited boilerplate rather than load-bearing — and a bare `[tabindex]:focus-visible` selector (specificity 0,2,0) beat its own `outline: none` (0,1,0), drawing a coral ring around the entire 420×747 frame on every launch. The rule excludes `.wl-root` explicitly; do not "simplify" that back to a bare `[tabindex]`, which would also un-ring a future real custom control.
 - **Never let a drawer stop short of its frame's edge.** The control panel is `height: 100%`, top to bottom. A sheet that hugs its content and ends mid-air leaves the canvas showing beneath it, and the user cannot tell whether the tap missed or the surface broke. When a full-height panel would leave a void, the fix is to give the slack to the region that can grow (the worldline readout), never to shrink the panel.
 
 ---
@@ -771,7 +814,7 @@ an error message.
 3. Restrict root viewport bounds to `420px × 747px` fixed portrait mode.
 4. Wire typography: `Doppio One` for editorial headings and page titles, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry and for exact strings.
 5. Render exactly **one** primary directive card (`.wl-directive-card`) under exactly **one** floating control (`.wl-circle-btn`, the same class every back chevron uses).
-6. Wire keyboard shortcuts: `⌘+Enter` triggers completion; `Escape` triggers the frictionful bailout drawer.
+6. The canvas binds **no** key handler. There are no canvas shortcuts left: `⌘+Enter` and `Escape` were both removed with the escape hatch, and the ledger's tick is the only way a task resolves.
 7. Secondary pages centre their title over an absolutely-positioned back chevron. Every settings field commits on `change`, scoped to that one field; there is no Save button.
 8. Any "choose a value" control is a `.wl-value-row` opening a bottom sheet. No native `<select>` in Settings.
 9. **Before committing, diff the token list**: every `var(--x)` in the stylesheet must have a matching `--x:`. An undefined one is silent.

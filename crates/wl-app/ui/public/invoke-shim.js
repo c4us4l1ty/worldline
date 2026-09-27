@@ -81,21 +81,7 @@
         phase: null, estimated_minutes: 0, state: 'idle', milestone_title: null,
       });
     },
-    complete_directive: function () {
-      var d = mockDb.directive;
-      if (d && d.phase && d.phase[0] < d.phase[1]) {
-        d.phase = [d.phase[0] + 1, d.phase[1]];
-        d.estimated_minutes = 25;
-      } else {
-        mockDb.directive = {
-          directive_id: '', milestone_id: '',
-          title: 'All clear for today',
-          instruction: 'The queue is empty. Check in this evening.',
-          phase: null, estimated_minutes: 0, state: 'idle', milestone_title: null,
-        };
-      }
-      return Promise.resolve(mockDb.directive);
-    },
+
     check_in: function (args) {
       mockDb.checkin = args;
       return Promise.resolve(mockDb.velocity);

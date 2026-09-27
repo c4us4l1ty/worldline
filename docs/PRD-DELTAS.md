@@ -2365,3 +2365,323 @@ reaches the button two levels up. The `dioxus-signals` "Copy Value created
 in ScopeId(3) … used in ScopeId(0)" warning that fires on every boot is
 also not it: `ScopeId(0)` is the runtime root wrapper, it is an *ancestor*
 of the owning scope, and it outlives it.
+
+## The escape hatch is gone, the ledger is the only writer, and Generate stops writing (2026-09-27, user-directed)
+
+Reported as three separate things that turned out to be one: *"i click
+generate task, and it just says 'planning' and never fully completes"*, *"the
+AI doesn't make any task for me"*, and *"the task should show up in the
+entropy log page where i should be able to mark a task done … the main home
+page is read only."*
+
+225. **The escape hatch is deleted, and PRD §5.3 with it.** Not the
+    shortcut — the feature. `Escape` went from the canvas with `⌘+Enter`
+    (delta 160 amended), and with no trigger left, so did `bail_out`,
+    `BailoutOutcome`, `RecoveryAction`, `Engine::bail_out`,
+    `downsize_directive`, `BailoutReason`, `Bailout`, `Repos::record_bailout`,
+    `Repos::bailout_log`, `Repos::delete_bailout`, `bailout_json`,
+    `EntropyEntry`, `EscapeModal`, `BailReason`, `ctx.escape_open`,
+    `Overlay::Escape`, and the `.wl-bailout-reason*` rules.
+
+    The `bailouts` **table** stays, on the same terms as
+    `app_settings.hotkey` and `always_on_top` (deltas 169, 175): dropping a
+    column on a CRDT-synced table costs a migration and buys nothing, and a
+    device that has not been updated keeps pushing into it, where
+    quarantining would be a louder failure than ignoring. Nothing writes
+    one. `DirectiveState::Skipped` also stays — still in the schema's
+    CHECK, still writable by a peer through `apply_upsert` — and
+    `maybe_complete_milestone` still counts it as outstanding, because that
+    rule (delta 200) is still load-bearing for anyone whose peer is behind.
+
+    **The cost, stated rather than buried:** the frictionful
+    categorisation sheet was the mechanism that made a stall *informative*.
+    Without it the ledger has no reason column, and the calibration
+    estimator below loses its `blocked` / overdue signals — it now learns
+    from completions and from overdue-and-still-queued tasks, and nothing
+    else. That is a real reduction in what the system can say about why.
+
+226. **The canvas is read-only, and the trade is recorded.** Both
+    keyboard gestures are gone, so there is no path — visible or hidden —
+    from the surface a task is worked on to the surface it is resolved on.
+    `⌘+Enter` was already undocumented in delta 160; `Escape` had the
+    same cost. The ledger is one hamburger row away, and the empty state's
+    copy now names it ("review settings, or mark a task done") because a
+    user who has just seen a task and cannot find the tick will conclude the
+    app is broken rather than that the control is elsewhere.
+
+    This is also the one place the design system's "never a scrollable list
+    of future tasks" needed narrowing. The rule is written against the home
+    screen, and the home screen still shows exactly one directive and still
+    resolves nothing. A ledger a person opens deliberately, to answer "what
+    is outstanding and what am I done with", is the other case. Delta 227
+    records the narrowing; the skill is amended the same way.
+
+227. **The Entropy Log is the task ledger, and it is writable.** It was
+    read-only *by decision* (delta 159), because a blocked directive had no
+    unblock path in the engine and a tap target would have been a control
+    that could not do what it said. With the escape hatch gone the page had
+    **no writer at all** — a table nothing appends to is worse than no page —
+    so it became the thing the product was missing: every task, grouped by
+    goal, with the one control that resolves one.
+
+    One control, not two. There is deliberately **no cross**: "not done"
+    would have to mean something to the engine, and the honest candidate
+    (`skipped`, a velocity adjustment) turns out to need a category to be
+    useful, which is the escape hatch under another name. A tick is
+    unambiguous, reversible by tapping again, and the only verb
+    `Engine::mark_complete` implements.
+
+    `Repos::task_ledger` is a new three-table join, open work first, whose
+    one field earns the page: `blocked_by`, the **title** of the unfinished
+    task this one is waiting on. A task sitting in the queue with nothing
+    visibly wrong with it is indistinguishable from a stalled app.
+
+228. **`depends_on` is a real edge, and the engine honours it.** A nullable
+    `directives.depends_on` (migration 0007), a nullable index, and a
+    filter in `Repos::runnable_directives`.
+
+    The check is **one hop and never walked**, and that is the load-bearing
+    decision rather than a simplification. `depends_on` is a replicated
+    column written verbatim from a sealed payload with no cross-field check,
+    so a peer can land `a -> b -> a` on a device — and the engine calls
+    `runnable_directives` on **every canvas load**. A recursive CTE, or a
+    chain walk chasing ancestors, is a spin waiting for the day it matters.
+    One hop is also the correct semantics: the engine only activates a
+    directive whose prerequisite is done, so `b completed` already implies
+    `a completed`, and a transitive walk is strictly *wrong* — the first
+    implementation returned true on the first completed ancestor and
+    unlocked a three-deep chain's tail the moment its head finished.
+
+    A prerequisite naming a row this device does not have counts as UNMET
+    rather than met: a truncated pull must not unlock work whose ordering
+    evidence is missing, and "unmet" converges once the row arrives. A
+    **user** edit that would create a self-reference or a two-node cycle is
+    refused with a message (`set_directive_depends_on`), because that is a
+    thing a person can do by tapping the wrong node and the alternative is
+    work that silently never becomes runnable.
+
+    The plan's edges are **indices into the flattened draft**, not ids —
+    the model has no way to know `new_id("dir")` mints a uuid, and an
+    id-shaped field would come back hallucinated, which reads exactly like a
+    real edge until you follow it. `persist_plan` therefore runs **two
+    passes**: every directive is created and its id collected, then the
+    edges are linked. A forward or self index is dropped and reported, never
+    fatal — a plan with no ordering constraint is still a plan.
+
+    `MAX_DEPENDENCY_NODES` (4096) bounds the one pass the filter makes over
+    the table. A plan is capped at 5 milestones × 32 directives, so a
+    legitimate table is 160 rows; the guard exists because
+    `progressive_total` has already proved a replicated integer will arrive
+    as 10^9 (delta 204).
+
+229. **No `CHECK` on `goals.complexity`.** The range is validated in Rust
+    at the write boundary (`domain::check_complexity`) and clamped on read
+    and on apply. A table-level CHECK looks like the safer choice and is
+    not: it would make this build **reject a rating a future build widens
+    the scale to**, quarantining the op and silently losing the field on
+    exactly the peers that are merely behind. Same reasoning that removed
+    the pin-column problem (delta 175). Two tests pin the guarantee from
+    both directions: `ops_from_an_unupdated_peer_still_apply` (a payload
+    with no `complexity` key applies) and
+    `an_out_of_range_peer_rating_is_clamped_not_quarantined` (99 arrives as
+    5, and the goal is not lost).
+
+230. **Generate does not write anything.** `master_plan` is split into
+    `master_plan_preview` (the billable fetch) and `commit_plan` (the
+    local write), with the plan held in a UI signal in between. "Let me look
+    at it first" was not expressible before, because the call that fetched
+    the plan was the call that persisted it — and when validation failed the
+    user was left with **nothing at all**, which is the "the AI doesn't
+    make any task for me" report.
+
+    The preview is `PlanPreview` from `wl-core` **on the wire**, not a
+    hand-written UI DTO, so a field this build does not know about crosses
+    intact rather than being dropped by a DTO that went stale. The rating
+    rides inside the payload for the same reason: a rating that has to
+    survive two IPC calls as two separate parameters is a rating that can
+    be silently defaulted, and a goal written at 3/5 when the user chose
+    5/5 poisons the estimator permanently.
+
+231. **A plan that violates the schema is repaired, not thrown away.**
+    `validate_plan` used to be all-or-nothing: one directive over 30
+    minutes with no phases, a sixth milestone, or a phase sum outside the
+    2× band rejected the **entire** response, and the user got no goal. The
+    new `repair_plan` clamps estimates, synthesises phases for a long task,
+    drops empty milestones, names blank headings, clips over-long text and
+    clears unusable `after` indices — and reports every change, because a
+    plan the user approved a preview of must not be reshaped behind their
+    back. If the response is still unusable it becomes `PlanPreview::fallback`:
+    the goal title from the user's own words, one 25-minute first step, and
+    a stated reason. A provider hiccup can no longer cost the goal.
+
+    `parse_plan` no longer validates. Parsing and validating are different
+    questions, and the old order meant the repair pass sat behind one line
+    and never ran — the whole 2026-09-27 repair was dead code. The path is
+    now `parse_plan` → `repair_plan` → `validate_plan`, and the last is
+    still run before anything is written.
+
+    Phase reconciliation is **split, then clamped, then the estimate
+    follows**: a 50-minute task with 5+25 phases becomes 8+21+21, because
+    the 42-minute step is over the 25-minute band and clamping it would
+    silently eat time the user was told about. Four steps of 25 is 100
+    minutes, so a task the model estimated at four hours **cannot** be
+    represented; it is capped at 100 and the note says it should have been
+    several tasks. That is the schema's own `2..=4` limit, not a new policy,
+    and the honest advice is the same thing the old bailout modal gave.
+
+232. **Transport failures are no longer reported as parse failures.**
+    `DispatchError::Transport { provider, detail }` is split out of
+    `BadJson`, so a timeout reads *"could not reach openrouter: operation
+    timed out"* rather than *"the architect's reply was not usable JSON:
+    error sending request for url (…)"* — a complaint about a reply that
+    never arrived. The request also sends `max_tokens` (4096) now; it sent
+    none, which left the completion unbounded and is the mechanism behind a
+    two-minute "Planning…".
+
+233. **The Tier-1 call has a budget, a pre-flight, a stage line and a
+    Cancel.** Four changes, because none of them alone fixes a button that
+    says one word for two minutes:
+
+    * `ai_readiness` is a local, instant, **non-billable** check whose
+      `missing` string is the Generate button's disabled reason. A missing
+      model used to be discovered from a 2.2-second toast; a missing key
+      from a provider error after the request had already gone out.
+    * `TIER1_TIMEOUT` is 75 s, applied with `tokio::time::timeout` **around
+      the `spawn_blocking` await** so the shell can stop waiting even if
+      the task is wedged somewhere the HTTP timeout does not reach. It is
+      below the 120 s client timeout on purpose, so a dead provider
+      produces the *transport* error rather than the deadline one. Both
+      bounds are `const _: () = assert!(…)`.
+    * The button is **Cancel**-able. The cancel bumps an epoch the in-flight
+      task compares against and drops its reply; it does not cancel the
+      request, because `spawn_blocking` cannot be cancelled and the money is
+      already spent. The epoch exists for exactly that.
+    * The stage line is one of two words, and both are the command actually
+      being awaited: *Contacting the architect…* is the billable call,
+      *Writing the plan…* is the local commit. **No progress events** —
+      `main-capability.json` grants `permissions: []`, so `core:event` is
+      not available to this webview, and anything finer would be invented
+      from a timer.
+
+234. **Estimated Complexity is the prior, and the prior is the rating.**
+    `prior(r) = Beta(r + 1, 7 − r)`, strength 8, so the prior mean is
+    `(r + 1) / 8` and the five buckets are Beta(2,6) … Beta(6,2). Three
+    properties, each pinned by a named test: the rating **is** the prior
+    (5/5 is Beta(6,2) — mostly confident you will not get it done); nothing
+    is improper (no rating produces `β = 0`, so no bucket reports a
+    probability of exactly 0 or 1 on zero evidence); and it is monotone with
+    the middle at exactly 0.5, so an untouched slider is an uninformative
+    prior rather than a lean.
+
+    Outcomes bucket by the **goal's** rating: `completed` → success;
+    `blocked` and overdue-and-still-queued → not; `active` and `skipped`
+    → **not an observation at all**. Counting an in-flight task would make
+    the number move every time the user looked at the canvas, and "did it
+    count" and "did it land" are separate questions — conflating them once
+    made an overdue queue the *best* evidence in the estimator.
+
+    `s` and `n` travel with every figure, as `"4 of 9"`. A posterior
+    printed without its sample size is how 62% gets read as a fact when it
+    is one data point, and it is the failure delta 33 is about, extended to
+    a number that is *live* but thin.
+
+    The evidence is grouped **per goal and then rolled up by rating**. The
+    other order — aggregate the install, then add the total once per goal at
+    the same rating — double-counts, and did: two `light` goals with nine
+    tasks between them reported eighteen.
+
+235. **The estimator has a consumer, or it would be an inert number.**
+    `tier1_user` carries the bucket's posterior —
+    *"Historically they finish 2 of 9 of that kind of work (72% expected;
+    the rating alone said 75%)"* — and the rating's effect on plan size is
+    spelled out rather than implied, because a model handed "difficulty: 4"
+    with no guidance either ignores it or treats it as licence to sprawl.
+    Quoting the posterior as the prior's figure was the first bug here: the
+    sentence read "…they finish 4 of 5 (77%; the rating alone said 77%)",
+    which is a comparison with nothing.
+
+    It is still **not** applied to estimates, exactly as
+    `estimate_adjustment` is not (delta 33), and the Calibration card says
+    so in Trajectory's own words.
+
+236. **The complexity control is five buttons drawn as a slider.** A native
+    `<input type="range">` is the obvious choice and this project has
+    already shipped two native widgets WebKitGTK painted wrong (delta 176).
+    A slider is precisely the widget that cannot be restyled from outside,
+    so it is five 44px-tall buttons over a drawn track: the selected stop is
+    a larger cream dot (scale, not hue — and it does not spend the coral
+    beacon on a control that is signalling nothing), arrow keys work, and
+    no engine can repaint it. The rating sends on **both** the AI and the
+    manual path, or the estimator is fed only by AI goals.
+
+237. **The preview is a spine, not a graph library.** At 420×747 a
+    force-directed graph is unreadable and a layered one gets worse fast —
+    five milestones of four tasks is twenty nodes and fifteen edges with no
+    room to draw either. So the ORDER is the graph: a vertical rail with a
+    dot per task, filled for one that can run and hollow for one that is
+    waiting, and the edge said in words on the node it points into
+    (*"after Draft the outline"*) rather than as a dashed rail, which says
+    nothing extra. The plan-wide index is computed once, up front, because
+    an `after` is a position in the **whole** plan and counting it inside
+    the render loop is how a tap ends up editing a different task.
+
+    Milestones carry an optional one-sentence `rationale` — "why this
+    order", not a chain of thought. A 2 000-token derivation is the fastest
+    way to make someone skip the thing they are being asked to approve.
+
+238. **`Engine::mark_complete` carries the whole transition, and one bug in
+    it is worth recording.** Ticking a task from the ledger has to do
+    everything `Engine::complete` did for the *active* directive: close
+    every remaining phase (a tick is a statement about the task, and the
+    ledger is task-level — four taps to say "done" is a different control
+    wearing the same clothes), re-evaluate the milestone, and leave the
+    canvas advance to the command's `current()` call, exactly as
+    `complete_directive` did.
+
+    The phase-closing loop **sat outside the `uses_progressive_activation`
+    branch** in the first version, so every monolithic task — no phase rows
+    at all — was sent through `advance_progressive_step` and failed with
+    "current or next phase missing". Ticking a 20-minute task is the single
+    most common thing the ledger can be asked to do.
+    (`a_monolithic_task_can_be_ticked`.)
+
+    `mark_task_done` uses `with_identity_opt`, not the strict variant: a
+    task is done whether or not the vault happens to be open, exactly like
+    a manual goal. The identity only decides whether the change replicates;
+    refusing the write would make a locked vault render the ledger
+    unusable, which is the one thing a ledger must never be.
+
+239. **The ladder of dismissible layers lost its top rung.**
+    `topmost_overlay` / `dismiss_topmost` / `toggle_telemetry_allowed` lost
+    the `escape_open` argument. They are data precisely so that "one Escape
+    closes one layer" is unrepresentable rather than merely unlikely, and
+    the tests now pin a **two**-deep ladder so a third layer added back
+    without a rule for it fails.
+
+240. **No `plan_ref` in the preview, and the screen owns no copy of the
+    plan.** It lives in `AppCtx::plan`, so leaving for Settings and coming
+    back keeps the edits. A screen that re-fetched would discard them and
+    the user would find out by losing work — and a screen that re-fetched
+    would also have a way to re-call the billable endpoint by accident, so
+    a test greps the screen's own markup (with its test module cut off; a
+    scan that included the assertions could never pass) for
+    `master_plan_preview`.
+
+## What was NOT verified
+
+The design system's rule is that a change is reviewed **rendered**:
+`scripts/dx.sh serve --port 1420` draws every screen against the real
+`wl.css` behind the mock shell. This environment has no browser attached,
+so the new surfaces — the plan preview, the complexity track, the ledger
+row and its tick, and the canvas with its chrome removed — have not been
+looked at. They have been checked mechanically instead: every `var(--x)` in
+`wl.css` has a `--x:` definition, no selector is defined twice, no class is
+used in markup without a rule, and no rule is dead.
+
+That check found two real defects and they are the exact class delta 173
+and delta 174 document, which is the argument for doing it every time
+rather than trusting the source: the ledger's Calibration card and the
+compose screen's complexity track had both reached for `.wl-calibration`,
+and the track's `margin` was silently overriding the card's separator. The
+card is now `.wl-calibration-card`. **Someone with a browser should still
+look at these five screens before shipping them.**
