@@ -221,7 +221,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
                         oninput: move |e| restore_input.set(e.value()),
                     }
                     if !error.read().is_empty() {
-                        p { class: "wl-seed-sub", style: "color: var(--wl-accent-coral);", "{error.read().clone()}" }
+                        p { class: "wl-seed-sub", style: "color: var(--wl-accent-coral-text);", "{error.read().clone()}" }
                     }
                     button {
                         class: "wl-btn-primary",
@@ -355,7 +355,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
                         }
                     }
                     if !error.read().is_empty() {
-                        p { class: "wl-seed-sub", style: "color: var(--wl-accent-coral);", "{error.read().clone()}" }
+                        p { class: "wl-seed-sub", style: "color: var(--wl-accent-coral-text);", "{error.read().clone()}" }
                     }
                     button { class: "wl-btn-primary", disabled: *busy.read(), onclick: move |_| verify(), "Verify backup" }
                 }

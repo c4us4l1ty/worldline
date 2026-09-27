@@ -174,7 +174,17 @@
   --wl-border-subtle: rgba(29, 28, 19, 0.10);
   --wl-border-strong: rgba(29, 28, 19, 0.18);
   --wl-accent-coral:   #D8583B;
+  --wl-accent-coral-30: rgba(216, 88, 59, 0.30);
+  /* The beacon read as TEXT — the step badge, the two `· MOCK` markers,
+     the seed-vault inline accent — is 3.14:1 on the light card in the
+     theme's own `#D8583B`, and WCAG AA below 18px wants 4.5:1. The dark
+     theme's `#E26D52` clears 5:1, so only light mode failed; the fix is
+     a separate text value rather than darkening the beacon, which is
+     also a fill (the create-goal button) where the surface weight is
+     what it needs. */
+  --wl-accent-coral-text: #A63F1C;
   --wl-accent-coral-45: rgba(216, 88, 59, 0.45);
+  --wl-accent-coral-50: rgba(216, 88, 59, 0.50);
   --wl-raise: 0 2px 10px rgba(29, 28, 19, 0.10);
   --wl-raise-sheet: 12px 0 32px rgba(29, 28, 19, 0.18);
 }
@@ -612,8 +622,8 @@ button:disabled { cursor: not-allowed; }
 
 /* Destructive-adjacent, but not an alarm: removing a stored key is a
    configuration act, and this system has no red failure state. */
-.wl-btn-danger { color: var(--wl-accent-coral); }
-.wl-btn-danger:hover:not(:disabled) { color: var(--wl-accent-coral); }
+.wl-btn-danger { color: var(--wl-accent-coral-text); }
+.wl-btn-danger:hover:not(:disabled) { color: var(--wl-accent-coral-text); }
 
 /* The frictionful escape hatch. A quiet outlined surface that warms
    toward the coral beacon on hover — the friction is the categorisation
@@ -638,7 +648,7 @@ button:disabled { cursor: not-allowed; }
 .wl-btn-escape:hover:not(:disabled) {
   background-color: var(--wl-surface-card);
   color: var(--wl-accent-coral);
-  border-color: rgba(226, 109, 82, 0.3);
+  border-color: var(--wl-accent-coral-30);
 }
 .wl-btn-escape:disabled { opacity: 0.5; }
 
@@ -923,7 +933,21 @@ button:disabled { cursor: not-allowed; }
   outline: none;
   /* The chevron is a background so the pill needs no extra element;
      `no-repeat` + an explicit size keeps it from tiling when narrow. */
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23949087' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  /* The chevron is a mask, not a picture. The data URI it replaced
+     baked `%23949087` — the DARK theme's muted tone — into a file the
+     light theme never sees, which is ≈2.3:1 on `--wl-light-elevated`:
+     below the 3:1 a meaningful non-text graphic needs, and visibly the
+     wrong tone on parchment. A `currentColor` mask is one asset that is
+     correct in both themes and cannot drift from them. */
+  -webkit-mask-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: right 12px center;
+  -webkit-mask-size: 10px 6px;
+  mask-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  mask-repeat: no-repeat;
+  mask-position: right 12px center;
+  mask-size: 10px 6px;
+  background-color: currentColor;
   background-repeat: no-repeat;
   background-position: right 11px center;
   background-size: 9px 6px;
@@ -998,7 +1022,7 @@ button:disabled { cursor: not-allowed; }
 /* Half-opacity coral: the hairline spans the full 384px column and at full
    strength it was the loudest thing on a page whose whole idea is a quiet
    matte field. It still reads as the only accent while focused. */
-.wl-compose:focus { border-bottom-color: rgba(226, 109, 82, 0.5); }
+.wl-compose:focus { border-bottom-color: var(--wl-accent-coral-50); }
 
 /* ==========================================================================
    10. The Stackelberg single-directive canvas
@@ -1064,7 +1088,7 @@ button:disabled { cursor: not-allowed; }
   font-size: var(--t-mono);
   font-weight: 500;
   text-transform: uppercase;
-  color: var(--wl-accent-coral);
+  color: var(--wl-accent-coral-text);
   letter-spacing: 0.05em;
   margin-bottom: 14px;
 }
@@ -1414,7 +1438,7 @@ button:disabled { cursor: not-allowed; }
    indistinguishable from a real one from the outside. */
 .wl-nav-mock {
   font-size: var(--t-mono);
-  color: var(--wl-accent-coral);
+  color: var(--wl-accent-coral-text);
 }
 
 .wl-nav-row {
@@ -1581,7 +1605,7 @@ button:disabled { cursor: not-allowed; }
 .wl-picker-cached { opacity: 0.7; }
 /* Visible proof that the list came from `invoke-shim.js` and not from the
    provider. */
-.wl-picker-mock { color: var(--wl-accent-coral); }
+.wl-picker-mock { color: var(--wl-accent-coral-text); }
 
 .wl-picker-search { flex-shrink: 0; margin-bottom: 10px; }
 .wl-picker-input { font-family: var(--font-mono); font-size: var(--t-mono-lead); }
@@ -1832,7 +1856,7 @@ button:disabled { cursor: not-allowed; }
   width: 100%;
   outline: none;
 }
-.wl-verify-slot:focus { border-color: rgba(226, 109, 82, 0.45); }
+.wl-verify-slot:focus { border-color: var(--wl-accent-coral-45); }
 
 /* ==========================================================================
    18. Entropy Log & Trajectory
