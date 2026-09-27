@@ -30,6 +30,76 @@ pub async fn invoke<T: DeserializeOwned + Default>(
     serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
 
+/// Moves focus to the compose field if it is on screen.
+///
+/// Separate from `autogrow_compose` because they are called at different
+/// moments: focus wants to happen after the node exists and after a
+/// re-render, height wants to happen after the value settles.
+pub fn autofocus_compose() {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_autofocus_compose() {
+      try {
+        const el = document.querySelector(".wl-compose");
+        if (el && document.activeElement !== el) { el.focus(); }
+      } catch (e) {}
+    }
+  "#)]
+    extern "C" {
+        fn wl_autofocus_compose();
+    }
+    wl_autofocus_compose();
+}
+
+/// Resizes the compose `<textarea>` to fit its content, so the field
+/// grows with what you type instead of scrolling inside a fixed box.
+///
+/// The height has to be measured in the DOM — wrapped line count cannot
+/// be computed in Rust from a CSS `font-size` and a column width, and
+/// guessing produces a scrollbar on the second line. Collapsing to
+/// `height: auto` and reading `scrollHeight` is the reliable way.
+///
+/// Targets `.wl-compose` by selector rather than taking a Dioxus element
+/// ref: there is exactly one compose field, and a ref would have to be
+/// threaded through the `oninput` closure and re-acquired every time the
+/// busy state re-creates the node. A missing element is a no-op, so this
+/// is safe to call from an effect that also runs on other screens.
+pub fn autogrow_compose() {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_autogrow_compose() {
+      try {
+        const el = document.querySelector(".wl-compose");
+        if (!el) return;
+        el.style.height = "auto";
+        const h = el.scrollHeight;
+        if (h > 0) { el.style.height = h + "px"; }
+      } catch (e) {}
+    }
+  "#)]
+    extern "C" {
+        fn wl_autogrow_compose();
+    }
+    wl_autogrow_compose();
+}
+
+/// Local calendar date as `YYYY-MM-DD`, matching the store's shape-exact
+/// `check_date` (which rejects `2026-9-8` and anything else chrono would
+/// otherwise accept).
+pub fn today_local() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// `date` shifted by `days`, or `None` when the result is not
+/// representable. `None` is a real answer here: the store validates dates
+/// shape-exactly, so passing a malformed string would fail the write
+/// rather than being coerced.
+pub fn date_plus_days(date: &str, days: i64) -> Option<String> {
+    let d = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    d.checked_add_signed(chrono::Duration::days(days))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+}
+
 async fn js_invoke(cmd: String, args_json: String) -> Result<String, String> {
     use wasm_bindgen::prelude::*;
     #[wasm_bindgen(inline_js = r#"

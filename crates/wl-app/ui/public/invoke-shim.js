@@ -152,7 +152,25 @@
       // remaining session minutes from it.
       return Promise.resolve({ account_id: '9f2c'.repeat(8), expires_at: Math.floor(Date.now() / 1000) + 3600 });
     },
-    master_plan: function (args) { return Promise.resolve('goal-ai-1'); },
+    // `intent` is raw user text, not a title — the architect names the
+    // goal. This mock ignores arg shapes entirely, so a rename of the
+    // shell's params (goal_title → intent) will NOT be caught here; it has
+    // to be verified against the real shell.
+    master_plan: function (args) {
+      var text = (args && args.intent) || '';
+      mockDb.goal = { intent: text, target_date: (args && args.target_date) || null };
+      mockDb.directive = {
+        directive_id: 'dir-plan-1',
+        milestone_id: 'ms-plan-1',
+        title: 'Scope the first sitting',
+        instruction: 'Momentum only — do not plan the whole thing.',
+        phase: null,
+        estimated_minutes: 25,
+        state: 'active',
+        milestone_title: 'First steps',
+      };
+      return Promise.resolve('goal-ai-1');
+    },
     morning_briefing: function (args) {
       var titles = ['Write 300 words on Section 2.1', "Review yesterday's test failures"];
       mockDb.directive = {

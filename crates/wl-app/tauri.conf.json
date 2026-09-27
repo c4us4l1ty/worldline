@@ -5,11 +5,11 @@
   "identifier": "com.worldline.app",
   "build": {
     "beforeDevCommand": {
-      "script": "../../scripts/dx.sh serve --port 1420",
+      "script": "../../../scripts/dx.sh serve --port 1420",
       "cwd": "ui"
     },
     "beforeBuildCommand": {
-      "script": "../../scripts/build-ui.sh",
+      "script": "../../../scripts/build-ui.sh",
       "cwd": "ui"
     },
     "devUrl": "http://localhost:1420",

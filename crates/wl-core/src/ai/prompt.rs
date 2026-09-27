@@ -6,10 +6,13 @@ use crate::store::repo::Repos;
 
 use super::dispatch::{DirectiveDraft, MilestoneDraft};
 
-/// System prompt for Tier 1: generates the milestone hierarchy.
+/// System prompt for Tier 1: names the goal and generates the milestone
+/// hierarchy.
 pub fn tier1_system() -> String {
     "You are the Master Architect of a Stackelberg productivity system.\
 The user is the executor; you are the planner.\
+The user supplies raw intent in their own words — it may be a fragment,\
+ungrammatical, or contain constraints. You name the goal from it.\
 Given a goal, produce a lean milestone hierarchy with a critical path and\
 realistic task estimates.\
 Respond ONLY with JSON matching the provided schema.\
@@ -21,23 +24,28 @@ Directives longer than 30 minutes must be split into progressive phases of\
 }
 
 /// User prompt for Tier 1 goal structuring.
-pub fn tier1_user(
-    goal_title: &str,
-    goal_description: Option<&str>,
-    target_date: Option<&str>,
-    context: &str,
-) -> String {
-    let mut s = format!("GOAL: {goal_title}\n");
-    if let Some(d) = goal_description {
-        s.push_str(&format!("DETAILS: {d}\n"));
-    }
+///
+/// One free-text intent, not a title plus a description plus a
+/// constraints field — the compose screen collects a single box, and
+/// anything the user would have put in "details" or "constraints"
+/// (hours per day, skills, hard deadlines) is in here instead. The
+/// prompt says so explicitly, because a model that assumes a tidy
+/// single-line GOAL field will otherwise read a paragraph as a title and
+/// plan against the whole thing verbatim.
+pub fn tier1_user(intent: &str, target_date: Option<&str>) -> String {
+    let mut s = format!(
+        "USER INTENT (their own words; may be a fragment, a paragraph,\
+or include constraints, hours/day, skills, and deadlines):\n{intent}\n"
+    );
     if let Some(t) = target_date {
         s.push_str(&format!("TARGET DATE: {t}\n"));
     }
-    let schema = "{\"milestones\":[{\"title\":string,\"description\":string,\"directives\":[{\"title\":string,\"execution_context\":string,\"estimated_minutes\":number,\"phases\":[{\"title\":string,\"instruction\":string,\"minutes\":number}]}]}]}";
+    let schema = "{\"title\":string,\"description\":string,\"milestones\":[{\"title\":string,\"description\":string,\"directives\":[{\"title\":string,\"execution_context\":string,\"estimated_minutes\":number,\"phases\":[{\"title\":string,\"instruction\":string,\"minutes\":number}]}]}]}";
     s.push_str(&format!(
-        "USER CONTEXT (constraints, hours/day, skills): {context}\n\n\
-Produce a milestone plan. JSON schema:\n{schema}\n\
+        "\nProduce a milestone plan. JSON schema:\n{schema}\n\
+title: name the goal yourself — short, imperative, under 60 characters.\
+Read it as an intent, not as a title to echo back.\
+description: optional one-sentence framing; may be empty.\
 Phases array: empty for directives <= 30 minutes, otherwise 2-4 phases\
 totaling approximately estimated_minutes. 2-5 milestones. No prose outside JSON."
     ));

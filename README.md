@@ -45,7 +45,8 @@ encrypted op in the durable outbox. Reconnection drains the outbox, pulls
 remote ops after a cursor, decrypts, and merges deterministically (LWW with
 device-id tie-break + tombstones). Convergence is property-tested.
 
-**AI (PRD §4, BYOK):** Tier-1 Master Architect (goal → milestones), Tier-2
+**AI (PRD §4, BYOK):** Tier-1 Master Architect (raw intent → names the goal,
+then milestones), Tier-2
 Tactical Dispatcher (daily 1–3 directives, 48h context window), Tier-3 local
 Rust engine (offline, timers, phases, escape-hatch reactions, velocity EWMA).
 OpenAI-compatible adapters (OpenRouter, Google, Qwen, bytez.com); model ids are user settings. Manual
@@ -55,7 +56,7 @@ goal creation works with no API key at all.
 
 ### Core, relay, sync (any machine)
 ```bash
-cargo test --workspace        # 187 tests: crypto vectors, HLC, CRDT convergence,
+cargo test --workspace        # 192 tests: crypto vectors, HLC, CRDT convergence,
                               # engine invariants, relay auth/pull, two-device sync
 cargo run -p wl-relay         # blind relay on 127.0.0.1:8080 (SQLite backend)
 ```
@@ -102,6 +103,15 @@ cargo tauri build --no-bundle                   # from crates/wl-app
 ./target/debug/wl-relay                         # :8080, SQLite backend; ~0 idle CPU
 ```
 
+> **Do not run `crates/wl-app/target/debug/wl-app` directly.** Tauri picks
+> its frontend at compile time from the `custom-protocol` Cargo feature,
+> which only `cargo tauri build` sets. A plain `cargo build` produces a
+> binary that loads `http://localhost:1420`, so with no dev server running
+> the window shows the browser's own error page —
+> *"Could not connect to localhost: Connection refused"* — which looks
+> like a broken app but is not one. Use the release binary above, or
+> `cargo tauri dev`, which starts the server for you.
+
 There is no JavaScript toolchain in this repo (no node, no bun — the UI is
 Rust/Dioxus compiled to wasm). All commands above are cargo/tauri/dx.
 
@@ -115,9 +125,12 @@ One / ui-monospace typography, zero-guilt velocity treatment. Exactly one
 directive is rendered at any moment, over a single floating menu control.
 ⌘+Enter completes; Escape opens the frictionful bailout modal (categorize:
 blocked / scope / energy). No streaks, no backlog views, no alarm red.
-Secondary pages (Settings, goal creation) centre their title over a
-floating back chevron; appearance preferences are switches, and sync lives
-in Settings rather than on the canvas.
+Secondary pages centre their title over a floating back chevron;
+appearance preferences are switches, and sync lives in Settings rather than
+on the canvas. Goal creation is a compose screen: one bare free-text field
+owns the page, you type intent in your own words, and the Master Architect
+names the goal and builds the plan. "Create manually" takes the same text
+and needs no API key.
 
 ## Environment
 
@@ -130,9 +143,9 @@ in Settings rather than on the canvas.
 
 | Scope              | Command                                            | Status |
 |--------------------|----------------------------------------------------|--------|
-| Core/relay/sync    | `cargo test --workspace`                            | 187 pass |
+| Core/relay/sync    | `cargo test --workspace`                            | 192 pass |
 | Lints              | `cargo clippy --workspace --all-targets`           | clean  |
 | Formatting         | `cargo fmt --all -- --check`                        | clean  |
-| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 13 pass, clean |
+| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 16 pass, clean |
 | Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 17 pass, clean (live-relay handshake + vault round-trip tests) |
 | Desktop bundle     | `cd crates/wl-app && cargo tauri build` (after setup script) | by user |

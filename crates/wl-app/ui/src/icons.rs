@@ -59,26 +59,37 @@ pub fn IconMenu() -> Element {
     )
 }
 
-/// Settings — horizontal sliders.
+/// Settings — a gear.
 ///
-/// Replaces `⚙`, the glyph most likely to render as a colour emoji. Three
-/// rules with ring-shaped knobs parked at different positions reads as
-/// "adjustable" at 20px, where a gear's teeth turn to mush, and it sits
-/// closer to the terminal-tactile language than a gear does.
+/// Replaces `⚙` (the glyph most likely to render as a colour emoji) and
+/// then a sliders mark that read as "audio mixer" rather than
+/// "preferences".
+///
+/// One filled path with `fill-rule="evenodd"`: the outer sub-path is the
+/// notched rim, and the trailing circle sub-path is the hub hole, which
+/// evenodd knocks out. That is why this icon is `fill: currentColor`
+/// rather than the stroked `frame()` the other icons use — a gear drawn
+/// with strokes reads as a sun or a ship's wheel, both of which were
+/// tried and rendered before settling on the filled outline.
+///
+/// Proportions were measured off the reference mark rather than guessed:
+/// outer r = 8.6 on a 24-unit grid, hub hole r = 3.4 (≈0.40 of the outer
+/// radius, matching the reference), root r = 7.0 for the notches, and 8
+/// teeth of ±15°. Shallower notches and a wider notch gap both turned
+/// the mark into a ring or a skeleton, so those are the tuned values.
 #[component]
 pub fn IconSettings() -> Element {
-    frame(
-        "wl-icon-settings",
-        "0 0 20 20",
-        rsx! {
-            path { d: "M2.5 5h15M2.5 10h15M2.5 15h15" }
-            // Knob rings, r = 2.1, each drawn as two half-arcs so the
-            // path closes on itself.
-            path { d: "M4.9 5a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0-4.2 0Z" }
-            path { d: "M10.9 10a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0-4.2 0Z" }
-            path { d: "M6.9 15a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0-4.2 0Z" }
-        },
-    )
+    rsx! {
+        svg {
+            class: "wl-icon-settings wl-icon",
+            view_box: "0 0 24 24",
+            fill: "currentColor",
+            fill_rule: "evenodd",
+            stroke: "none",
+            "aria-hidden": "true",
+            path { d: "M20.31 9.77A8.6 8.6 0 0 1 20.31 14.23L18.76 13.81A7 7 0 0 1 18.06 15.5L19.45 16.3M19.45 16.3A8.6 8.6 0 0 1 16.3 19.45L15.5 18.06A7 7 0 0 1 13.81 18.76L14.23 20.31M14.23 20.31A8.6 8.6 0 0 1 9.77 20.31L10.19 18.76A7 7 0 0 1 8.5 18.06L7.7 19.45M7.7 19.45A8.6 8.6 0 0 1 4.55 16.3L5.94 15.5A7 7 0 0 1 5.24 13.81L3.69 14.23M3.69 14.23A8.6 8.6 0 0 1 3.69 9.77L5.24 10.19A7 7 0 0 1 5.94 8.5L4.55 7.7M4.55 7.7A8.6 8.6 0 0 1 7.7 4.55L8.5 5.94A7 7 0 0 1 10.19 5.24L9.77 3.69M9.77 3.69A8.6 8.6 0 0 1 14.23 3.69L13.81 5.24A7 7 0 0 1 15.5 5.94L16.3 4.55M16.3 4.55A8.6 8.6 0 0 1 19.45 7.7L18.06 8.5A7 7 0 0 1 18.76 10.19L20.31 9.77ZM15.4 12A3.4 3.4 0 1 0 8.6 12A3.4 3.4 0 1 0 15.4 12Z" }
+        }
+    }
 }
 
 /// Back — a chevron, floated over the page header's left gutter.

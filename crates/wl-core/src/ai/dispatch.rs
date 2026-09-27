@@ -146,9 +146,23 @@ pub struct MilestoneDraft {
     pub directives: Vec<DirectiveDraft>,
 }
 
-/// Full Tier-1 result: milestone hierarchy.
+/// Full Tier-1 result: the goal the architect named, plus its milestone
+/// hierarchy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanResult {
+    /// Goal title the architect derived from the user's intent.
+    ///
+    /// The compose screen collects ONE free-text field ("in n out
+    /// burger"), not a title, so the model is what names the goal. Both
+    /// fields are `#[serde(default)]` so a response that omits them
+    /// still parses and `persist_plan` falls back — a model that returns
+    /// a good plan but no title must not cost the user the whole request.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Optional longer framing for the goal. Rarely returned; when it is,
+    /// it replaces the raw intent as the goal description.
+    #[serde(default)]
+    pub description: Option<String>,
     pub milestones: Vec<MilestoneDraft>,
 }
 
@@ -217,7 +231,11 @@ const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_DIRECTIVES_PER_MILESTONE: usize = 32;
 /// Prompt-input budgets: fail fast BEFORE spending a BYOK call on a
 /// body the provider would truncate or bill absurdly.
-const MAX_AI_CONTEXT_CHARS: usize = 16 * 1024;
+///
+/// Tier-1's input (the compose screen's free-text intent) is bounded by
+/// `domain::MAX_DESCRIPTION_CHARS` instead of a separate constant — it
+/// is one prose field now, so the store's own budget is the honest cap.
+/// Tier-2 still takes a distinct constraints argument, hence its own.
 const MAX_AI_CONSTRAINTS_CHARS: usize = 8 * 1024;
 
 fn validate_response_size(raw: &str) -> Result<(), DispatchError> {
@@ -282,6 +300,27 @@ fn validate_briefing(b: &BriefingResult) -> Result<(), DispatchError> {
 }
 
 fn validate_plan(p: &PlanResult) -> Result<(), DispatchError> {
+    // The architect names the goal, so its title is validated like every
+    // other model-authored string. A title that is present but blank is
+    // NOT an error: `persist_plan` reads that as "no title offered" and
+    // falls back to the user's own words. Rejecting here would turn a
+    // cosmetic omission into a failed BYOK call.
+    if let Some(t) = p.title.as_deref() {
+        if !t.trim().is_empty() {
+            validate_text("plan.title", t)?;
+            if t.chars().count() > crate::domain::MAX_TITLE_CHARS {
+                return Err(DispatchError::Invalid {
+                    field: "plan.title",
+                    why: format!("over {} characters", crate::domain::MAX_TITLE_CHARS),
+                });
+            }
+        }
+    }
+    if let Some(d) = p.description.as_deref() {
+        if !d.trim().is_empty() {
+            validate_text("plan.description", d)?;
+        }
+    }
     // CORE-7(c): the guard allowed 1 milestone while the message claimed
     // "2–5". A model returning a single-milestone plan got a rejection
     // that contradicted the code, and a 1-milestone plan that *was*
@@ -387,11 +426,44 @@ fn validate_directive(d: &DirectiveDraft) -> Result<(), DispatchError> {
 // Persistence of parsed results (manual fallback path shares this)
 // ---------------------------------------------------------------------------
 
+/// Derives a goal title from the user's raw intent, for the case where
+/// the architect did not offer one.
+///
+/// The compose screen collects one free-text field, so this text can be
+/// a fragment ("in n out burger") or several paragraphs. Only the first
+/// non-empty line is used, and it is capped at `MAX_TITLE_CHARS` —
+/// `create_goal` enforces that bound, so an uncapped fallback would
+/// reject the whole plan over a title the model simply omitted.
+pub fn fallback_title(intent: &str) -> String {
+    let first = intent.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = first.trim();
+    if trimmed.chars().count() <= crate::domain::MAX_TITLE_CHARS {
+        return trimmed.to_string();
+    }
+    let clipped: String = trimmed
+        .chars()
+        .take(crate::domain::MAX_TITLE_CHARS)
+        .collect();
+    // Prefer to end on a word boundary so the title does not break
+    // mid-word; fall back to the hard clip if the first "word" is longer
+    // than the whole budget.
+    match clipped.rfind(' ') {
+        Some(i) if i > 0 => clipped[..i].trim_end().to_string(),
+        _ => clipped,
+    }
+}
+
 /// Persists a Tier-1 plan: goal, milestones, directives.
 ///
-/// `goal_spec`: `(title, description, target_date)` — a new goal is
-/// created from it. (Restructuring an existing goal re-uses this with
-/// the goal closed and re-planned under a fresh goal.)
+/// `goal_spec`: `(fallback_title, description, target_date)` — a new
+/// goal is created from it. (Restructuring an existing goal re-uses this
+/// with the goal closed and re-planned under a fresh goal.)
+///
+/// Title precedence: the architect's own `plan.title` wins, because the
+/// user gave it free text rather than a name and naming the goal is the
+/// model's job. `goal_spec`'s title is the fallback for a response that
+/// omitted one, and `"Untitled goal"` is the last resort so a goal is
+/// never created nameless.
 pub fn persist_plan(
     repos: &Repos,
     goal_spec: Option<(&str, Option<&str>, Option<&str>)>,
@@ -399,10 +471,43 @@ pub fn persist_plan(
     identity: Option<&Identity>,
 ) -> Result<String, DispatchError> {
     validate_plan(plan)?;
-    let goal_id = match goal_spec {
-        Some((title, desc, target)) => repos.create_goal(title, desc, target, identity)?.id,
-        None => repos.create_goal("Untitled goal", None, None, identity)?.id,
+    let (title, desc, target) = match goal_spec {
+        Some((fallback, desc, target)) => {
+            let title = plan
+                .title
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| fallback_title(fallback));
+            // The model's description is the goal's framing; the spec's is
+            // whatever the caller already had. Prefer the model's when it
+            // actually said something.
+            let desc = plan
+                .description
+                .as_deref()
+                .filter(|d| !d.trim().is_empty())
+                .or(desc)
+                .map(str::to_string);
+            let title = if title.trim().is_empty() {
+                "Untitled goal".to_string()
+            } else {
+                title
+            };
+            (title, desc, target.map(str::to_string))
+        }
+        None => {
+            let title = plan
+                .title
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or("Untitled goal")
+                .to_string();
+            (title, None, None)
+        }
     };
+    let goal_id = repos
+        .create_goal(&title, desc.as_deref(), target.as_deref(), identity)?
+        .id;
     // CORE-3: a new plan supersedes the previous one. Without this every
     // `persist_plan` left the old goal `active` forever, so goals
     // accumulated in the `active` state and `active_goal()`'s `LIMIT 1`
@@ -500,51 +605,42 @@ pub fn persist_briefing(
 pub struct AiDispatcher;
 
 impl AiDispatcher {
-    /// Tier 1 — Master Architect. Returns goal id.
+    /// Tier 1 — Master Architect. Returns `(goal_id, plan)`.
+    ///
+    /// `intent` is the user's raw free text from the compose screen —
+    /// not a title. It may be a fragment ("in n out burger"), a
+    /// paragraph, or contain the constraints that used to live in their
+    /// own field. The architect names the goal from it; see
+    /// [`persist_plan`] for title precedence.
     #[allow(clippy::too_many_arguments)] // explicit params keep the injected-HTTP design testable.
     pub fn master_plan<
         F: Fn(&str, &[(String, String)], &serde_json::Value) -> Result<String, String>,
     >(
         provider: &ProviderAdapter,
-        goal_title: &str,
-        goal_desc: Option<&str>,
+        intent: &str,
         target_date: Option<&str>,
-        context: &str,
         execute: F,
         repos: &Repos,
         identity: Option<&Identity>,
     ) -> Result<(String, PlanResult), DispatchError> {
         // Validate BEFORE the billable HTTP hop; persistence re-checks
-        // at the write boundary.
-        crate::domain::check_text("goal title", goal_title, crate::domain::MAX_TITLE_CHARS)
-            .map_err(|why| DispatchError::Invalid {
-                field: "goal_title",
+        // at the write boundary. The bound is the description budget,
+        // not the title budget: this is prose, not a name.
+        crate::domain::check_text("intent", intent, crate::domain::MAX_DESCRIPTION_CHARS).map_err(
+            |why| DispatchError::Invalid {
+                field: "intent",
                 why,
-            })?;
-        crate::domain::check_optional_text(
-            "goal description",
-            goal_desc,
-            crate::domain::MAX_DESCRIPTION_CHARS,
-        )
-        .map_err(|why| DispatchError::Invalid {
-            field: "goal_description",
-            why,
-        })?;
+            },
+        )?;
         if let Some(t) = target_date {
             crate::domain::check_date("target date", t).map_err(|why| DispatchError::Invalid {
                 field: "target_date",
                 why,
             })?;
         }
-        if context.chars().count() > MAX_AI_CONTEXT_CHARS {
-            return Err(DispatchError::Invalid {
-                field: "context",
-                why: format!("context exceeds {MAX_AI_CONTEXT_CHARS} characters"),
-            });
-        }
         let (url, headers, body) = provider.request(
             &super::prompt::tier1_system(),
-            &super::prompt::tier1_user(goal_title, goal_desc, target_date, context),
+            &super::prompt::tier1_user(intent, target_date),
         );
         let raw = execute(&url, &headers, &body).map_err(DispatchError::BadJson)?;
         validate_response_size(&raw)?;
@@ -554,12 +650,9 @@ impl AiDispatcher {
             .extract_text(&resp)
             .ok_or_else(|| DispatchError::BadJson("no content in response".into()))?;
         let plan = parse_plan(&text)?;
-        let goal_id = persist_plan(
-            repos,
-            Some((goal_title, goal_desc, target_date)),
-            &plan,
-            identity,
-        )?;
+        // `intent` doubles as the title fallback: if the model named the
+        // goal, this is ignored.
+        let goal_id = persist_plan(repos, Some((intent, None, target_date)), &plan, identity)?;
         Ok((goal_id, plan))
     }
 

@@ -892,14 +892,19 @@ fn vault_api_key(state: &AppState, provider: &str) -> ShellResult<Zeroizing<Stri
 }
 
 #[tauri::command]
+/// Tier-1 planning from the compose screen's single free-text field.
+///
+/// `intent` is raw user text, NOT a title: the architect names the goal
+/// from it (see `AiDispatcher::master_plan`). The param names below are
+/// the Tauri wire contract — the UI must send exactly these keys, which
+/// is why the browser mock in `invoke-shim.js` cannot be trusted to catch
+/// a mismatch here.
 pub(crate) async fn master_plan(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
     model: String,
-    goal_title: String,
-    goal_description: Option<String>,
+    intent: String,
     target_date: Option<String>,
-    context: String,
 ) -> ShellResult<String> {
     let shared: std::sync::Arc<AppState> = (*state).clone();
     tokio::task::spawn_blocking(move || {
@@ -919,10 +924,8 @@ pub(crate) async fn master_plan(
         let (goal_id, _plan) = shared.with_identity_opt(|identity| {
             AiDispatcher::master_plan(
                 &adapter,
-                &goal_title,
-                goal_description.as_deref(),
+                &intent,
                 target_date.as_deref(),
-                &context,
                 http_execute,
                 &shared.repos,
                 identity,
@@ -1136,7 +1139,9 @@ mod tests {
             relay_token: std::sync::Mutex::new(None),
             relay_url: std::sync::Mutex::new(None),
         };
-        const PLAN: &str = r#"{"milestones":[{"title":"M","directives":[
+        // A plan that NAMES the goal, since that is the normal case: the
+        // compose screen sends raw intent and the architect names it.
+        const PLAN: &str = r#"{"title":"Named by the architect","milestones":[{"title":"M","directives":[
             {"title":"D","estimated_minutes":10,"phases":[]}]}]}"#;
         for provider in KNOWN_PROVIDERS {
             let base = base_for(provider);
@@ -1158,16 +1163,16 @@ mod tests {
             };
             let (goal_id, _) = AiDispatcher::master_plan(
                 &adapter,
-                "G",
+                "in n out burger",
                 None,
-                None,
-                "c",
                 execute,
                 &state.repos,
                 None,
             )
             .unwrap_or_else(|e| panic!("master_plan failed for {provider}: {e}"));
-            assert!(state.repos.goal(&goal_id).unwrap().is_some());
+            // The goal is named by the model, not by the raw intent.
+            let g = state.repos.goal(&goal_id).unwrap().unwrap();
+            assert_eq!(g.title, "Named by the architect");
         }
         // Removed providers stay rejected at both layers (no silent fallback).
         for dead in ["anthropic", "openai", "openai-compat", "gemini-compat"] {

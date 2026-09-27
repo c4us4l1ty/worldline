@@ -211,6 +211,8 @@ Overlays the canvas instead of sitting in a bar above it. A full-width header st
 
 **Icons are inline SVG, never font glyphs.** A glyph's weight, spacing, and (on many Linux desktops) its colour are chosen by the font stack — which is exactly where the drawer's settings-icon colour and size drift came from. Every icon strokes with `currentColor` so it inherits the theme tokens for free, is sized by CSS only (`.wl-icon` + a per-icon modifier, never a `width`/`height` attribute), and is `aria-hidden` because the control around it already carries the real `aria-label`. The `✚` create-goal glyph is the one deliberate exception: a plus is unambiguous at 20px and never suffered the drift.
 
+**The settings mark is a gear**, drawn as one filled path with `fill-rule="evenodd"`: the outer sub-path is the notched rim, the trailing circle sub-path is the hub hole, and evenodd knocks it out. It is therefore the one icon that is `fill: currentColor` while the others are stroked. Its geometry was measured off a reference mark (outer r 8.6 on a 24 grid, hole r 3.4 ≈ 0.40 of outer, root r 7.0, eight teeth at ±15°) after two attempts that were rendered and rejected: a stroked ring-plus-teeth version reads as a **sun**, and deeper/wider notches read as a **ship's wheel**. Rejected-by-rendering is the normal path for icon geometry here — none of these three could be judged by reading the path data.
+
 ```css
 /* Transparent to input: the layer spans the width but must not eat
    clicks meant for the directive card beneath it. */
@@ -280,6 +282,33 @@ Two rules this section encodes:
 
 - **A page title is one plain serif line — no sub-heading, no accent.** Both titles ("Settings", "State the Objective") are the same weight, colour, and case treatment. A deck under a short heading restated the heading rather than adding anything, and `.wl-page-sub` was deleted with it. **The coral accent does not go in a title.** It was briefly applied to the word "objective", which made that heading read as a different kind of object from every other screen and spent the beacon on a decorative word rather than on something live. `.wl-italic-accent` remains correct for the *editorial* headings it was designed for — the morning greeting, the dormant line, the seed-phrase title.
 - **`--font-serif` titles are 24px, not 26px**: the centred column is 40px narrower per side, and "State the Objective" is the longest title in the app.
+
+### A3. Compose Screen (goal creation)
+Goal creation is a page of its own kind: **not** a settings form. It borrows the canvas's premise — ONE thing, no chrome — rather than the four-cards-and-a-save-button shape. One bare free-text field owns the screen, and the architect names the goal from what the user typed.
+
+```html
+<div class="wl-page-bar">
+  <button class="wl-back" aria-label="Back to the line"><!-- chevron svg --></button>
+  <select class="wl-horizon" aria-label="Target date">
+    <option>No date</option><option>1 week</option><option>1 month</option>
+    <option>3 months</option><option>6 months</option><option>1 year</option>
+  </select>
+</div>
+<h1 class="wl-page-title">State the Objective</h1>
+<textarea class="wl-compose" rows="1" maxlength="4000" autofocus
+          placeholder="What do you want to accomplish?"></textarea>
+<div class="wl-actions-row">
+  <button class="wl-btn-primary">Generate</button>
+  <button class="wl-btn-ghost">Create manually</button>
+</div>
+```
+
+Four rules this section encodes:
+
+- **The field is bare — no card, no resting border.** A box around it fights the "this IS the page" reading. Affordance comes from the caret, a muted placeholder, and a coral hairline that exists only while focused. That hairline is the *only* coral on the screen.
+- **`Enter` inserts a newline. Only the buttons submit.** There is deliberately no submit chord: the field is multi-line, so `Enter` must stay a newline, and a shortcut on a compose screen invites firing it mid-thought.
+- **`.wl-page-bar` exists because the title and the horizon pill cannot share a row.** The title is ~230px wide inside a 304px padded box, so an absolutely-positioned pill in the right gutter overlays its last ~50px. The bar also resets `.wl-back` to `position: static` — left absolute (as it is in `.wl-page-head`, where it overlays a centred title) it leaves the flow, the pill becomes the only in-flow child, and `space-between` pins it to the **left** edge.
+- **The horizon is a pill, not a date input.** "By when?" is a horizon question far more often than a calendar one, and a native date widget reads as a different object from everything else on the page. It stays a real `<select>` (restyled) so keyboard and screen-reader behaviour are the platform's.
 
 ### B. The Stackelberg Single Directive Card
 The focal heart of the application. Presents only one directive.
@@ -460,6 +489,7 @@ Tactile 12-word recovery display during cryptographic account initialization.
 - **Never use pure white (`#FFF`) or deep black (`#000`):** Use the specified slate canvas (`#131312`) and muted text tones (`#E5E2E0` / `#CAC6BC`). This holds for switch knobs and tracks too.
 - **No decorative background illustrations or icons:** Maintain tactile, terminal-level discipline. Avoid extraneous emojis and marketing illustrations. UI icons are functional inline SVG (see §4.A); emoji are not UI iconography.
 - **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately; the canvas keeps exactly one floating control.
+- **Never split a compose field into a title field plus a details field.** The user types intent in their own words and the architect names the goal; see §4.A3. Corollary: a goal title derived from a raw fragment must be clipped before it reaches `create_goal`, because the manual path seeds the first directive with that title verbatim.
 - **Never accent a page title.** Page titles are one plain serif line in `--wl-text-primary`. The coral beacon belongs to the active step badge, the create-goal button, and cryptographic security badges — not to a heading, and not to a decorative word inside one.
 
 ---

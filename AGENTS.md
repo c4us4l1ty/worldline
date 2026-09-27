@@ -3,7 +3,7 @@
 ## Commands
 
 ```bash
-cargo test --workspace        # THE verification gate (187 tests; 217 total with shell+UI)
+cargo test --workspace        # THE verification gate (192 tests; 225 total with shell+UI)
 cargo clippy --workspace      # must be warning-free
 cargo fmt --all               # run before committing
 ```
@@ -18,6 +18,23 @@ cargo fmt --all               # run before committing
   Includes a live-relay handshake test (spins up `wl-relay` on ephemeral TCP).
 - UI crate: `cd crates/wl-app/ui && cargo check --target wasm32-unknown-unknown`.
   It is also standalone (own `[workspace]` table) — keep it that way.
+
+### The shell's frontend is chosen at COMPILE time
+
+Tauri picks its frontend source from the `custom-protocol` Cargo feature:
+
+| Build | Feature | Loads | Needs a server? |
+|---|---|---|---|
+| `cargo tauri build` | ON | embedded `frontendDist` bundle | no |
+| `cargo tauri dev` | OFF | `devUrl` = `http://localhost:1420` | yes (it starts one) |
+| plain `cargo build` / `cargo run` | OFF | `devUrl` = `http://localhost:1420` | **yes, and nothing starts it** |
+
+**A plain `cargo build` + `target/debug/wl-app` with no dev server on 1420
+shows "Could not connect to localhost: Connection refused" INSIDE the
+Tauri window** — that is the *browser's* error page, not a broken app. The
+process is alive and healthy. `build.rs` prints a `cargo:warning` naming
+this whenever the feature is off; do not run the debug binary directly
+unless `dx serve --port 1420` is already up.
 
 ## Dev workflow (low-CPU)
 

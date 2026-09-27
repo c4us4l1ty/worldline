@@ -802,3 +802,170 @@ Locked decisions from the planning session are marked [approved].
     Verified by rendering: the goal-creation form now fits one 420×747
     screen with both CTAs visible, which the deck had been pushing below
     the fold.
+
+## Compose screen + gear icon (2026-09-27 — user-directed, from Plan/1.png)
+
+106. **Goal creation became a compose screen: one free-text field that
+    owns the page.** Title, details, and constraints fields are gone.
+    The reference (`Plan/1.png`) is a bare canvas with one large text
+    field, and the screen now follows it: a top bar with the back
+    chevron and a target-date horizon pill, the centred title beneath,
+    the field owning the middle, and a side-by-side commit row.
+
+    The field is deliberately bare — no card, no resting border —
+    because a box around it fights the "this IS the page" reading.
+    Affordance comes from the caret, a muted placeholder, and a coral
+    hairline that exists only while focused, which is also the only
+    coral on the screen.
+
+    **`Enter` inserts a newline; only the buttons submit.** There is no
+    keyboard shortcut, deliberately: the field is multi-line, so Enter
+    must stay a newline, and a submit chord on a compose screen invites
+    firing it mid-thought. The two buttons are the only commit path.
+
+107. **The architect now names the goal — a real contract change, not a
+    UI change.** The old Tier-1 contract had no title in the response at
+    all: `tier1_user` sent `GOAL: {title}` and the schema was
+    `{"milestones":[…]}`, so the title always came from the caller.
+    Feeding it a raw fragment would have named the goal "in n out
+    burger" forever. So:
+
+    - `PlanResult` gained `title` and `description`, both
+      `#[serde(default)]` so a response omitting them still parses.
+    - `tier1_user(intent, target_date)` collapsed GOAL/DETAILS/CONTEXT
+      into one `USER INTENT` block, and the schema now leads with
+      `title`. The prompt says the intent may be a fragment, a
+      paragraph, or contain constraints — otherwise a model that
+      expected a tidy one-line GOAL field plans against the whole
+      paragraph verbatim.
+    - `AiDispatcher::master_plan` dropped `goal_desc` and `context` for
+      a single `intent`, bounded by `MAX_DESCRIPTION_CHARS` (the store's
+      own prose budget). The now-dead `MAX_AI_CONTEXT_CHARS` constant
+      went with it.
+    - `master_plan`'s Tauri args changed from `goal_title` /
+      `goal_description` / `context` to `intent`. Arg names ARE the wire
+      contract, so `goal_create.rs`, `invoke-shim.js`, and the
+      four-provider test moved in the same change — and the shim cannot
+      catch a mismatch, since it ignores arg shapes entirely.
+
+108. **Title precedence: the model wins, the intent is the fallback.**
+    `persist_plan` prefers `plan.title` when non-blank, else
+    `fallback_title(intent)` (first non-empty line, clipped to
+    `MAX_TITLE_CHARS` on a word boundary), else `"Untitled goal"`.
+
+    Falling back rather than failing is deliberate: a model that returns
+    a perfectly good plan but no title must not cost the user a billed
+    call. A title that is *present but blank* is treated as absent, not
+    as an error, for the same reason. Both are pinned by tests, because
+    the failure mode is silent — an "Untitled goal" looks like a bug
+    report, not like a missing optional field.
+
+109. **Dropping the constraints field is a real capability loss,
+    recorded rather than absorbed.** Structured constraints (hours/day,
+    skills, deadlines) were a distinct input from intent; the architect
+    no longer has a dedicated slot and must infer them from prose inside
+    the intent. That is the right trade for a one-field compose screen,
+    but it is a trade, so it is written down here instead of being left
+    to look like an oversight.
+
+110. **The manual path splits the same text client-side.** `create_goal`
+    is unchanged: the UI sends the first non-empty line as `title` and
+    the remainder as `description`.
+
+    The 80-character clip on that title is load-bearing.
+    `seed_first_steps` creates the first directive with the goal title
+    VERBATIM, so an unclipped paragraph would become the directive
+    headline on the 420px canvas. The goal title is otherwise invisible
+    in the UI — `create_goal`'s response is parsed as
+    `serde_json::Value` and discarded, and no screen renders it — so
+    this is the one place it surfaces.
+
+    A blank remainder is sent as `None`, not `Some("")`, so the store
+    writes NULL rather than an empty string.
+
+111. **Target date is a horizon pill, not a date input.** Six options
+    (No date / 1 week / 1 month / 3 months / 6 months / 1 year)
+    resolving to a date at selection time. "By when?" is a horizon
+    question far more often than a calendar one, and this keeps the
+    control a pill that matches the reference's language; a native date
+    widget would have read as a different object from everything else on
+    the page. It is a real `<select>` restyled, so keyboard and
+    screen-reader behaviour are the platform's.
+
+    `horizon_date` returns `None` rather than a malformed string when
+    the arithmetic is not representable — the store's `check_date` is
+    shape-exact and would reject "" or "2026-9-8" at the write
+    boundary, after the call was already made.
+
+112. **`.wl-page-bar` exists because the title and the horizon pill
+    cannot share a row.** The title is ~230px wide inside a 304px
+    padded box, so an absolutely-positioned pill in the right gutter
+    overlays its last ~50px. Splitting the bar from the title removes
+    that arithmetic instead of tuning around it.
+
+    The bar also has to reset `.wl-back` to `position: static`. The
+    chevron is absolutely positioned in `.wl-page-head` to overlay a
+    centred title; left absolute inside the bar it leaves the flow, the
+    pill becomes the bar's only in-flow child, and `space-between` pins
+    it to the LEFT edge. Found by rendering, not by reading the CSS.
+
+113. **The settings icon is a gear, rebuilt from measured geometry.**
+    The `⚙` glyph was replaced by SVG, then by a sliders mark that read
+    as "audio mixer" rather than "preferences", and now by a real gear.
+
+    It is a single filled path with `fill-rule="evenodd"`: the outer
+    sub-path is the notched rim and the trailing circle sub-path is the
+    hub hole, which evenodd knocks out. That is why this one icon is
+    `fill: currentColor` while the rest are stroked.
+
+    Proportions were measured off the reference mark, not guessed: outer
+    r = 8.6 on a 24-unit grid, hub hole r = 3.4 (≈0.40 of the outer
+    radius), root r = 7.0, eight teeth at ±15°. Two earlier attempts
+    were rendered and rejected — a stroked ring-plus-teeth version read
+    as a **sun**, and a first filled version with deeper, wider notches
+    read as a **ship's wheel**. Both are recorded here because the tuned
+    values look arbitrary otherwise.
+
+114. **Two bugs the new tests caught, both mine, both silent.**
+    `split_intent` used `skip_while(|l| !l.trim().is_empty())` to drop
+    the title line — but that predicate is TRUE for non-empty lines, so
+    it skipped the title and kept the leading blanks, discarding the
+    whole description. And the first `fallback_title` clip could return
+    an empty title when the first "word" was longer than the budget.
+    Neither is reachable by reading the code; both are now pinned.
+
+## Build-wiring bugs found while verifying the app (2026-09-27)
+
+115. **`beforeBuildCommand` / `beforeDevCommand` pointed one directory too
+    high, so `cargo tauri build` could never run.** Both were
+    `../../scripts/…` with `"cwd": "ui"`, which resolves to
+    `crates/scripts/…`. The scripts live at the repo root, so from
+    `crates/wl-app/ui` the correct prefix is `../../../`. Every
+    `cargo tauri build` died at `beforeBuildCommand … exit code 127`,
+    which means the documented daily-use flow in both README and
+    AGENTS.md had never actually worked. Fixed to `../../../scripts/…`.
+
+    Worth noting how this stayed invisible: the same broken prefix also
+    appears nowhere else, `build-ui.sh` resolves its own root from
+    `BASH_SOURCE`, and the *debug* path (`cargo build`, which does not run
+    either hook) appeared to work — it just loaded the dev server URL, so
+    it failed differently.
+
+116. **A plain `cargo build` produces a binary that cannot show the app.**
+    Tauri chooses its frontend source at COMPILE time from the
+    `custom-protocol` Cargo feature: ON → the embedded `frontendDist`
+    bundle; OFF → `devUrl` = `http://localhost:1420`. `cargo tauri build`
+    sets the feature; a plain `cargo build` / `cargo run` does not.
+
+    So `crates/wl-app/target/debug/wl-app` run without a dev server on
+    1420 renders the **browser's own error page inside the Tauri window**:
+    *"Could not connect to localhost: Connection refused"*. The process
+    is alive and healthy, which is what makes it so confusing — it reads
+    as a broken app rather than a missing server.
+
+    `build.rs` now emits a `cargo:warning` whenever `CARGO_FEATURE_CUSTOM_PROTOCOL`
+    is unset, naming the two correct commands. An assert cannot catch
+    this one: the bundle really is present and the binary really is
+    valid, so the only honest signal is a build-time message. The same
+    trap is documented in README and AGENTS.md with a table of which
+    build mode needs a server.

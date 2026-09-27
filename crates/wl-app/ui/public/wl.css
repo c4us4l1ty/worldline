@@ -351,6 +351,107 @@ body {
    beneath them; a deck under a two-word heading was restating the
    heading rather than adding anything. */
 
+/* ==========================================================================
+   G2. Compose screen (goal creation)
+   ========================================================================== */
+/* The compose screen is a page of its own kind: not a settings form but a
+   single free-text field that owns the screen. It borrows the canvas's
+   premise — ONE thing, no chrome — rather than the settings page's
+   four-cards-and-a-save-button shape.
+
+   `wl-page-bar` holds the edge controls (back chevron left, target-date
+   horizon right) on their own row, with the centred title BELOW it. The
+   title and the horizon pill cannot share a row: the title is ~230px
+   wide inside a 304px padded box, and an absolutely-positioned pill in
+   the right gutter would overlay its last ~50px. Splitting the rows
+   removes that arithmetic instead of tuning around it. */
+.wl-page-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+  min-height: 34px;
+}
+/* The chevron is a NORMAL flex child here, unlike in `.wl-page-head`
+   where it is absolutely positioned to overlay a centred title. Left
+   absolute it would leave the flow, the pill would become the bar's only
+   in-flow child, and `space-between` would pin it to the left edge. */
+.wl-page-bar .wl-back { position: static; }
+
+/* Target-date horizon. A native `<select>` restyled as a pill: keyboard
+   and screen-reader behaviour come free, and the dropdown list is the
+   platform's, which is the right trade for a control this small. */
+.wl-horizon {
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--wl-text-muted);
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-pill);
+  padding: 7px 26px 7px 12px;
+  cursor: pointer;
+  outline: none;
+  /* Chevron drawn as a background so the pill needs no extra element;
+     `no-repeat` + explicit size keeps it from tiling at narrow widths. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23949087' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 9px 6px;
+  transition: color var(--duration-instant) var(--ease-tactile),
+              border-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-horizon:hover { color: var(--wl-text-secondary); border-color: var(--wl-border-strong); }
+.wl-horizon option { background-color: var(--wl-surface-card); color: var(--wl-text-primary); }
+
+/* The field. Deliberately bare — no card, no resting border — because a
+   box around it fights the "this IS the page" reading. Affordance comes
+   from the caret, a muted placeholder, and a coral hairline that only
+   exists while focused, which is also the only coral on this screen. */
+.wl-compose {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  color: var(--wl-text-primary);
+  font-family: var(--font-directive);
+  font-size: var(--text-directive);
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: -0.03em;
+  padding: 4px 0 10px;
+  margin: 0;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  caret-color: var(--wl-accent-coral);
+  transition: border-color var(--duration-settle) var(--ease-tactile);
+}
+.wl-compose::placeholder {
+  color: var(--wl-text-muted);
+  font-weight: 400;
+  opacity: 0.55;
+}
+.wl-compose:focus { border-bottom-color: var(--wl-accent-coral); }
+
+/* Side-by-side commit row. `flex: 1.35` on the primary gives the AI path
+   the larger target without letting the longer manual label wrap. */
+.wl-actions-row {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 12px;
+}
+.wl-actions-row .wl-btn-primary { flex: 1.35 1 0; }
+.wl-actions-row .wl-btn-ghost { flex: 1 1 0; min-width: 0; }
+
 /* A group of related fields. Replaces the flat, undifferentiated column
    of inputs these pages used to be. */
 .wl-section {

@@ -24,6 +24,17 @@ const PLAN_JSON: &str = r#"{"milestones":[
   ]}
 ]}"#;
 
+/// The same plan, but the architect named the goal — which is the normal
+/// case now that the compose screen collects raw intent rather than a
+/// title.
+const PLAN_JSON_TITLED: &str = r#"{"title":"Ship Worldline v0.1",
+  "description":"A working 9:16 execution terminal.",
+  "milestones":[
+  {"title":"Crypto core","description":"Keys and E2EE","directives":[
+    {"title":"Write BIP-39 test vectors","estimated_minutes":25,"phases":[]}
+  ]}
+]}"#;
+
 #[test]
 fn parse_plan_valid() {
     let p = parse_plan(PLAN_JSON).unwrap();
@@ -128,9 +139,7 @@ fn master_plan_end_to_end_with_injected_http() {
         let (goal_id, plan) = AiDispatcher::master_plan(
             &provider,
             "Ship Worldline",
-            Some("v0.1"),
             Some("2026-10-01"),
-            "Rust dev",
             execute,
             &r,
             None,
@@ -138,6 +147,7 @@ fn master_plan_end_to_end_with_injected_http() {
         .unwrap();
         assert_eq!(plan.milestones.len(), 2);
         let g = r.goal(&goal_id).unwrap().unwrap();
+        // `PLAN_JSON` carries no `title`, so the intent is the fallback.
         assert_eq!(g.title, "Ship Worldline");
         let ms = r.milestones_for_goal(&goal_id).unwrap();
         assert_eq!(ms.len(), 2);
@@ -163,6 +173,145 @@ fn master_plan_end_to_end_with_injected_http() {
     let (total, mins) = prog;
     assert_eq!(total, 2);
     assert_eq!(mins, 30); // 5 + 25
+}
+
+/// The compose screen collects raw intent, not a title, so naming the goal
+/// is the architect's job. When it offers a title, that title is the goal
+/// — the user's fragment must NOT survive as the goal name.
+#[test]
+fn master_plan_prefers_the_architect_title_over_the_intent() {
+    let r = repos();
+    let provider = ProviderAdapter::OpenAiCompat {
+        base_url: "http://localhost".into(),
+        api_key: Zeroizing::new("k".into()),
+        model: "m".into(),
+    };
+    let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+        Ok::<String, String>(
+            serde_json::json!({"choices":[{"message":{"content": PLAN_JSON_TITLED}}]}).to_string(),
+        )
+    };
+    let (goal_id, plan) = AiDispatcher::master_plan(
+        &provider,
+        "in n out burger",
+        Some("2026-10-01"),
+        execute,
+        &r,
+        None,
+    )
+    .unwrap();
+    assert_eq!(plan.title.as_deref(), Some("Ship Worldline v0.1"));
+    let g = r.goal(&goal_id).unwrap().unwrap();
+    assert_eq!(g.title, "Ship Worldline v0.1");
+    // The model's description becomes the goal's framing.
+    assert_eq!(
+        g.description.as_deref(),
+        Some("A working 9:16 execution terminal.")
+    );
+}
+
+/// A model that returns a good plan but no title must not cost the user
+/// the request — the intent's first line becomes the title. This is the
+/// case that would otherwise silently produce an "Untitled goal".
+#[test]
+fn master_plan_falls_back_to_the_intent_when_no_title_is_offered() {
+    let r = repos();
+    let provider = ProviderAdapter::OpenAiCompat {
+        base_url: "http://localhost".into(),
+        api_key: Zeroizing::new("k".into()),
+        model: "m".into(),
+    };
+    let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+        Ok::<String, String>(
+            serde_json::json!({"choices":[{"message":{"content": PLAN_JSON}}]}).to_string(),
+        )
+    };
+    let (goal_id, plan) = AiDispatcher::master_plan(
+        &provider,
+        "\n  in n out burger  \nthe rest of my rambling plan\nmore",
+        None,
+        execute,
+        &r,
+        None,
+    )
+    .unwrap();
+    assert!(plan.title.is_none());
+    let g = r.goal(&goal_id).unwrap().unwrap();
+    assert_eq!(g.title, "in n out burger");
+}
+
+/// A blank-but-present title is treated as "no title offered", not as an
+/// error, and never becomes the goal's name.
+#[test]
+fn a_blank_architect_title_falls_back_rather_than_naming_the_goal_blank() {
+    let r = repos();
+    let blank = PLAN_JSON_TITLED.replace(r#""title":"Ship Worldline v0.1""#, r#""title":"   ""#);
+    let provider = ProviderAdapter::OpenAiCompat {
+        base_url: "http://localhost".into(),
+        api_key: Zeroizing::new("k".into()),
+        model: "m".into(),
+    };
+    let execute = move |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+        Ok::<String, String>(
+            serde_json::json!({"choices":[{"message":{"content": blank}}]}).to_string(),
+        )
+    };
+    let (goal_id, _) =
+        AiDispatcher::master_plan(&provider, "in n out burger", None, execute, &r, None).unwrap();
+    assert_eq!(r.goal(&goal_id).unwrap().unwrap().title, "in n out burger");
+}
+
+/// The intent is prose and can be long. The fallback title must still fit
+/// `MAX_TITLE_CHARS`, because `create_goal` enforces that bound and would
+/// otherwise reject an otherwise-valid plan over a cosmetic omission.
+#[test]
+fn a_long_single_line_intent_still_produces_a_valid_title() {
+    let r = repos();
+    let provider = ProviderAdapter::OpenAiCompat {
+        base_url: "http://localhost".into(),
+        api_key: Zeroizing::new("k".into()),
+        model: "m".into(),
+    };
+    let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
+        Ok::<String, String>(
+            serde_json::json!({"choices":[{"message":{"content": PLAN_JSON}}]}).to_string(),
+        )
+    };
+    // One long line, no spaces near the clip point, to prove the word
+    // boundary never yields an over-budget or empty title.
+    let long = format!("{} {}", "a".repeat(600), "tail");
+    let (goal_id, _) =
+        AiDispatcher::master_plan(&provider, &long, None, execute, &r, None).unwrap();
+    let g = r.goal(&goal_id).unwrap().unwrap();
+    assert!(
+        g.title.chars().count() <= crate::domain::MAX_TITLE_CHARS,
+        "fallback title was {} chars, over the {} budget",
+        g.title.chars().count(),
+        crate::domain::MAX_TITLE_CHARS
+    );
+    assert!(!g.title.is_empty());
+}
+
+#[test]
+fn fallback_title_uses_the_first_non_empty_line_and_clips_on_a_word() {
+    // First non-empty line, trimmed.
+    assert_eq!(
+        fallback_title("\n\n  in n out burger  \nmore"),
+        "in n out burger"
+    );
+    // Nothing usable at all.
+    assert_eq!(fallback_title("   \n\t\n"), "");
+    // Under budget: returned whole.
+    assert_eq!(fallback_title("ship it"), "ship it");
+    // Over budget: clipped at the last space, never mid-word, never empty.
+    let long = format!("{} {}", "word ".repeat(200), "end");
+    let t = fallback_title(&long);
+    assert!(t.chars().count() <= crate::domain::MAX_TITLE_CHARS);
+    assert!(t.ends_with("word"));
+    // A first "word" longer than the whole budget must not clip to empty.
+    let solid = "z".repeat(crate::domain::MAX_TITLE_CHARS + 50);
+    let t = fallback_title(&solid);
+    assert_eq!(t.chars().count(), crate::domain::MAX_TITLE_CHARS);
 }
 
 #[test]
@@ -211,7 +360,7 @@ fn http_failure_maps_to_error() {
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Err::<String, String>("network down".to_string())
     };
-    let out = AiDispatcher::master_plan(&provider, "G", None, None, "", execute, &r, None);
+    let out = AiDispatcher::master_plan(&provider, "G", None, execute, &r, None);
     assert!(out.is_err());
 }
 
@@ -296,16 +445,8 @@ fn response_size_checked_before_parsing_and_persistence() {
         api_key: Zeroizing::new("test".into()),
         model: "test".into(),
     };
-    let result = AiDispatcher::master_plan(
-        &provider,
-        "Goal",
-        None,
-        None,
-        "",
-        |_, _, _| Ok(raw.clone()),
-        &r,
-        None,
-    );
+    let result =
+        AiDispatcher::master_plan(&provider, "Goal", None, |_, _, _| Ok(raw.clone()), &r, None);
     assert!(matches!(
         result,
         Err(DispatchError::Invalid {
@@ -340,27 +481,18 @@ fn facades_reject_bad_input_before_any_http_call() {
     let no_http = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         panic!("HTTP must not be attempted for invalid input")
     };
-    // master_plan: blank title, bad date, over-budget context.
+    // master_plan: blank intent, bad date, over-budget intent.
+    assert!(AiDispatcher::master_plan(&provider, "  ", None, no_http, &r, None).is_err());
     assert!(
-        AiDispatcher::master_plan(&provider, "  ", None, None, "c", no_http, &r, None).is_err()
+        AiDispatcher::master_plan(&provider, "Goal", Some("next Friday"), no_http, &r, None)
+            .is_err()
     );
+    // The intent is bounded by the description budget, not the old 16 KiB
+    // context budget, so one char over 4000 must be refused.
     assert!(AiDispatcher::master_plan(
         &provider,
-        "Goal",
+        &"c".repeat(crate::domain::MAX_DESCRIPTION_CHARS + 1),
         None,
-        Some("next Friday"),
-        "c",
-        no_http,
-        &r,
-        None
-    )
-    .is_err());
-    assert!(AiDispatcher::master_plan(
-        &provider,
-        "Goal",
-        None,
-        None,
-        &"c".repeat(16 * 1024 + 1),
         no_http,
         &r,
         None
