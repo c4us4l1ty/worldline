@@ -8,14 +8,31 @@
 # js) and deletes only `*-dx*` files under assets/ — index.html, wl.css,
 # invoke-shim.js, and fonts/ are never touched.
 #
+# It also sweeps the bundle ROOT. `dx build` copies `public/` verbatim and
+# never deletes, so any file that ever lived in `public/` — a scratch page,
+# a debug harness — stays in the dist forever and is embedded verbatim into
+# the shipped app by Tauri. Two such files were found in the release
+# bundle after being deleted from `public/` weeks earlier, which is the
+# whole problem: removing the source is not enough, the artefact has to be
+# swept too. A root file is kept only if `index.html` references it or it
+# is in the allowlist below.
+#
 # Usage: scripts/prune-dx-dist.sh [dist-dir]
 #   default: crates/wl-app/ui/target/dx/wl-ui/release/web/public
 set -euo pipefail
 
 DIST="${1:-crates/wl-app/ui/target/dx/wl-ui/release/web/public}"
-# Resolve relative to the repo root (this script lives in scripts/).
+# Resolve to an absolute path. A relative argument is taken from the repo
+# root (this script lives in scripts/); an absolute one is honoured as
+# given. The old resolution unconditionally prefixed the root, so passing
+# an absolute dist dir — which the usage line invites — built a
+# nonexistent path and the script exited 0 having pruned nothing, which
+# reads as a clean pass.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST="$ROOT/${DIST#$ROOT/}"
+case "$DIST" in
+    /*) ;;
+    *) DIST="$ROOT/$DIST" ;;
+esac
 INDEX="$DIST/index.html"
 
 [[ -f "$INDEX" ]] || { echo "prune-dx-dist: no bundle at $DIST (nothing to prune)"; exit 0; }
@@ -42,6 +59,32 @@ while IFS= read -r -d '' wasm; do
         echo "prune-dx-dist: keeping $name"
     else
         echo "prune-dx-dist: removing stale $name"
-        rm -f "$wasm"
     fi
 done < <(find "$DIST/assets" -maxdepth 1 -type f -name '*-dx*.wasm' -print0)
+
+# ---------------------------------------------------------------------
+# Root sweep
+# ---------------------------------------------------------------------
+# Files the bundle legitimately contains at the root. Anything else at
+# depth 0 is a leftover: unreferenced, unreviewed, and shipped.
+root_keep=(
+    index.html      # the entry point
+    wl.css          # design system
+    invoke-shim.js  # IPC bridge (native AND mock)
+)
+while IFS= read -r -d '' stray; do
+    name="$(basename "$stray")"
+    keep=0
+    for k in "${root_keep[@]}"; do
+        [[ "$name" == "$k" ]] && { keep=1; break; }
+    done
+    if [[ "$keep" -eq 0 ]] && grep -qF "$name" "$INDEX"; then
+        keep=1
+    fi
+    if [[ "$keep" -eq 1 ]]; then
+        echo "prune-dx-dist: keeping $name"
+    else
+        echo "prune-dx-dist: removing unreferenced $name"
+        rm -f "$stray"
+    fi
+done < <(find "$DIST" -maxdepth 1 -type f -print0)

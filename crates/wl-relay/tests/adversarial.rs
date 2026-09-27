@@ -811,19 +811,25 @@ async fn ordinary_pull_pages_are_not_truncated() {
 async fn defect_pull_byte_budget_counts_the_serialized_op() {
     let (app, token) = authed_app().await;
     // Sized so the two estimates STRADDLE the budget:
-    //   old (raw str::len): 500 x 16_005 = 8_002_500  <= 8_388_608  -> all 500 in
-    //   real (serialized):  500 x ~17_400 = ~8_700_000  >  8_388_608  -> must truncate
-    // Each header is 128 control characters: 128 raw, 768 escaped.
-    const SEALED: usize = 11_400;
+    //   old (raw str::len): 500 x 16_305 = 8_152_500  <= 8_388_608  -> all 500 in
+    //   real (serialized):  500 x ~17_055 = ~8_527_000  >  8_388_608  -> must truncate
+    // Each header is 128 control characters: 128 raw, 768 escaped. 100 ops
+    // per push keeps each request under the 2 MiB body cap while 500 of
+    // them still fill one full pull page.
+    const SEALED: usize = 11_625;
+    // `operation_id` must be UNIQUE — it is the primary key — so 120
+    // escaping control characters plus 8 digits. `record_id` has no such
+    // constraint and is 128 control characters throughout.
     let hostile = "\u{1}".repeat(128);
+    let op_id = |i: usize| format!("{}{:08}", "\u{1}".repeat(120), i);
     let mut stored = 0usize;
-    for batch in 0..4 {
-        let from = batch * 125;
-        let count = 125;
+    for batch in 0..5 {
+        let from = batch * 100;
+        let count = 100;
         let ops: Vec<serde_json::Value> = (from..from + count)
             .map(|i| {
                 serde_json::json!({
-                    "operation_id": hostile,
+                    "operation_id": op_id(i),
                     "hlc": format!("{:020}.00000.00001", 1_000_000u64 + i as u64),
                     "table": "goals",
                     "record_id": hostile,

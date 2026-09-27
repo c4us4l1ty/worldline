@@ -4,10 +4,7 @@
 //! * Fixed 420×747 9:16 window, non-resizable, non-maximizable.
 //! * Stronghold vault for the mnemonic + BYOK keys (never in DOM).
 //! * #[tauri::command] thin layer over wl-core; SQLite stays native.
-//!
-//! Every command is a request/response call the UI awaits; the shell
-//! emits no events. Sync and the model catalog are on-demand, and the
-//! UI drives its HUD from the values those commands return.
+//! * Emits engine outcomes as events for the Dioxus UI.
 //!
 //! There is no global summon hotkey: the feature was removed, along with
 //! `tauri-plugin-global-shortcut` and the `toggle_window_visibility`
@@ -63,96 +60,9 @@ fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         commands::sync_now,
         commands::master_plan,
         commands::list_models,
-        __temp::diag_sink,
     ])
 }
 
-/// TEMPORARY diagnostic scaffolding — remove before commit.
-mod __temp {
-    use std::io::Write;
-
-    #[tauri::command(rename_all = "snake_case")]
-    pub(crate) fn diag_sink(text: String) {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/opencode/wldiag.txt")
-        {
-            let _ = writeln!(f, "{text}");
-        }
-    }
-
-    const PROBE: &str = r#"
-(function () {
-  var out = [];
-  function say(s) { out.push(String(s)); }
-  say('ua=' + navigator.userAgent);
-  say('transport=' + (typeof window.wlInvoke));
-  window.addEventListener('error', function (e) { say('ERR ' + (e.message||e)); }, true);
-  function d(el) {
-    if (!el) return 'null';
-    var s = el.tagName.toLowerCase();
-    if (el.id) s += '#' + el.id;
-    if (el.className && typeof el.className === 'string' && el.className.trim()) s += '.' + el.className.trim().split(/\s+/).join('.');
-    return s;
-  }
-  document.addEventListener('click', function (e) {
-    say('REALCLICK target=' + d(e.target) + ' trusted=' + e.isTrusted + ' x=' + Math.round(e.clientX) + ' y=' + Math.round(e.clientY));
-  }, true);
-  document.addEventListener('pointerdown', function (e) {
-    say('PTRDOWN target=' + d(e.target));
-  }, true);
-  var n = 0;
-  var iv = setInterval(function () {
-    n++;
-    var btn = document.querySelector('.wl-float-menu');
-    if (!btn) { if (n > 80) { say('TIMEOUT no hamburger'); window.__TAURI_INTERNALS__.invoke('diag_sink', { text: out.join('\n') }); } return; }
-    clearInterval(iv);
-    var r = btn.getBoundingClientRect();
-    var cs = getComputedStyle(btn), ls = getComputedStyle(btn.parentElement);
-    say('rect=' + JSON.stringify({x:r.x,y:r.y,w:r.width,h:r.height}));
-    say('btn pe=' + cs.pointerEvents + ' pe-events=' + cs.pointerEvents + ' pos=' + cs.position + ' z=' + cs.zIndex + ' vis=' + cs.visibility + ' disp=' + cs.display);
-    say('layer=' + d(btn.parentElement) + ' pe=' + ls.pointerEvents + ' pos=' + ls.position + ' z=' + ls.zIndex);
-    var cx = r.x + r.width / 2, cy = r.y + r.height / 2;
-    say('hit centre=(' + cx + ',' + cy + ') -> ' + d(document.elementFromPoint(cx, cy)));
-    say('hit tl=(' + (r.x+2) + ',' + (r.y+2) + ') -> ' + d(document.elementFromPoint(r.x+2, r.y+2)));
-    say('btn data-dioxus-id=' + btn.getAttribute('data-dioxus-id'));
-    say('svg data-dioxus-id=' + (btn.querySelector('svg') && btn.querySelector('svg').getAttribute('data-dioxus-id')));
-    say('main data-dioxus-id=' + document.getElementById('main').getAttribute('data-dioxus-id'));
-    var chain = [], q = btn;
-    while (q && q !== document.documentElement) {
-      var c = getComputedStyle(q);
-      chain.push(d(q) + '{pos:' + c.position + ',z:' + c.zIndex + ',pe:' + c.pointerEvents + '}');
-      q = q.parentElement;
-    }
-    say('chain: ' + chain.join(' < '));
-    say('docElementFromPoint centre -> ' + d(document.elementFromPoint(cx, cy)));
-    say('--- synthetic click ---');
-    try { btn.click(); } catch (e) { say('click threw ' + e); }
-    setTimeout(function () {
-      say('after btn.click(): sheet=' + !!document.querySelector('.wl-nav-sheet') + ' backdrop=' + !!document.querySelector('.wl-nav-backdrop'));
-      say('body text len=' + (document.body.innerText || '').length);
-      var sb = document.querySelector('.wl-nav-sheet');
-      if (sb) { var sr = sb.getBoundingClientRect(); say('sheet rect=' + JSON.stringify({x:sr.x,y:sr.y,w:sr.width,h:sr.height})); }
-      say('--- synthetic path click ---');
-      var p = btn.querySelector('path') || btn.querySelector('svg');
-      if (p) p.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-      setTimeout(function () {
-        say('after path click: sheet=' + !!document.querySelector('.wl-nav-sheet'));
-        window.__TAURI_INTERNALS__.invoke('diag_sink', { text: out.join(' || ') });
-      }, 500);
-    }, 700);
-  }, 300);
-})();
-"#;
-
-    pub fn spawn(win: tauri::WebviewWindow) {
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(6));
-            let _ = win.eval(PROBE);
-        });
-    }
-}
 
 /// Records a fatal startup failure somewhere a GUI user can find it
 /// and retitle the window so it does not look like a healthy app that
@@ -180,7 +90,32 @@ fn report_startup_failure(handle: &tauri::AppHandle, error: &ShellError) {
     }
 }
 
+/// A binary built without `custom-protocol` loads `devUrl`
+/// (`http://localhost:1420`) and nothing serves it, so the window shows
+/// the *browser's* connection error page. The process is healthy and
+/// every command would work; to a user it is indistinguishable from a
+/// broken app. `build.rs` already warns at compile time, but warnings
+/// scroll past and the person who needs this is the one running the
+/// binary. Diagnostics only: no blocking, no fallback, no behaviour
+/// change.
+fn warn_dev_mode_loads_a_dev_server() {
+    if cfg!(feature = "custom-protocol") {
+        return;
+    }
+    eprintln!(
+ "\n  Worldline was built WITHOUT `custom-protocol`.\n  \
+ The window will load http://localhost:1420 (tauri.conf.json devUrl) and\n  \
+ show \"Could not connect to localhost\" if nothing serves that port.\n  \
+ That is the browser's error page, not a broken app.\n\n  \
+ * daily use:  cargo tauri build --no-bundle, then run\n  \
+               crates/wl-app/target/release/wl-app (embeds the bundle)\n  \
+ * dev:        cargo tauri dev  (starts `dx serve --port 1420` for you)\n  \
+ * plain cargo build/run is only valid while that dev server is already up.\n"
+    );
+}
+
 fn main() {
+    warn_dev_mode_loads_a_dev_server();
     add_commands(
         tauri::Builder::default()
             // NOTE: tauri-plugin-stronghold is intentionally NOT registered as
@@ -210,7 +145,6 @@ fn main() {
                 // the window is a plain floating window from here on.
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.set_background_color(Some(tauri::window::Color(19, 19, 18, 255)));
-                    __temp::spawn(win.clone());
                 }
                 Ok(())
             }),

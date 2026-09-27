@@ -1946,3 +1946,282 @@ pin-above-other-windows feature was removed at the user's request.
     primary action away from the top of the sheet, which reads as a broken
     layout rather than a tall one.
 
+
+## Battle test (2026-09-27, user-directed: find every bug, near-zero CPU/RAM, strong security)
+
+A seven-way parallel audit of every crate plus a targeted adversarial
+campaign against the hostile boundaries. Twenty-two defects fixed; every
+one is now locked by a named regression test.
+
+### Remote, unauthenticated, and permanent
+
+186. **One pulled op could brick a client forever.** `Hlc::increment` carried
+    a counter overflow into `physical.checked_add(1).expect("HLC timestamp
+    exhausted")`. `Hlc::observe` adopted a remote timestamp's physical
+    component *verbatim* — the wire HLC is a cleartext routing header — so
+    one op carrying `18446744073709551615.65535.00001` drove the head to the
+    ceiling, and the next local write panicked in the write path. The head is
+    persisted to `hlc_clock`, so it survived every restart, and there was no
+    recovery short of deleting the data dir. Two `#[should_panic]` tests
+    pinned the panic as intended behaviour; both are deleted.
+
+    `observe` now bounds the remote physical to `MAX_REMOTE_DRIFT_NANOS`
+    (one hour) above the local wall clock — which is what this module always
+    promised ("bounded-drift from physical time") and had never enforced —
+    and `increment` saturates instead of panicking. Saturating is the right
+    degradation: `(physical, counter, device, operation_id)` is a *total*
+    order even with repeated `(physical, counter)`, so duplicated ticks cost
+    strict monotonicity while a panic costs everything.
+    (`wl-core/src/hlc.rs`; `defect_maxed_wire_hlc_cannot_brick_the_local_clock`.)
+
+187. **The relay could forge any op's merge order.** The AEAD's associated
+    data was `table:record` alone. `hlc` and `operation_id` are cleartext
+    `PushOp` fields, so a relay could re-stamp an op to the top of the key
+    space to make it win every merge, relabel it to defeat the
+    `(device, operation_id)` tie-break, or rewind it so a real user's edit
+    lost — and none of that was detectable, because none of it was in the
+    associated data. Zero-knowledge held for the *payload* and not for the
+    *ordering*, which is what actually decides whose data survives.
+
+    The AAD is now `wl/v2:{table}:{record_id}:{operation_id}:{hlc}`, built by
+    one function (`crdt::routing_aad`) that both sides call. The relay keeps
+    everything it needs — it still reads the cleartext columns for
+    `ORDER BY hlc` and the pull cursor, and still never sees a plaintext
+    byte. This is a wire-format break, deliberately, rather than a shim: a
+    `v1` row cannot be authenticated under `v2` and is quarantined on the
+    next pull, which is the correct fate for a pre-release format rather
+    than silently accepting metadata the tag does not cover.
+    (`defect_relay_rewriting_the_hlc_is_detected_and_quarantined`,
+    `defect_relay_relabelling_the_operation_id_is_detected`.)
+
+188. **One crafted op wedged sync permanently.** `is_fatal_store_error`
+    allow-listed CHECK/FK/PK/UNIQUE but not NOT NULL, and SQLite checks NOT
+    NULL *before* CHECK. A single sealed `{}` bound `NULL` into
+    `goals.title`, was classified fatal, and returned from the cycle *before*
+    `save_cursor` — so the client re-pulled and re-failed identically on
+    every future sync, forever. Unrecoverable without deleting the database.
+    (`defect_not_null_violation_quarantines_instead_of_wedging_sync`.)
+
+189. **A poison check-in destroyed a real one.** `apply_check_in_win` deleted
+    (and tombstoned) the same-date rows it was displacing *before* inserting
+    the winner, with every statement autocommitting. A payload with a
+    missing or out-of-range `outcome` failed the INSERT after the DELETE had
+    already landed, and the quarantine path then watermarked the op as seen —
+    so the user's own check-in could never come back on that device while
+    its peer still had it. The whole apply is now one transaction.
+    (`defect_poison_check_in_cannot_destroy_a_real_one`.)
+
+190. **A one-step delete erased every phase on every peer.** All steps of a
+    progressive directive shared the directive's record id, so they were one
+    merge record: the peer's apply ran `DELETE FROM directive_phases WHERE
+    directive_id = ?`. Deleting step 2 on one device wiped step 1 everywhere.
+    The coarseness also meant an op for step 1 lost to an unrelated step-2 op
+    that merely carried a newer HLC. Phase records are now
+    `"{directive_id}:{step}"`, and the step is read from the KEY rather than
+    the payload, so the key the merge head arbitrates on is the key the write
+    lands on. (`defect_deleting_one_phase_keeps_the_others_on_peers`.)
+
+191. **Replicas diverged for good on an exact HLC tie.** Resurrection was
+    decided by `ts > tombstone_ts`, ignoring the `(device, operation_id)`
+    tie-break that had just decided the op was accepted. Two replicas that
+    received a tombstone and an upsert sharing a full HLC in opposite orders
+    ended in different states — permanently, and specifically in the
+    clone-split scenario the tie-break exists for. The key is the only
+    arbitration there is, so an op that beats the head now resurrects
+    outright. Stale upserts still lose and still cannot resurrect, so B-003
+    is unchanged. (`crdt::TableState::apply` and its SQL mirror, together —
+    the in-memory one is the reference contract.)
+
+192. **A stale remote op could clobber a newer local edit.** Only the delete
+    writers maintained `record_heads`, so the head lagged behind the row on
+    every ordinary write — and the pull side prefers the head over the row's
+    own HLC. Peer op at T_r lands (head = T_r) → the user changes a setting
+    at T_l > T_r (row = T_l, head still T_r) → a third device's op at T_m
+    between them beats the head and blind-upserts the stale value over the
+    user's edit. Every local upsert now advances the head, which is what the
+    head is for. (`defect_stale_remote_op_cannot_clobber_a_newer_local_write`.)
+
+### Availability and cost, on the hostile side of the relay
+
+193. **The documented production build panicked on startup.**
+    `PostgresStore::open` is synchronous and drives sqlx through
+    `Runtime::block_on`, which tokio refuses to call from a thread already
+    inside a runtime. Under `#[tokio::main]` that thread is one, so
+    `--no-default-features --features postgres` — the configuration the
+    `compile_error!` points operators at — died before binding a socket. The
+    store is now built before any runtime exists.
+
+194. **The pull byte budget under-counted by up to 5×.** The estimate summed
+    raw `str::len()` of the routing headers, but serde_json escapes a
+    control character as six bytes, so a 128-character header of U+0001
+    counted as 128 and serialised as 768. The response sailed past
+    `MAX_PULL_BYTES`; the client reads with exactly that ceiling, so it
+    rejected the page; and because the cursor is only saved from a *decoded*
+    response it never advanced. The account could never sync again. The
+    budget now measures the op as serialized.
+    (`defect_pull_byte_budget_counts_the_serialized_op`.)
+
+195. **A failed signature did not burn the challenge.** The claim ran only
+    after `verify_strict` had already succeeded, so a bad signature left the
+    nonce in the map and the four nonces `MAX_CHALLENGES_PER_ACCOUNT` allows
+    served unbounded retries — each paying point decompression plus a
+    double-scalar multiply, the deliberately slow variant, on an
+    *unauthenticated* route. One keypair could hold the relay's CPU
+    indefinitely. The challenge is now consumed first, before the expensive
+    part. A real client loses nothing: the nonce is a secret it holds, and a
+    fat-fingered signature just means asking for another.
+    (`defect_bad_signature_burns_the_challenge`.)
+
+196. **Every challenge request did two O(n) sweeps under the mutex.**
+    `issue_challenge` retained the whole challenge table and then swept the
+    whole session table, on an unauthenticated route, while holding the
+    challenge lock. Filling the table once turned every later challenge
+    request into ~1 ms of convoyed work. The sweep is now throttled to every
+    64th request, the session sweep is gone from that path entirely
+    (`validate` already runs it on a throttle), and the global ceiling is
+    sized for the hot path rather than for headroom. Between sweeps an
+    expired entry keeps its slot, which makes the caps read slightly
+    conservative — the right direction to be wrong in.
+
+197. **The account cap ratcheted shut forever.** Registration is
+    unauthenticated and the public key is caller-chosen, so 10 001 requests
+    with 10 001 random keys filled `accounts` permanently: the old code
+    deleted only the row it had just inserted, never reclaimed the previous
+    10 000, and the table is a file that outlives the process. Every
+    legitimate new device then got 429 on `/auth/challenge` and could never
+    onboard, with no remedy but a manual database edit. The cap is now a
+    sliding window — over the cap, the oldest accounts holding no ops are
+    evicted, down to a 90 % low-water mark so the sweep runs once per batch
+    of registrations rather than once per registration. An evicted account
+    re-registers on its next challenge; one holding ops is never evicted.
+    (`defect_unbounded_unauthenticated_account_registration`, rewritten —
+    the old version asserted the lockout as correct.)
+
+198. **No request deadline and no concurrency ceiling.** A client that opened
+    a connection and dribbled a body held a task and its read buffer open
+    indefinitely, and the in-flight count was whatever the attacker chose —
+    unbounded RAM growth on an unauthenticated socket. The router now carries
+    a 30 s deadline and a 256-request ceiling. Both bounds sit above any
+    honest deployment and below what a connection flood can open.
+
+### Correctness in the engine and the store
+
+199. **A progressive directive could become uncompletable.** `complete()`
+    bypassed the phase self-heal that `activate_next` runs, and
+    `advance_progressive_step` hard-fails on a missing phase row — so once a
+    truncated pull lost the rows, every ⌘+Enter errored until the canvas
+    happened to reload. The repair now runs first, and the advance's return
+    value is honoured instead of discarded: it is `false` when the row moved
+    under a concurrent merge, and the old `?` reported the directive as still
+    active at `phase: (total, total)` having advanced nothing.
+
+200. **A milestone was completed with unreachable work inside it.** The
+    outstanding set was `('queued','active','blocked')`; `skipped` was left
+    out, so a milestone with one energy-bailed-out directive and one
+    completed directive was marked `completed` while the skip sat unstarted
+    — and nothing requeues a skip, and `next_runnable_directive` only selects
+    `queued`. It was then reported as done while real work sat inside it.
+
+201. **A bailout could be recorded for something that never happened.** The
+    ledger row committed before the state transition, so a failure in the
+    second step left a bailout replicated to every device describing an event
+    that did not occur, while the directive stayed active. The ledger is
+    written last.
+
+202. **A replicated `progressive_step` past the total wedged a directive
+    forever.** The two columns have no cross-field constraint and the pull
+    path writes both from the payload. The step has no phase row, so every
+    engine path that read the current phase errored, and nothing could
+    requeue it. The step is now clamped into `1..=total`.
+
+203. **The phase repair manufactured the divergence it existed to heal.**
+    `ensure_phases` updated only `minutes` locally but emitted a SYNTHESIZED
+    row (`title = "Step N"`, `instruction = None`, `state = active|pending`)
+    under a fresh, winning HLC — and it recomputed equal slices, so a
+    directive authored as 5 + 25 came back as 15 + 15. A peer lost the real
+    title, the instruction and any `done` state. It ran on every canvas load,
+    so one truncated pull was enough to trigger it. A step that already
+    exists now keeps everything and emits nothing.
+    (`defect_phase_repair_does_not_erase_titles_or_state`.)
+
+204. **`ensure_phases` sized a `Vec` from an unbounded replicated integer.**
+    `progressive_total` has no schema constraint and the only guard was
+    `estimated_minutes >= count`; one op carrying `estimated_minutes = 10^18,
+    progressive_total = 10^9` reached `Vec::with_capacity(1_000_000_000)` on
+    the path the engine hits on every canvas load.
+
+205. **⌘+Enter and Esc on an idle canvas started a directive.** Both fell
+    through to `activate_next` when nothing was active. Activating is the
+    canvas load's job (`current`), and it is what does it now.
+
+206. **`activate_next` wrote before it validated.** `set_directive_state(..,
+    Active)` committed and then `ensure_milestone_active` could fail, leaving
+    an active directive whose milestone was never promoted, with the caller
+    holding an `Err` and no idea the activation had landed.
+
+207. **A milestone already `completed` was left behind a live directive.**
+    Only `pending` was promoted to `active`, so a directive created against a
+    finished milestone (by a peer, or by re-planning) ran with the milestone
+    still marked done.
+
+208. **The metadata-hostname SSRF block was bypassable with one character.**
+    `metadata.google.internal.` is the same name to the resolver — the URL
+    spec's domain-to-ASCII does not strip the root dot — but it is neither
+    equal to nor `.ends_with()` the blocked form. The root label is now
+    trimmed before comparison. The IPv6 arm also unwrapped only
+    IPv4-*mapped* addresses, so the deprecated `::a9fe:a9fe` form of
+    169.254.169.254 sailed through while `connect(2)` still honours it;
+    `to_ipv4()` handles both. `relay_url` is a replicated field a hostile
+    peer can write, so this was reachable.
+    (`defect_metadata_hostname_cannot_be_reached_with_a_trailing_dot`.)
+
+209. **The pull cursor could move backwards.** `save_cursor` was an
+    unconditional overwrite, and Settings and the telemetry drawer each own
+    an independent sync button — so two cycles can run concurrently against
+    one `Repos`, and the slower one overwrote the faster one's cursor on the
+    way out. Re-pulling that window is merely wasteful, except the
+    watermarks had already been pruned, so every op in it was re-decrypted
+    and re-applied on a fully-synced device. The write is now monotonic, and
+    it validates the cursor rather than persisting anything the relay would
+    reject.
+
+210. **The Stackelberg repair failed silently and was never retried.** The
+    result of `enforce_single_active` was discarded, and the call was gated
+    on `applied > 0`, so a cycle that pulled nothing new — the common case
+    while catching up on a failed repair — never re-ran it. Two `active`
+    rows could persist while the shell reported SYNCED. It now runs every
+    cycle and propagates.
+
+### Smaller, but real
+
+211. `wall as i64` persisted an HLC physical component by *reinterpretation*,
+    not conversion, so a clock past `i64::MAX` stored a negative timestamp in
+    the column every comparison reads. Saturating now.
+212. `identity()` mapped a corrupt `verify_indices` to "no challenge" via
+    `unwrap_or_default`, so the shell silently re-prompted onboarding and the
+    bad row stayed invisible. Every other mapper surfaces its parse failure.
+213. `verify_signature` used the lax `verify`, which skips small-order and
+    non-canonical-key rejection. `verify_strict` costs the same.
+214. `lock_conn` swallowed a failed ROLLBACK, which breaks the exact
+    guarantee the function advertises. Now logged.
+215. Session tokens were `"{counter}-{uuid}"`, handing every token holder a
+    per-process session counter and an instance fingerprint. Purely random
+    now.
+216. A hex-valid, 64-character public key that is not a curve point was
+    answered 500 — unauthenticated 5xx generation, with no log line, because
+    the only `tracing::warn!` in the file was on the challenge path.
+217. `MAX_CHALLENGES_GLOBAL` (100 000) and `MAX_SESSIONS_GLOBAL` (100 000)
+    were unreachable given `ACCOUNT_CAP` = 10 000. The challenge ceiling is
+    now sized for the hot path and reachable.
+
+### Tests that were pinning the defects
+
+Eight tests asserted behaviour that was itself the bug, and were rewritten
+rather than preserved: the two HLC `#[should_panic]` tests, the phase
+tombstone keyed by directive id, the relay account-cap lockout, the
+`save_cursor` "API exists" probe, the completion loop that relied on ⌘+Enter
+auto-activating, the vacuous `missing_phase_rows_are_rebuilt_from_the_estimate`
+(it scheduled its fixture for 2099, so `activate_next` picked a different
+directive and never exercised the repair it names), and the same-day check-in
+convergence test that asserted `(applied, quarantined) == (1, 0)` for an op
+that had stopped quarantining.

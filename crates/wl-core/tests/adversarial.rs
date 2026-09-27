@@ -297,9 +297,7 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
     )
     .unwrap();
-    let g = r
-        .create_goal("Ship", None, None, Some(&identity))
-        .unwrap();
+    let g = r.create_goal("Ship", None, None, Some(&identity)).unwrap();
     let m = r
         .create_milestone(&g.id, "M1", None, 0, Some(&identity))
         .unwrap();
@@ -311,13 +309,15 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
             30,
             2,
             "2026-09-13",
-            &[("Write the spec".into(), Some("be thorough".into()), 5),
-              ("Ship it".into(), None, 25)],
+            &[
+                ("Write the spec".into(), Some("be thorough".into()), 5),
+                ("Ship it".into(), None, 25),
+            ],
             Some(&identity),
         )
         .unwrap();
     // Mark step 1 done, as a real session would.
-    let phases = r.phases_for_directive(&d.id).unwrap();
+    assert_eq!(r.phases_for_directive(&d.id).unwrap().len(), 2);
     r.conn
         .lock()
         .unwrap()
@@ -334,10 +334,11 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
             [&d.id],
         )
         .unwrap();
-    r.conn.lock().unwrap().execute(
-        "DELETE FROM crdt_outbox",
-        [],
-    ).unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM crdt_outbox", [])
+        .unwrap();
     assert_eq!(r.phases_for_directive(&d.id).unwrap().len(), 1);
 
     let rebuilt = r.ensure_phases(&d.id, Some(&identity)).unwrap();
@@ -427,7 +428,8 @@ fn defect_milestone_is_not_completed_while_a_skipped_directive_remains() {
         .unwrap();
     let _ = e.activate_next(today).unwrap();
     // Energy bailout → skipped.
-    e.bail_out(today, BailoutReason::EnergyDepletion, None).unwrap();
+    e.bail_out(today, BailoutReason::EnergyDepletion, None)
+        .unwrap();
     assert!(r.directive(&d.id).unwrap().is_some());
     let state: String = r
         .conn
@@ -442,9 +444,11 @@ fn defect_milestone_is_not_completed_while_a_skipped_directive_remains() {
         .conn
         .lock()
         .unwrap()
-        .query_row("SELECT status FROM milestones WHERE id = ?1", [&m.id], |x| {
-            x.get(0)
-        })
+        .query_row(
+            "SELECT status FROM milestones WHERE id = ?1",
+            [&m.id],
+            |x| x.get(0),
+        )
         .unwrap();
     assert_ne!(
         mstate, "completed",
@@ -480,7 +484,10 @@ fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
     r.conn
         .lock()
         .unwrap()
-        .execute("UPDATE directives SET progressive_step = 9 WHERE id = ?1", [&d.id])
+        .execute(
+            "UPDATE directives SET progressive_step = 9 WHERE id = ?1",
+            [&d.id],
+        )
         .unwrap();
 
     // The canvas must still render, and ⌘+Enter must still work.
@@ -491,7 +498,10 @@ fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
     );
     let done = e.complete(today).unwrap();
     assert!(
-        matches!(done, wl_core::engine::EngineOutcome::DirectiveCompleted { .. }),
+        matches!(
+            done,
+            wl_core::engine::EngineOutcome::DirectiveCompleted { .. }
+        ),
         "and the user must still be able to finish it: {done:?}"
     );
 }

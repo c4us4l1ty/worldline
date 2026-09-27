@@ -1043,7 +1043,12 @@ async fn defect_poison_check_in_cannot_destroy_a_real_one() {
     let repos = Repos::new(open_in_memory().unwrap(), 2);
     // The user's genuine check-in for 2026-09-18.
     let mine = repos
-        .upsert_check_in("2026-09-18", wl_core::domain::CheckInOutcome::Done, Some("real"), None)
+        .upsert_check_in(
+            "2026-09-18",
+            wl_core::domain::CheckInOutcome::Done,
+            Some("real"),
+            None,
+        )
         .unwrap();
     let before: i64 = repos
         .lock_conn()
@@ -1114,8 +1119,12 @@ async fn defect_deleting_one_phase_keeps_the_others_on_peers() {
     let a = Repos::new(open_in_memory().unwrap(), 1);
     // Every writer needs the identity: without it nothing is enqueued
     // for the outbox and the peer's FK chain has no root.
-    let g = a.create_goal("Ship it", None, None, Some(&identity)).unwrap();
-    let m = a.create_milestone(&g.id, "M1", None, 0, Some(&identity)).unwrap();
+    let g = a
+        .create_goal("Ship it", None, None, Some(&identity))
+        .unwrap();
+    let m = a
+        .create_milestone(&g.id, "M1", None, 0, Some(&identity))
+        .unwrap();
     let d = a
         .create_directive(
             &m.id,
@@ -1154,7 +1163,10 @@ async fn defect_deleting_one_phase_keeps_the_others_on_peers() {
         1,
         "a one-step delete must not wipe the sibling phase on a peer: {on_b:?}"
     );
-    assert_eq!(on_b[0].step, 1, "the surviving phase is the one not deleted");
+    assert_eq!(
+        on_b[0].step, 1,
+        "the surviving phase is the one not deleted"
+    );
 }
 
 /// A local write must advance the record's merge head.
@@ -1229,4 +1241,3 @@ async fn defect_stale_remote_op_cannot_clobber_a_newer_local_write() {
         "an op older than the user's own edit must not win last-writer-wins"
     );
 }
-
