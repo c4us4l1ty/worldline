@@ -1,6 +1,27 @@
 //! Tauri command surface — thin bridge: Dioxus UI → shell → wl-core.
 //! Recovery display and key entry cross IPC; secrets are never persisted
 //! in SQLite or temporary DOM dataset attributes.
+//!
+//! # Argument naming is part of the contract
+//!
+//! Every command below carries `rename_all = "snake_case"`, and that is
+//! load-bearing rather than stylistic. `tauri-macros` defaults to
+//! `ArgumentCase::Camel` (tauri-macros 2.6.3, `command/wrapper.rs:51`),
+//! so a bare `#[tauri::command]` makes the shell look for `targetDate`
+//! while the UI — which serialises plain serde structs, no
+//! `rename_all` — sends `target_date`. The runtime resolves arguments
+//! with a strict `payload.get(key)` and no default
+//! (`tauri/src/ipc/command.rs:100-103`), so the mismatch is a hard
+//! `command create_goal missing required key targetDate`, not a
+//! silently-defaulted field.
+//!
+//! Snake_case is the convention the rest of the repo already speaks: the
+//! Rust params, the browser mock in `ui/public/invoke-shim.js`, the
+//! `AGENTS.md` rule, and the manual `create_manual_*` commands. Keeping
+//! it means a new multi-word parameter cannot break the app by existing.
+//! Single-word parameters are unaffected either way, so this changes
+//! nothing that already worked. `src/ipc_tests.rs` drives the real
+//! `generate_handler!` over a mock runtime to keep it that way.
 
 use serde::Serialize;
 use tauri::State;
@@ -24,7 +45,7 @@ use crate::relay;
 /// Generates a fresh 12-word identity. Returns the mnemonic ONCE for
 /// onboarding display; it is persisted ONLY in the Stronghold vault
 /// (encrypted with a device-local key), never in SQLite.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn identity_generate(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<GeneratedIdentity> {
@@ -61,7 +82,7 @@ pub struct GeneratedIdentity {
 /// challenge position i must match the phrase word at position i) and
 /// marks the mnemonic verified (PRD §3.1 onboarding step). Membership
 /// anywhere in the phrase is not verification — order is the check.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn identity_verify_backup(
     state: State<'_, std::sync::Arc<AppState>>,
     indices: Vec<usize>,
@@ -99,7 +120,7 @@ fn valid_backup_challenge(indices: &[usize]) -> bool {
 }
 
 /// Restores an identity from a 12-word mnemonic (account recovery).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn identity_restore(
     state: State<'_, std::sync::Arc<AppState>>,
     phrase: String,
@@ -157,7 +178,7 @@ fn persist_identity(
 }
 
 /// Whether an identity exists (onboarding gate).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn identity_status(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<IdentityStatus> {
@@ -180,7 +201,7 @@ pub struct IdentityStatus {
 
 /// Restores the in-memory identity from the vault copy (post-restart
 /// unlock). Fails closed when nothing was ever stored.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn identity_unlock(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<String> {
@@ -217,7 +238,7 @@ pub(crate) async fn identity_unlock(
 // ---------------------------------------------------------------------------
 
 /// Stores (or replaces) a provider API key in the vault.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn set_api_key(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
@@ -243,7 +264,7 @@ pub(crate) async fn set_api_key(
 
 /// Whether a key is stored for the provider (presence only — the key
 /// itself is never readable through commands).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn has_api_key(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
@@ -255,7 +276,7 @@ pub(crate) async fn has_api_key(
 }
 
 /// Removes a stored provider key.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn delete_api_key(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
@@ -270,7 +291,7 @@ pub(crate) async fn delete_api_key(
 // Goal / milestone / directive authoring (manual fallback)
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn create_goal(
     state: State<'_, std::sync::Arc<AppState>>,
     title: String,
@@ -349,7 +370,7 @@ pub struct GoalJson {
     pub milestone_total: usize,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn create_manual_milestone(
     state: State<'_, std::sync::Arc<AppState>>,
     goal_id: String,
@@ -374,7 +395,7 @@ pub(crate) async fn create_manual_milestone(
     Ok(m.id)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn create_manual_directive(
     state: State<'_, std::sync::Arc<AppState>>,
     milestone_id: String,
@@ -497,7 +518,7 @@ fn milestone_title(repos: &Repos, milestone_id: &str) -> Option<String> {
         .ok()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn current_directive(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<DirectiveView> {
@@ -515,7 +536,7 @@ pub(crate) async fn current_directive(
     Ok(outcome_view(&out, &state.repos))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn complete_directive(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<DirectiveView> {
@@ -528,7 +549,7 @@ pub(crate) async fn complete_directive(
     Ok(outcome_view(&out, &state.repos))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn bail_out(
     state: State<'_, std::sync::Arc<AppState>>,
     reason: String,
@@ -585,7 +606,7 @@ fn recovery_summary(r: &RecoveryAction) -> String {
 // Check-in & velocity (PRD §5.4)
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn check_in(
     state: State<'_, std::sync::Arc<AppState>>,
     outcome: String,
@@ -632,7 +653,7 @@ fn velocity_inner(repos: &Repos) -> ShellResult<VelocityView> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn velocity(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<VelocityView> {
@@ -643,14 +664,14 @@ pub(crate) async fn velocity(
 // Settings
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn settings_get(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<AppSettings> {
     Ok(state.repos.settings()?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn settings_save(
     state: State<'_, std::sync::Arc<AppState>>,
     settings: AppSettings,
@@ -748,7 +769,7 @@ pub struct RelayAuthView {
 ///
 /// Body runs on a `spawn_blocking` thread: the sync stack drives nested
 /// runtimes via block_on, which panics on async-runtime threads.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn relay_authenticate(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<RelayAuthView> {
@@ -811,7 +832,7 @@ fn run_cycle(
     wl_sync::sync::sync_cycle(&state.repos, identity, &transport, 200)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn sync_now(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<SyncStatsView> {
@@ -891,14 +912,14 @@ fn vault_api_key(state: &AppState, provider: &str) -> ShellResult<Zeroizing<Stri
         .ok_or_else(|| ShellError::NoApiKey(provider.to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Tier-1 planning from the compose screen's single free-text field.
 ///
 /// `intent` is raw user text, NOT a title: the architect names the goal
-/// from it (see `AiDispatcher::master_plan`). The param names below are
-/// the Tauri wire contract — the UI must send exactly these keys, which
-/// is why the browser mock in `invoke-shim.js` cannot be trusted to catch
-/// a mismatch here.
+/// from it (see `AiDispatcher::master_plan`).
+///
+/// The wire keys are these parameter names verbatim, snake_case included —
+/// see the module header for why `rename_all` is not optional.
 pub(crate) async fn master_plan(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
@@ -999,7 +1020,7 @@ pub struct BriefingView {
     pub created_ids: Vec<String>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn morning_briefing(
     state: State<'_, std::sync::Arc<AppState>>,
     provider: String,
@@ -1048,8 +1069,16 @@ pub(crate) async fn morning_briefing(
 // Window controls (PRD §2.2)
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-pub(crate) async fn set_always_on_top(app: tauri::AppHandle, pinned: bool) -> ShellResult<()> {
+/// Generic over `R: Runtime` rather than taking the `Wry` default
+/// `AppHandle`: the IPC contract test registers this command on a
+/// `MockRuntime` app, and `AppHandle<Wry>` does not implement
+/// `CommandArg<MockRuntime>`. Runtime-generic keeps one handler list for
+/// both the shipped app and the test harness.
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn set_always_on_top<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    pinned: bool,
+) -> ShellResult<()> {
     if let Some(win) = app.get_webview_window("main") {
         win.set_always_on_top(pinned)
             .map_err(|e| ShellError::Io(e.to_string()))?;

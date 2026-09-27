@@ -795,9 +795,10 @@ Locked decisions from the planning session are marked [approved].
 
     `wl-italic-accent` itself is unchanged and still correct for the
     *editorial* headings it was designed for: the morning greeting, the
-    dormant line, the evening recalibration, the seed-phrase title, and
-    the (currently unreachable) BYOK screen. This is a correction of
-    where the accent belongs, not a removal of the accent.
+    dormant line, the evening recalibration, and the seed-phrase title.
+    This is a correction of where the accent belongs, not a removal of
+    the accent. (It also listed the BYOK screen, which has since been
+    removed as unreachable — see delta 119.)
 
     Verified by rendering: the goal-creation form now fits one 420×747
     screen with both CTAs visible, which the deck had been pushing below
@@ -969,3 +970,99 @@ Locked decisions from the planning session are marked [approved].
     valid, so the only honest signal is a build-time message. The same
     trap is documented in README and AGENTS.md with a table of which
     build mode needs a server.
+
+## IPC arg binding, dead screen, and boot routing (2026-09-27)
+
+117. **Every command now declares `rename_all = "snake_case"`; the shell
+    was silently dropping `target_date`.** `tauri-macros` 2.6.3 defaults to
+    `ArgumentCase::Camel` (`command/wrapper.rs:51`), so a bare
+    `#[tauri::command]` made the shell resolve arguments against
+    `targetDate` while the Dioxus UI — which serialises plain serde structs
+    with no `rename_all` — sent `target_date`. Four commands declare
+    multi-word parameters: `create_goal`, `create_manual_milestone`,
+    `create_manual_directive`, `master_plan`.
+
+    The failure splits in two, and the quiet half is the one that mattered:
+
+    * **Required parameters** (`goal_id`, `milestone_id`,
+      `estimated_minutes`, `scheduled_for_date`) failed loudly —
+      `CommandItem` uses a strict `payload.get(key)` with no default
+      (`tauri/src/ipc/command.rs:100-103`).
+    * **`Option` parameters** (`target_date`) failed **silently**:
+      `deserialize_option` visits `None` for an absent key
+      (`command.rs:135-140`). So `create_goal` bound successfully and
+      persisted a goal with **no deadline**, and the compose screen's
+      horizon picker was a control that appeared to work and did
+      nothing. Same for `master_plan`, so AI-authored goals were
+      deadline-less too. This is the failure mode worth remembering:
+      a Tauri arg-key mismatch is not necessarily a crash.
+
+    Fixed in the shell rather than the UI, because snake_case is the
+    convention the rest of the repo already speaks — the Rust parameter
+    names, `invoke-shim.js`, the manual authoring commands — and the
+    conversion belongs in one place. Single-word parameters are
+    unaffected (`to_snake_case("title") == "title"`), so nothing that
+    worked before changed.
+
+118. **The IPC layer had zero test coverage; it now has the only test
+    that can see this class of bug.** `crates/wl-app/src/ipc_tests.rs`
+    drives the real `generate_handler!` over `tauri::test::MockRuntime`
+    (`tauri` gains a `test` dev-feature; upstream `test = []` pulls in no
+    new dependencies). Three tests, each asserting the *value* that came
+    back rather than merely the absence of an error, because the silent
+    `Option` case above produces no error to assert on.
+
+    The handler list is extracted into `add_commands()` in `main.rs` so
+    the test builds its mock app over the same list the app registers —
+    a hand-copied list would keep passing while the app shipped a
+    different one. Making that generic over `R: Runtime` required
+    `set_always_on_top` to become `async fn …<R: tauri::Runtime>(app:
+    tauri::AppHandle<R>, …)`: `AppHandle<Wry>` does not implement
+    `CommandArg<MockRuntime>`, so the `Wry` default pinned the command to
+    the shipped runtime and out of the test.
+
+    The regression was confirmed by reverting `rename_all` from
+    `create_goal` and watching `target_date` come back `null` — which is
+    the whole point: the test catches data loss, not just exceptions.
+
+119. **`Screen::ByokSetup` was unreachable and is deleted.** Nothing ever
+    assigned it; the only writer was inside the screen it rendered. Its
+    spec role (BYOK key entry) is fully covered by the compose screen's
+    AI-or-manual choice plus Settings' Intelligence section, which owns
+    provider, key set, and key delete. `screens/byok.rs` and the variant
+    are removed rather than left dormant, along with `.wl-hud`,
+    `.wl-hud-pill`, `.wl-hud-status` and `.wl-pulse-dot` in `wl.css` —
+    those four rules existed only for that screen.
+
+120. **The boot routing decision is extracted; the landing screen is
+    unchanged.** `App`'s boot effect now calls
+    `app::boot_screen(Result<(), &str>)` instead of matching inline, so
+    the fail-closed rule is testable without a DOM: a healthy install
+    lands on the Canvas, and a shell that refused to answer renders
+    `BootError` carrying the shell's own message, rather than falling
+    through to a default screen that would disguise a broken vault as a
+    fresh install.
+
+    Routing boot at the Morning Brief instead was proposed — the brief
+    is the screen that states the day's trajectory, and with the compose
+    screen in place it had no entry point from the canvas or the nav
+    drawer, only the unadvertised chain `Ctrl+,` → evening check-in →
+    dormant → brief — and was **declined on 2026-09-27**: the Canvas is
+    the surface that should open unprompted. So the brief's
+    reachability is left as it was, and is recorded here as an open
+    product question rather than a fixed defect.
+
+121. **`wl-core`'s sealed-op cap is now pinned to the relay's at compile
+    time.** `MAX_SEALED_OP_BYTES` was a hand-mirrored literal of
+    `wl_protocol::MAX_SEALED_BYTES`, annotated "the two must move
+    together" — which a comment cannot enforce. If the mirror drifts low,
+    `wl-core` writes an op the relay rejects, the outbox can never drain,
+    and sync wedges with no failing test. `wl-sync` depends on both
+    crates, so it now holds
+    `const _: () = assert!(wl_core::…MAX_SEALED_OP_BYTES == wl_protocol::MAX_SEALED_BYTES)`.
+    No new dependency: the assertion lives in the crate that would
+    actually break.
+
+122. **Test counts.** Workspace 192, shell 20, UI 17 (225 total). The
+    three shell IPC tests and the boot-routing test are new; the rest of
+    the delta from the previous 217 is the compose screen's own tests.

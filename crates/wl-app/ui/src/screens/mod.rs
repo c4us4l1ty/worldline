@@ -1,8 +1,12 @@
 //! All Worldline screens: canvas, seed vault, check-in, brief, goal
-//! creation, BYOK setup, dormant, telemetry drawer, and settings — each
-//! per the worldline skill.
+//! creation, dormant, telemetry drawer, and settings — each per the
+//! worldline skill.
+//!
+//! There is no BYOK screen: `Screen::ByokSetup` was unreachable from
+//! every entry point, and the compose screen (`goal_create.rs`) now owns
+//! the AI-or-manual choice while Settings owns the key itself. The
+//! screen was deleted rather than left dormant.
 
-mod byok;
 mod canvas;
 mod checkin;
 mod dormant;
@@ -13,7 +17,6 @@ mod seed_vault;
 mod settings;
 mod telemetry;
 
-pub use byok::*;
 pub use canvas::*;
 pub use checkin::*;
 pub use dormant::*;

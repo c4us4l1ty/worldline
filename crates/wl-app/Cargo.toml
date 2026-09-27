@@ -42,6 +42,11 @@ tauri-plugin-stronghold = "2"
 [dev-dependencies]
 wl-relay = { path = "../wl-relay" }
 axum = { version = "0.8", features = ["json", "tokio"] }
+# `tauri/test` is the mock-runtime harness (`mock_builder`,
+# `get_ipc_response`) used by `src/ipc_tests.rs` to drive the real
+# `generate_handler!` over a real IPC payload. It pulls in no extra
+# dependencies (`test = []` upstream) and is only linked for test builds.
+tauri = { version = "2", features = ["test"] }
 
 [features]
 # compiled with cargo tauri build / dev

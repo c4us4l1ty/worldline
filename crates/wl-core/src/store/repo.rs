@@ -16,9 +16,15 @@ use super::StoreError;
 
 /// The relay rejects any single sealed op larger than this
 /// (`wl-protocol::MAX_SEALED_BYTES`, 256 KiB). Mirrored here as a
-/// literal rather than a dependency so `wl-core` stays
-/// platform-clean and dependency-light; the two must move together.
-const MAX_SEALED_OP_BYTES: usize = 256 * 1024;
+/// literal rather than a dependency so `wl-core` stays platform-clean
+/// and dependency-light — but "the two must move together" is not
+/// something a comment can enforce. `wl-sync` depends on BOTH crates
+/// and holds a `const _: () = assert!(…)` over this value and
+/// `wl_protocol::MAX_SEALED_BYTES`, so drift is a compile error at
+/// the crate that would actually wedge sync.
+///
+/// Public only for that assert; not part of `wl-core`'s API surface.
+pub const MAX_SEALED_OP_BYTES: usize = 256 * 1024;
 
 /// Repository handle. The SQLite connection lives behind a mutex so
 /// `Repos` is `Send + Sync` (rusqlite `Connection` is `Send` but not

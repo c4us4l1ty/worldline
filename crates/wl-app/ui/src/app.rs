@@ -237,7 +237,7 @@ impl Default for AppSettingsView {
 // single-window terminal)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Screen {
     Boot,
     /// Fail-closed boot: the shell answered with an error (broken or
@@ -255,13 +255,32 @@ pub enum Screen {
         /// which can never succeed then (B-004).
         has_identity: bool,
     },
-    ByokSetup,
     Canvas,
     GoalCreate,
     EveningCheckIn,
     Dormant,
     MorningBrief,
     Settings,
+}
+
+/// Where a boot lands, given whether the shell answered.
+///
+/// A healthy install opens the Canvas — the one surface the product is
+/// built around, and the only one that should open unprompted. A shell
+/// that refused to answer must NOT fall through to a default screen:
+/// that would render a fresh-looking install over a broken vault, which
+/// is the failure this branch exists to prevent.
+///
+/// `Ok`/`Err` over a bool because the error text is the payload
+/// `BootError` renders; routing and the message it shows are one
+/// decision, not two.
+pub fn boot_screen(identity: Result<(), &str>) -> Screen {
+    match identity {
+        Ok(()) => Screen::Canvas,
+        Err(detail) => Screen::BootError {
+            detail: detail.to_string(),
+        },
+    }
 }
 
 /// Note: the session timer was removed from the canvas (2026-09-26, user
@@ -326,11 +345,13 @@ fn App() -> Element {
     let ctx = use_context::<AppCtx>();
     let _theme = use_context_provider(Theme::new);
 
-    // Boot: load settings/theme and route straight to Home (MVP-5).
-    // No onboarding screens at boot: identity work (unlock, restore,
-    // generate, 12-word phrase) lives in Settings. The ONLY boot
-    // failure that blocks is the shell refusing to answer — a silent
-    // default would disguise a broken vault as a fresh install.
+    // Boot: load settings/theme and route straight to the Canvas
+    // (MVP-5). No onboarding screens at boot: identity work (unlock,
+    // restore, generate, 12-word phrase) lives in Settings. The ONLY
+    // boot failure that blocks is the shell refusing to answer — a
+    // silent default would disguise a broken vault as a fresh install,
+    // so the routing decision lives in `boot_screen` and is pinned by a
+    // test rather than being inlined here.
     let mut booted = use_signal(|| false);
     use_effect(move || {
         if *booted.read() {
@@ -348,13 +369,11 @@ fn App() -> Element {
                 "dark"
             });
             *settings_sig.write() = settings;
-            match invoke::<IdentityStatus>("identity_status", ()).await {
-                Ok(status) => {
-                    let mut st = ctx2.identity_status;
-                    st.set(status);
-                    *screen.write() = Screen::Canvas;
-                }
-                Err(e) => *screen.write() = Screen::BootError { detail: e },
+            let status = invoke::<IdentityStatus>("identity_status", ()).await;
+            *screen.write() = boot_screen(status.as_ref().map(|_| ()).map_err(String::as_str));
+            if let Ok(status) = status {
+                let mut st = ctx2.identity_status;
+                st.set(status);
             }
         });
     });
@@ -388,7 +407,6 @@ fn App() -> Element {
                         has_identity,
                     }
                 },
-                Screen::ByokSetup => rsx! { crate::screens::ByokSetupScreen {} },
                 Screen::Canvas => rsx! { crate::screens::CanvasScreen {} },
                 Screen::GoalCreate => rsx! { crate::screens::GoalCreateScreen {} },
                 Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
@@ -593,6 +611,22 @@ mod tests {
                 pending: 4,
                 quarantined: 0,
                 cursor: String::new(),
+            }
+        );
+    }
+
+    /// A healthy install opens the Canvas and nothing else; a shell that
+    /// refuses to answer must surface the failure instead of falling
+    /// through to a default screen, which would render a fresh-looking
+    /// install over a broken vault. The error text is carried through
+    /// rather than discarded, because `BootError` shows it verbatim.
+    #[test]
+    fn boot_opens_the_canvas_and_never_masks_a_dead_shell() {
+        assert_eq!(boot_screen(Ok(())), Screen::Canvas);
+        assert_eq!(
+            boot_screen(Err("vault: unreadable snapshot")),
+            Screen::BootError {
+                detail: "vault: unreadable snapshot".into()
             }
         );
     }

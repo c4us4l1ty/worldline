@@ -232,46 +232,11 @@ body {
    always-visible Evening audit button — so none of them became
    unreachable when the canvas bar came down. */
 
-/* `.wl-hud` is retained ONLY as a generic inline status row: the canvas
-   bar is gone, but `byok.rs` still uses this as a small two-child flex
-   row. The former `border-bottom` + `padding-bottom` (what made it read
-   as a full-width bar) is deliberately NOT restored, since that chrome
-   is exactly what the canvas dropped. */
-.wl-hud {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-.wl-hud-pill {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--wl-text-muted);
-  background-color: var(--wl-surface-card);
-  padding: 3px 8px;
-  border-radius: var(--wl-radius-pill);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-.wl-hud-status {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--wl-text-muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  letter-spacing: 0.06em;
-}
-.wl-pulse-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: var(--wl-sync-green);
-}
-/* `.wl-hud-timer` (the in-bar timer) and `.wl-float-timer` (its
-   floating replacement) are both gone — the session timer was removed
-   entirely. Neither has an rsx user. Deleted rather than left as dead
-   CSS (UI-5 tracks dead-rule removal). */
+/* `.wl-hud`, `.wl-hud-timer` and `.wl-float-timer` are all gone. The
+   canvas bar came down 2026-09-26, the session timer came with it, and
+   `.wl-hud` outlived both only as the inline status row on the BYOK
+   setup screen — which no entry point reached, and which was removed
+   with it. No rsx user remains for any of the three. */
 
 /* ==========================================================================
    G. Page shell — centred title + floating back affordance

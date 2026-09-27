@@ -56,11 +56,23 @@ unless `dx serve --port 1420` is already up.
 - Sync I/O (`relay::handshake`, `ReqwestTransport::post`) drives nested
   runtimes via block_on → may ONLY run on `spawn_blocking` threads; calling
   from async code panics. `sync_now`/`relay_authenticate` already wrap.
-- Tauri arg shapes: top-level JSON keys must match command param names.
-  Struct params must be wrapped (e.g. `{"settings": {...}}`); flat objects
-  fail deserialization. The browser mock in `invoke-shim.js` ignores shapes —
-  verify new commands against the real shell, not just `dx serve`.
+- **Tauri arg shapes: every command carries `rename_all = "snake_case"`.**
+  `tauri-macros` defaults to `ArgumentCase::Camel`, so without it the
+  shell looks for `targetDate` while the UI (plain serde structs, no
+  `rename_all`) sends `target_date`. A required param then fails with
+  `missing required key`; an `Option<T>` param fails **silently** —
+  `create_goal` bound without a deadline and the compose screen's
+  horizon picker looked like it worked. Snake_case is what the Rust
+  params, `invoke-shim.js`, and the manual `create_manual_*` commands all
+  already spoke, so the shell is where the conversion belongs. Keep the
+  attribute on new commands; `src/ipc_tests.rs` drives the real
+  `generate_handler!` over a mock runtime and will fail if it is dropped.
+  Struct params must still be wrapped (e.g. `{"settings": {...}}`); flat
+  objects fail deserialization. The browser mock in `invoke-shim.js`
+  ignores shapes — the shell test is the gate, not `dx serve`.
 - `#[tauri::command]` fns must be `pub(crate)` (cross-module `generate_handler`).
+  A command taking `AppHandle` must be generic over `R: tauri::Runtime`,
+  not the `Wry` default, or the mock-runtime test app cannot register it.
 - Bearer tokens live only in `AppState.relay_token` (memory); re-handshake
   on HTTP 401 and retry once (`sync_now`). Session TTL is 1h server-side.
 
