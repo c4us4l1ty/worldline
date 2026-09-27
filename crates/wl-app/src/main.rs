@@ -50,6 +50,7 @@ fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         commands::list_goals,
         commands::task_ledger,
         commands::mark_task_done,
+        commands::calibration_view,
         commands::current_directive,
         commands::check_in,
         commands::velocity,

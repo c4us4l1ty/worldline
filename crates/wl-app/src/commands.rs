@@ -428,8 +428,13 @@ pub(crate) async fn mark_task_done(
     directive_id: String,
 ) -> ShellResult<DirectiveView> {
     let today = today_local();
-    let out = state.with_identity(|identity| {
-        let e = Engine::new(&state.repos, Some(identity));
+    // `with_identity_opt`, not the strict variant: a task is done whether
+    // or not the vault happens to be open, exactly like a manual goal. The
+    // identity only decides whether the change replicates — refusing the
+    // write would mean a locked vault made the ledger unusable, which is
+    // the one thing a ledger must never be.
+    let out = state.with_identity_opt(|identity| {
+        let e = Engine::new(&state.repos, identity);
         e.mark_complete(&today, &directive_id)?;
         // Same two-step shape as `complete_directive`: mark, then re-read
         // the canvas. The ledger is where a task is resolved, and the
@@ -600,18 +605,6 @@ pub(crate) async fn current_directive(
     Ok(outcome_view(&out, &state.repos))
 }
 
-#[tauri::command(rename_all = "snake_case")]
-pub(crate) async fn complete_directive(
-    state: State<'_, std::sync::Arc<AppState>>,
-) -> ShellResult<DirectiveView> {
-    let today = today_local();
-    let out = state.with_identity(|identity| {
-        let e = Engine::new(&state.repos, Some(identity));
-        e.complete(&today)?;
-        e.current(&today).map_err(ShellError::from)
-    })?;
-    Ok(outcome_view(&out, &state.repos))
-}
 
 // ---------------------------------------------------------------------------
 // Check-in & velocity (PRD §5.4)
@@ -1540,9 +1533,11 @@ mod tests {
                     serde_json::json!({"choices":[{"message":{"content": PLAN}}]}).to_string(),
                 )
             };
-            let (goal_id, _) = AiDispatcher::master_plan(
+            let (persisted, _) = AiDispatcher::master_plan(
                 &adapter,
                 "in n out burger",
+                None,
+                COMPLEXITY_DEFAULT,
                 None,
                 execute,
                 &state.repos,
@@ -1550,8 +1545,9 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("master_plan failed for {provider}: {e}"));
             // The goal is named by the model, not by the raw intent.
-            let g = state.repos.goal(&goal_id).unwrap().unwrap();
+            let g = state.repos.goal(&persisted.goal_id).unwrap().unwrap();
             assert_eq!(g.title, "Named by the architect");
+            assert_eq!(g.complexity, COMPLEXITY_DEFAULT);
         }
         // Removed providers stay rejected at both layers (no silent fallback).
         for dead in [
@@ -1577,7 +1573,9 @@ mod tests {
         // unlocked identity must still yield a runnable directive that
         // the canvas activates on load.
         let repos = Repos::new(wl_core::store::open_in_memory().unwrap(), 1);
-        let g = repos.create_goal("Ship it", None, None, None).unwrap();
+        let g = repos
+            .create_goal("Ship it", None, None, COMPLEXITY_DEFAULT, None)
+            .unwrap();
         seed_first_steps(&repos, &g, None).unwrap();
         let today = today_local();
         let next = repos.next_runnable_directive(&today).unwrap();
@@ -1601,8 +1599,8 @@ mod tests {
         // `Repos::active_goal()` is `ORDER BY hlc_timestamp LIMIT 1`, so
         // velocity and recovery bound to the OLDER, superseded goal.
         let repos = Repos::new(wl_core::store::open_in_memory().unwrap(), 1);
-        let first = create_seeded_goal(&repos, "First", None, None, None).unwrap();
-        let second = create_seeded_goal(&repos, "Second", None, None, None).unwrap();
+        let first = create_seeded_goal(&repos, "First", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+        let second = create_seeded_goal(&repos, "Second", None, None, COMPLEXITY_DEFAULT, None).unwrap();
         let active = repos.active_goals_with_progress().unwrap();
         assert_eq!(
             active.len(),
