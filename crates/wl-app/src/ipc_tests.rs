@@ -371,8 +371,9 @@ fn commit_plan_writes_the_edited_plan_and_its_edges() {
         Some("Draft the outline"),
         "an edge that did not survive the write is an unreadable graph"
     );
-    // …and clearing it makes the second task runnable, which is the whole
-    // point of an edge the user can edit.
+    // …and finishing the task it was waiting on releases it, which is the
+    // whole point of an edge a person can see. The blocker is the task in
+    // `runnable`; the blocked one is the ledger row.
     state
         .repos
         .set_directive_state(
@@ -450,8 +451,7 @@ fn marking_a_task_done_advances_the_canvas() {
             "state",
             "title",
         ],
-        "task_ledger field names are the UI contract: {:?}"
-        ,
+        "task_ledger field names are the UI contract: {:?}",
         rows
     );
     assert_eq!(rows[0]["complexity_label"], "standard");
@@ -745,5 +745,4 @@ fn the_goal_rail_reports_progress() {
     assert_eq!(row["blocked_by"], serde_json::Value::Null);
     // Monolithic, so no phase badge — a null rather than a fake (1, 1).
     assert_eq!(row["phase"], serde_json::Value::Null);
-
 }

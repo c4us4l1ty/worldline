@@ -64,7 +64,6 @@
    looked like it belonged to nothing.
    ========================================================================== */
 
-
 /* ==========================================================================
    1. Tokens
    ========================================================================== */
@@ -266,7 +265,6 @@ button {
 button:active:not(:disabled) { transform: scale(0.985) translateY(1px); }
 button:disabled { cursor: not-allowed; }
 
-
 /* ==========================================================================
    2. Type primitives
    ========================================================================== */
@@ -351,7 +349,6 @@ button:disabled { cursor: not-allowed; }
   color: var(--wl-text-muted);
   margin: 8px 0 0 0;
 }
-
 
 /* ==========================================================================
    3. Circular controls
@@ -460,8 +457,6 @@ button:disabled { cursor: not-allowed; }
    modifier that cannot change a declaration is a lie the next reader has
    to disprove. The control is `.wl-circle-btn` and nothing else. */
 
-
-
 /* ==========================================================================
    4. Page shell — centred title + floating back affordance
    ========================================================================== */
@@ -519,7 +514,6 @@ button:disabled { cursor: not-allowed; }
    absolute it would leave the flow, the pill would become the bar's only
    in-flow child, and `space-between` would pin it to the left edge. */
 .wl-page-bar .wl-back { position: static; }
-
 
 /* ==========================================================================
    5. Buttons
@@ -615,21 +609,7 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-btn-escape:disabled { opacity: 0.5; }
 
-.wl-kbd {
-  font-family: var(--font-mono);
-  font-size: var(--t-mono);
-  background: rgba(0, 0, 0, 0.12);
-  color: var(--wl-text-primary);
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-[data-theme="light"] .wl-kbd { background: rgba(244, 240, 232, 0.25); }
-.wl-kbd-subtle {
-  font-family: var(--font-mono);
-  font-size: var(--t-mono);
-  opacity: 0.7;
-}
-
+[data-theme="light"] 
 
 /* ==========================================================================
    6. Cards, fieldsets, and the value row
@@ -780,7 +760,6 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-actions-row .wl-btn-ghost { background-color: var(--wl-surface-elevated); }
 
-
 /* ==========================================================================
    7. Appearance switch
    ========================================================================== */
@@ -853,7 +832,6 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-switch:hover .wl-switch-track { border-color: var(--wl-border-strong); }
 .wl-switch svg { display: block; }
-
 
 /* ==========================================================================
    8. Text inputs
@@ -939,7 +917,6 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-inline-actions .wl-btn-ghost { width: auto; padding: 0 18px; flex: 1 1 auto; }
 
-
 /* ==========================================================================
    9. The compose screen
    ========================================================================== */
@@ -980,7 +957,6 @@ button:disabled { cursor: not-allowed; }
    strength it was the loudest thing on a page whose whole idea is a quiet
    matte field. It still reads as the only accent while focused. */
 .wl-compose:focus { border-bottom-color: rgba(226, 109, 82, 0.5); }
-
 
 /* ==========================================================================
    10. The Stackelberg single-directive canvas
@@ -1049,14 +1025,7 @@ button:disabled { cursor: not-allowed; }
   color: var(--wl-text-secondary);
   margin: 0 0 24px 0;
 }
-.wl-code {
-  font-family: var(--font-mono);
-  font-size: var(--t-mono);
-  background: var(--wl-surface-elevated);
-  padding: 2px 6px;
-  border-radius: 4px;
-  color: var(--wl-text-primary);
-}
+
 .wl-progress-track {
   width: 100%;
   height: 4px;
@@ -1084,7 +1053,6 @@ button:disabled { cursor: not-allowed; }
 .wl-card-enter .wl-progress-bar {
   animation: wl-progress-pulse var(--duration-settle) var(--ease-tactile);
 }
-
 
 /* ==========================================================================
    11. Modal overlays
@@ -1132,11 +1100,7 @@ button:disabled { cursor: not-allowed; }
   from { opacity: 0; }
   to   { opacity: 1; }
 }
-.wl-modal-centered {
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
+
 .wl-modal-sheet {
   width: 100%;
   background-color: var(--wl-surface-card);
@@ -1150,50 +1114,13 @@ button:disabled { cursor: not-allowed; }
   overflow-y: auto;
   animation: wl-sheet-rise var(--duration-modal) var(--ease-tactile);
 }
-.wl-modal-centered-sheet { max-width: 372px; }
+
 .wl-modal-header {
   font-family: var(--font-sans);
   font-size: var(--t-title);
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--wl-text-primary);
-}
-.wl-modal-sub {
-  font-size: var(--t-caption);
-  line-height: 1.5;
-  color: var(--wl-text-muted);
-  margin-bottom: 4px;
-}
-
-/* The escape hatch's three categories. The friction is the requirement to
-   CHOOSE one before the directive unmounts; these are how you choose. */
-.wl-bailout-reason {
-  width: 100%;
-  text-align: left;
-  background-color: var(--wl-surface-elevated);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
-  padding: 14px 16px;
-  cursor: pointer;
-}
-.wl-bailout-reason:hover:not(:disabled) { border-color: rgba(226, 109, 82, 0.35); }
-.wl-bailout-reason[aria-pressed="true"] {
-  border-color: var(--wl-accent-coral);
-  background-color: var(--wl-surface-high);
-}
-.wl-bailout-reason:disabled { opacity: 0.5; }
-.wl-bailout-reason-title {
-  font-family: var(--font-sans);
-  font-size: var(--t-body);
-  font-weight: 600;
-  color: var(--wl-text-primary);
-  letter-spacing: -0.01em;
-}
-.wl-bailout-reason-sub {
-  font-size: var(--t-caption);
-  line-height: 1.45;
-  color: var(--wl-text-muted);
-  margin-top: 4px;
 }
 
 /* Evening check-in. Three outcomes, equal weight, no alarm red. */
@@ -1229,7 +1156,6 @@ button:disabled { cursor: not-allowed; }
   font-weight: 600;
   color: var(--wl-text-secondary);
 }
-
 
 /* ==========================================================================
    12. The control panel (what the hamburger opens)
@@ -1521,7 +1447,6 @@ button:disabled { cursor: not-allowed; }
    floor — same row, same icon gutter, same chevron. */
 .wl-nav-foot .wl-nav-row { min-height: 48px; padding: 0 6px; }
 
-
 /* ==========================================================================
    13. The choice sheet (model picker, provider picker)
    ========================================================================== */
@@ -1687,7 +1612,6 @@ button:disabled { cursor: not-allowed; }
 .wl-picker-manual-toggle:hover { color: var(--wl-text-secondary); }
 .wl-picker-manual .wl-btn-compact { min-height: 44px; }
 
-
 /* ==========================================================================
    14. Status, chips, telemetry readouts
    ========================================================================== */
@@ -1754,15 +1678,6 @@ button:disabled { cursor: not-allowed; }
   border-radius: var(--wl-radius-sm);
 }
 
-.wl-char-count {
-  font-family: var(--font-mono);
-  font-size: var(--t-mono);
-  color: var(--wl-text-muted);
-  text-align: right;
-  margin-top: 6px;
-}
-
-
 /* ==========================================================================
    15. Sync panel (Settings)
    ========================================================================== */
@@ -1790,7 +1705,6 @@ button:disabled { cursor: not-allowed; }
 .wl-sync-cta svg { display: block; }
 .wl-sync-meta { justify-content: center; margin-top: 10px; }
 
-
 /* ==========================================================================
    16. The telemetry drawer (Ctrl,+)
    ========================================================================== */
@@ -1810,7 +1724,6 @@ button:disabled { cursor: not-allowed; }
 .wl-drawer-close { width: auto; min-height: 40px; padding: 0 16px; }
 .wl-drawer-block + .wl-drawer-block { border-top: 1px solid var(--wl-border-subtle); padding-top: 16px; }
 .wl-drawer-block:first-of-type { padding-top: 4px; }
-
 
 /* ==========================================================================
    17. BIP-39 seed vault
@@ -1856,7 +1769,6 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-verify-slot:focus { border-color: rgba(226, 109, 82, 0.45); }
 
-
 /* ==========================================================================
    18. Entropy Log & Trajectory
    ========================================================================== */
@@ -1874,45 +1786,6 @@ button:disabled { cursor: not-allowed; }
   font-weight: 600;
   line-height: 1.4;
   color: var(--wl-text-primary);
-}
-.wl-entropy-entry {
-  padding: 12px 14px;
-  margin-bottom: 8px;
-  background-color: var(--wl-surface-card);
-  border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-btn);
-}
-.wl-entropy-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-.wl-entropy-date {
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: var(--t-mono);
-  color: var(--wl-text-muted);
-}
-.wl-entropy-reason {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--t-caption);
-  line-height: 1.4;
-  color: var(--wl-text-secondary);
-}
-.wl-entropy-directive {
-  margin: 0;
-  font-size: var(--t-body);
-  line-height: 1.4;
-  color: var(--wl-text-primary);
-}
-.wl-entropy-note {
-  margin: 6px 0 0;
-  font-size: var(--t-caption);
-  line-height: 1.45;
-  color: var(--wl-text-muted);
-  font-style: italic;
 }
 .wl-entropy-empty-title,
 .wl-traj-empty-title {
@@ -1979,7 +1852,6 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-traj-foot { margin: 4px 0 0; }
 
-
 /* ==========================================================================
    19. Scroll regions, scrollbars, toast
    ========================================================================== */
@@ -2040,7 +1912,6 @@ button:disabled { cursor: not-allowed; }
   text-transform: uppercase;
 }
 
-
 /* ==========================================================================
    20. Icon sizing
    ========================================================================== */
@@ -2073,7 +1944,6 @@ button:disabled { cursor: not-allowed; }
 .wl-icon-chevron { width: 15px; height: 15px; }
 .wl-icon-sync { width: 18px; height: 18px; }
 
-
 /* ==========================================================================
    21. Font faces
    ========================================================================== */
@@ -2091,6 +1961,296 @@ button:disabled { cursor: not-allowed; }
   font-display: swap;
 }
 
+/* ==========================================================================
+   21b. The task ledger, the plan graph, and the complexity track
+   ========================================================================== */
+/* Three surfaces added 2026-09-27 when the escape hatch was deleted and
+   the Entropy Log became the task ledger. They are grouped because they
+   arrived together and share two decisions: nothing here is red, and
+   nothing here is a control that cannot do what it says. */
+
+/* -- The ledger row ------------------------------------------------------- */
+/* A row is a card with ONE control. The control is on the right, always
+   visible, never on hover: a tick you have to discover is a tick most
+   people never press, and this page exists to be pressed. */
+.wl-task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 12px 12px 14px;
+  margin-bottom: 8px;
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+}
+.wl-task-body { flex: 1; min-width: 0; }
+.wl-task-title {
+  margin: 0;
+  font-size: var(--t-body);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--wl-text-primary);
+  /* Two lines. A task title is a headline and the page is 420px wide; a
+     third line pushes the tick below the fold of the row. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.wl-task-meta {
+  margin: 4px 0 0;
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Why a task is not running. A sentence, not a chip: it is the one thing on
+   this page that tells you what to go and do. */
+.wl-task-blocked {
+  margin: 6px 0 0;
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--wl-text-secondary);
+}
+.wl-task-instruction {
+  margin: 6px 0 0;
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--wl-text-muted);
+}
+.wl-task-state {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+}
+/* A finished task is quieter, never struck through. A line through text is
+   a verdict, and this product does not deliver them. */
+.wl-task-row--done { opacity: 0.62; }
+.wl-task-row--done .wl-task-title { font-weight: 400; }
+
+/* The tick. A pressed tick is CREAM, not coral: coral is a beacon for
+   something live, and a finished task is neither live nor an alarm. */
+.wl-task-tick { flex-shrink: 0; align-self: center; }
+.wl-task-tick--on {
+  background-color: var(--wl-cta-bg);
+  border-color: transparent;
+  color: var(--wl-text-inverse);
+}
+.wl-icon-check { width: 18px; height: 18px; }
+
+/* -- The calibration card ------------------------------------------------- */
+/* Named `-card` and not `.wl-calibration`, which is the compose screen's
+   TRACK. They arrived together and both reached for the same name, and two
+   definitions of one class is exactly PRD delta 174: a duplicate selector
+   is not a style, it is a coin flip on which one the engine picks — and
+   here the track's `margin` silently overrode the card's separator. A
+   card that reports numbers and a control that picks one do not belong
+   under one name. */
+.wl-calibration-card { margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--wl-border-subtle); }
+.wl-calibration-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--wl-border-subtle);
+}
+.wl-calibration-row:last-of-type { border-bottom: none; }
+.wl-calibration-card-label { font-size: var(--t-body); color: var(--wl-text-primary); }
+.wl-calibration-card-value { font-size: var(--t-mono); color: var(--wl-text-muted); text-align: right; }
+
+/* -- The plan graph ------------------------------------------------------- */
+/* A vertical spine, not a force layout. At 420px a force-directed graph is
+   unreadable and a layered one gets worse fast — five milestones of four
+   tasks is twenty nodes and fifteen edges with no room to draw either. So
+   the ORDER is the graph: reading top to bottom is reading the sequence,
+   which is the thing a person is being asked to approve. */
+.wl-plan-title {
+  margin: 0 0 4px;
+  font-family: var(--font-serif);
+  font-size: var(--t-title);
+  line-height: 1.3;
+  color: var(--wl-text-primary);
+}
+.wl-plan-repair {
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+}
+.wl-plan-repair p { margin: 0 0 4px; }
+.wl-plan-repair p:last-child { margin-bottom: 0; }
+.wl-graph { display: flex; flex-direction: column; }
+.wl-graph-milestone { margin: 14px 0 8px; }
+/* The rationale is quieter than the heading it sits under, and quieter than
+   the tasks beneath it. It is context, not the thing being approved. */
+.wl-graph-why {
+  margin: 4px 0 0;
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--wl-text-muted);
+}
+.wl-graph-node {
+  position: relative;
+  padding-left: 22px;
+  margin-bottom: 8px;
+}
+/* The spine: a 2px rail with a 4px dot per node. The dot is cream for a
+   task that can run and hollow for one that is waiting, so "what happens
+   next" is readable without reading a single word. */
+.wl-graph-node::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 0;
+  bottom: -8px;
+  width: 2px;
+  background-color: var(--wl-border-strong);
+}
+.wl-graph-node:last-child::before { bottom: 50%; }
+.wl-graph-dot {
+  position: absolute;
+  left: 2px;
+  top: 20px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--wl-cta-bg);
+  z-index: 1;
+}
+.wl-graph-node--waiting .wl-graph-dot {
+  background-color: var(--wl-surface-card);
+  border: 2px solid var(--wl-border-strong);
+}
+.wl-task-card { padding: 14px; margin: 0; }
+.wl-task-card-top { display: flex; align-items: center; gap: 10px; }
+/* Collapsed row: title, metric, chevron. The metric is mono and tabular so
+   a column of estimates does not jitter as the plan is read down. */
+.wl-task-card-summary {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+.wl-task-card-summary:disabled { cursor: default; }
+.wl-task-metric {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  color: var(--wl-text-muted);
+}
+/* The edge, said in words on the node it points into. A dashed rail would
+   be prettier and says nothing extra: "after Draft the outline" is the
+   same fact in a form that survives being read aloud. */
+.wl-graph-edge {
+  margin: 6px 0 0;
+  font-size: var(--t-caption);
+  line-height: 1.4;
+  color: var(--wl-text-muted);
+}
+.wl-task-phases { margin-top: 10px; }
+.wl-task-phase {
+  font-size: var(--t-mono);
+  line-height: 1.7;
+  color: var(--wl-text-secondary);
+}
+.wl-task-edit { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.wl-task-edit-row { display: flex; gap: 8px; }
+.wl-task-edit-row .wl-input { width: 110px; flex-shrink: 0; }
+.wl-plan-stage { margin: 10px 0; }
+
+/* -- The complexity track ------------------------------------------------- */
+/* Five stops built from five buttons, drawn as a slider.
+   A native `<input type="range">` is the obvious choice and this project
+   has already shipped two native widgets WebKitGTK painted wrong — a
+   near-white provider select and a light-on-light model picker. A slider
+   is exactly the widget that cannot be restyled from outside, so it is
+   five 44px-tall buttons over a drawn track: arrow keys work, it is
+   announced properly, and no engine can repaint it. */
+.wl-calibration { margin: 14px 0 4px; }
+.wl-calibration-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.wl-calibration-label { color: var(--wl-text-secondary); }
+.wl-calibration-word {
+  font-family: var(--font-mono);
+  font-size: var(--t-mono);
+  color: var(--wl-text-primary);
+}
+.wl-calibration-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+}
+/* The rail. `--wl-surface-high` is the "empty track" token, and the filled
+   prefix is the same cream as the directive progress bar, so "how far
+   along" is one visual language rather than two. */
+.wl-calibration-track::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background-color: var(--wl-surface-high);
+}
+.wl-calibration-fill {
+  position: absolute;
+  left: 4px;
+  height: 2px;
+  background-color: var(--wl-cta-bg);
+  /* The fill's right edge stops at the selected stop, not at the track end:
+     the width is a percentage of the track, and the last stop sits at 100%,
+     so an edge-to-edge fill is what "full" looks like. */
+  transition: width var(--duration-settle) var(--ease-tactile);
+}
+.wl-calibration-stop {
+  position: relative;
+  flex: 1;
+  height: 44px;                 /* the touch target, not the dot */
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.wl-calibration-stop:disabled { cursor: default; }
+.wl-calibration-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: var(--wl-surface-high);
+  border: 1px solid var(--wl-border-subtle);
+  transition: background-color var(--duration-instant) var(--ease-tactile),
+              transform var(--duration-instant) var(--ease-tactile);
+}
+.wl-calibration-stop--on .wl-calibration-dot {
+  /* The selected stop is LARGER than the others, not a different colour.
+     Scale is legible without relying on hue, and it does not spend the
+     coral beacon on a control that is not signalling anything. */
+  background-color: var(--wl-cta-bg);
+  border-color: transparent;
+  transform: scale(1.5);
+}
+.wl-calibration-blocked { color: var(--wl-text-secondary); }
 
 /* ==========================================================================
    22. Reduced motion

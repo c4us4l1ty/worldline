@@ -96,14 +96,6 @@
       }
       return Promise.resolve(mockDb.directive);
     },
-    bail_out: function (args) {
-      mockDb.directive = null;
-      return Promise.resolve({
-        directive_id: 'dir-demo-1',
-        reason: args.reason,
-        recovery: 'downsized:15',
-      });
-    },
     check_in: function (args) {
       mockDb.checkin = args;
       return Promise.resolve(mockDb.velocity);
@@ -170,31 +162,81 @@
         },
       ] : []);
     },
-    entropy_log: function () {
+    // The task ledger, and the one command that resolves a row. Both are
+    // FABRICATED — nothing is queried under `dx serve`. The control panel
+    // renders `· MOCK` beside its System label whenever `transport()`
+    // reports the mock, for the same reason the model catalog does
+    // (PRD delta 148): a list of invented goals is indistinguishable from
+    // a real one from the outside.
+    task_ledger: function () {
+      var rows = [
+        {
+          directive_id: 'dir-1', goal_id: 'goal-1',
+          goal_title: (mockDb.goal && (mockDb.goal.title || mockDb.goal.intent)) || 'Ship Worldline v0.1',
+          milestone_title: 'Wire the protocol',
+          title: 'Draft the outline',
+          instruction: 'On paper first, one page, no editing.',
+          estimated_minutes: 20, state: 'active',
+          complexity_label: 'standard', blocked_by: null, phase: [1, 2],
+        },
+        {
+          directive_id: 'dir-2', goal_id: 'goal-1',
+          goal_title: (mockDb.goal && (mockDb.goal.title || mockDb.goal.intent)) || 'Ship Worldline v0.1',
+          milestone_title: 'Wire the protocol',
+          title: 'Write the draft',
+          instruction: null,
+          estimated_minutes: 45, state: 'queued',
+          complexity_label: 'standard',
+          // The edge, which is the whole reason this page exists: a task
+          // sitting in the queue with nothing visibly wrong with it.
+          blocked_by: 'Draft the outline', phase: null,
+        },
+        {
+          directive_id: 'dir-3', goal_id: 'goal-1',
+          goal_title: (mockDb.goal && (mockDb.goal.title || mockDb.goal.intent)) || 'Ship Worldline v0.1',
+          milestone_title: 'Ship the binary',
+          title: 'Cut the release',
+          instruction: null,
+          estimated_minutes: 25, state: 'completed',
+          complexity_label: 'heavy', blocked_by: null, phase: null,
+        },
+      ];
+      return Promise.resolve(rows);
+    },
+    mark_task_done: function (args) {
+      if (!args || !args.directive_id) { return Promise.reject('no directive id'); }
+      // Echo the canvas shape back so the tick has something to re-read,
+      // exactly as the real shell does: it returns the canvas AFTER the
+      // tick, not the row.
+      return Promise.resolve({
+        directive_id: '', milestone_id: '',
+        title: 'All clear for today',
+        instruction: 'The queue is empty. Check in this evening or plan tomorrow\'s goal.',
+        phase: null, estimated_minutes: 0, state: 'idle', milestone_title: null,
+      });
+    },
+    // The difficulty estimator. Mirrors the shell's Beta mapping: the
+    // rating IS the prior, and the counts travel with the percentage.
+    calibration_view: function () {
       return Promise.resolve([
-        {
-          id: 'bail-1',
-          goal_id: 'goal-1',
-          goal_title: mockDb.goal ? (mockDb.goal.title || 'Untitled goal') : 'Ship Worldline v0.1',
-          directive_id: 'dir-9',
-          directive_title: 'Draft Section 2.1',
-          reason: 'miscalculated_scope',
-          note: 'kept re-reading, no forward motion',
-          date: '2026-09-21',
-          still_blocked: false,
-        },
-        {
-          id: 'bail-2',
-          goal_id: 'goal-1',
-          goal_title: 'Ship Worldline v0.1',
-          directive_id: 'dir-4',
-          directive_title: 'Send the contract to legal',
-          reason: 'external_dependency',
-          note: null,
-          date: '2026-09-19',
-          still_blocked: true,
-        },
+        { complexity: 3, label: 'standard', percent: 50, evidence: '0 of 0', observations: 0 },
+        { complexity: 4, label: 'heavy', percent: 68, evidence: '4 of 6', observations: 6 },
       ]);
+    },
+    // Local, free, instant: the compose screen's Generate button is gated on
+    // this rather than discovering a missing key from a provider error after
+    // a billable request has gone out.
+    ai_readiness: function () {
+      var models = mockDb.keys && Object.keys(mockDb.keys);
+      return Promise.resolve({
+        provider: 'openrouter',
+        model: (models && models.length) ? 'mockvendor/mock-model-000' : '',
+        model_set: !!(models && models.length),
+        key_set: !!(mockDb.keys && mockDb.keys.openrouter),
+        missing: (models && models.length)
+          ? null
+          : 'Choose an architect model in Settings.',
+      });
     },
     sync_now: function () { return Promise.resolve({ pushed: 0, pulled: 0, applied: 0, pending: 0, quarantined: 0, cursor: '' }); },
     relay_authenticate: function () {
@@ -203,26 +245,66 @@
       // remaining session minutes from it.
       return Promise.resolve({ account_id: '9f2c'.repeat(8), expires_at: Math.floor(Date.now() / 1000) + 3600 });
     },
-    // `intent` is raw user text, not a title — the architect names the
-    // goal. This mock ignores arg shapes entirely, so a rename of the
-    // shell's params (goal_title → intent) will NOT be caught here; it has
-    // to be verified against the real shell.
-    master_plan: function (args) {
+    // `master_plan_preview` — the BILLABLE half, and it writes nothing.
+    // The mock deliberately does not touch `mockDb.goal`, because a
+    // preview that created a goal under `dx serve` would make the staging
+    // invisible: the user would see a plan appear and have no way to learn
+    // that nothing was saved.
+    master_plan_preview: function (args) {
       var text = (args && args.intent) || '';
-      mockDb.goal = { intent: text, target_date: (args && args.target_date) || null };
-      mockDb.directive = {
-        directive_id: 'dir-plan-1',
-        milestone_id: 'ms-plan-1',
-        title: 'Scope the first sitting',
-        instruction: 'Momentum only — do not plan the whole thing.',
-        // Same reasoning as `create_goal`: a null phase made the first
-        // completion skip straight to the idle stub.
-        phase: [1, 3],
-        estimated_minutes: 25,
-        state: 'active',
-        milestone_title: 'First steps',
-      };
-      return Promise.resolve('goal-ai-1');
+      var complexity = (args && args.complexity) || 3;
+      var words = ['light', 'light+', 'standard', 'heavy', 'deep'];
+      return Promise.resolve({
+        plan: {
+          title: 'Ship the relay',
+          description: 'A working 9:16 execution terminal.',
+          milestones: [
+            {
+              title: 'Wire the protocol',
+              description: null,
+              rationale: 'Nothing downstream is testable until this lands.',
+              directives: [
+                {
+                  title: 'Draft the outline', execution_context: 'On paper first.',
+                  estimated_minutes: 20, after: null, phases: [],
+                },
+                {
+                  title: 'Write the draft', execution_context: null,
+                  estimated_minutes: 45, after: 0,
+                  phases: [
+                    { title: 'Section one', minutes: 20 },
+                    { title: 'Section two', minutes: 25 },
+                  ],
+                },
+              ],
+            },
+            {
+              title: 'Ship the binary',
+              description: null,
+              rationale: 'Only worth doing once the relay answers.',
+              directives: [
+                {
+                  title: 'Cut the release', execution_context: null,
+                  estimated_minutes: 25, after: 2, phases: [],
+                },
+              ],
+            },
+          ],
+        },
+        repair: { notes: [] },
+        complexity: complexity,
+        fallback: null,
+        _label: words[complexity - 1],
+      });
+    },
+    // `commit_plan` — the local write, and the only half that persists.
+    // It is a STRUCT parameter, so it arrives wrapped: the browser mock
+    // ignores shapes, and the shell test in `ipc_tests.rs` is the gate.
+    commit_plan: function (args) {
+      var p = (args && args.preview) || {};
+      if (!p.plan) { return Promise.reject('no plan in preview'); }
+      mockDb.goal = { title: p.plan.title, complexity: p.complexity };
+      return Promise.resolve({ goal_id: 'goal-previewed', warnings: [] });
     },
     // `set_always_on_top` used to be mocked here for the Settings pin
     // switch. The switch and the command are both gone (PRD delta 175), so

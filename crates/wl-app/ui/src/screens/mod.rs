@@ -1,6 +1,6 @@
 //! All Worldline screens: canvas, seed vault, check-in, goal creation,
-//! dormant, the control panel's two telemetry pages, the drawers, and
-//! settings — each per the worldline skill.
+//! the staged plan preview, dormant, the control panel's pages, the
+//! drawers, and settings — each per the worldline skill.
 //!
 //! There is no BYOK screen: `Screen::ByokSetup` was unreachable from
 //! every entry point, and the compose screen (`goal_create.rs`) now owns
@@ -14,6 +14,7 @@ mod entropy_log;
 mod goal_create;
 mod model_picker;
 mod nav_drawer;
+mod plan_preview;
 mod seed_vault;
 mod settings;
 mod telemetry;
@@ -26,6 +27,7 @@ pub use entropy_log::*;
 pub use goal_create::*;
 pub use model_picker::*;
 pub use nav_drawer::*;
+pub use plan_preview::*;
 pub use seed_vault::*;
 pub use settings::*;
 pub use telemetry::*;

@@ -30,7 +30,7 @@ use tauri::State;
 use zeroize::Zeroizing;
 
 use wl_core::ai::catalog::ModelInfo;
-use wl_core::ai::dispatch::{self, AiDispatcher, ProviderAdapter, PlanPreview};
+use wl_core::ai::dispatch::{self, AiDispatcher, PlanPreview, ProviderAdapter};
 use wl_core::crypto::identity::Identity;
 use wl_core::domain::*;
 use wl_core::engine::{calibration, Engine, EngineOutcome};
@@ -605,7 +605,6 @@ pub(crate) async fn current_directive(
     Ok(outcome_view(&out, &state.repos))
 }
 
-
 // ---------------------------------------------------------------------------
 // Check-in & velocity (PRD §5.4)
 // ---------------------------------------------------------------------------
@@ -1041,8 +1040,7 @@ const _: () = assert!(
     TIER1_TIMEOUT_SECS <= 120,
     "and must not exceed the HTTP client timeout, or the transport error is what the user sees"
 );
-pub const TIER1_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(TIER1_TIMEOUT_SECS);
+pub const TIER1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(TIER1_TIMEOUT_SECS);
 
 /// Whether the architect can be called at all, and what is missing if not.
 ///
@@ -1057,7 +1055,7 @@ pub const TIER1_TIMEOUT: std::time::Duration =
 #[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn ai_readiness(
     state: State<'_, std::sync::Arc<AppState>>,
-) -> ShellResult<AiReadiness> {
+) -> ShellResult<AiReadinessView> {
     let settings = state.repos.settings()?;
     let provider = settings
         .ai_provider
@@ -1069,12 +1067,38 @@ pub(crate) async fn ai_readiness(
         .vault
         .has_api_key(&provider)
         .map_err(|e| ShellError::Vault(e.to_string()))?;
-    Ok(AiReadiness {
+    let view = AiReadiness {
         provider,
         model_set: !model.trim().is_empty(),
         model,
         key_set: has_key,
+    };
+    let missing = view.missing();
+    Ok(AiReadinessView {
+        provider: view.provider,
+        model: view.model,
+        model_set: view.model_set,
+        key_set: view.key_set,
+        missing,
     })
+}
+
+/// What the compose screen needs to decide whether to enable Generate, and
+/// to say why not.
+///
+/// `missing` travels with the booleans rather than being recomputed in the
+/// UI: the shell owns the phrasing, the order (a model before a key, since
+/// finding a model is the slower job) and the provider name, and a view
+/// assembling its own message would be a second place for the three to
+/// drift apart.
+#[derive(Serialize, Clone)]
+pub struct AiReadinessView {
+    pub provider: String,
+    pub model: String,
+    pub model_set: bool,
+    pub key_set: bool,
+    /// `None` when Generate can run. Never an empty string.
+    pub missing: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1101,6 +1125,64 @@ impl AiReadiness {
             return Some(format!("No API key stored for {}.", self.provider));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    /// The pre-flight is only worth having if it answers in the order the
+    /// user can act. A model first is the one that costs the most looking
+    /// for, and it is the one the compose screen's own blank check used to
+    /// discover via a 2.2-second toast.
+    #[test]
+    fn the_first_thing_missing_is_the_one_to_fix_first() {
+        let nothing = AiReadiness {
+            provider: "openrouter".into(),
+            model: String::new(),
+            model_set: false,
+            key_set: false,
+        };
+        assert!(nothing.missing().unwrap().contains("Settings"));
+        let no_key = AiReadiness {
+            model: "vendor/model".into(),
+            model_set: true,
+            key_set: false,
+            ..nothing.clone()
+        };
+        assert!(no_key.missing().unwrap().contains("openrouter"));
+        let ready = AiReadiness {
+            key_set: true,
+            ..no_key
+        };
+        assert!(ready.missing().is_none());
+    }
+
+    /// A key stored for a different provider must not make a provider look
+    /// ready. The check is per-provider and the message names which one is
+    /// missing, because "no API key" with no provider attached is the
+    /// "which of my three" problem.
+    #[test]
+    fn readiness_is_per_provider() {
+        let dir = std::env::temp_dir().join(format!("wl-ready-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = crate::vault::Vault::open(&dir).unwrap();
+        vault.save_api_key("openrouter", "sk-a").unwrap();
+        assert!(vault.has_api_key("openrouter").unwrap());
+        assert!(
+            !vault.has_api_key("google").unwrap(),
+            "a key for one provider is not a key for another"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The budget is asserted at compile time above; this pins the one
+    /// thing a `const` cannot: that the value the timeout is built from is
+    /// the one the user is told about.
+    #[test]
+    fn the_reported_budget_is_the_enforced_one() {
+        assert_eq!(TIER1_TIMEOUT.as_secs(), TIER1_TIMEOUT_SECS);
     }
 }
 
@@ -1205,9 +1287,7 @@ pub(crate) async fn commit_plan(
     let out = shared.with_identity_opt(|identity| {
         dispatch::persist_plan(
             &shared.repos,
-            intent
-                .as_deref()
-                .map(|i| (i, None, target_date.as_deref())),
+            intent.as_deref().map(|i| (i, None, target_date.as_deref())),
             &preview,
             identity,
         )
@@ -1599,8 +1679,10 @@ mod tests {
         // `Repos::active_goal()` is `ORDER BY hlc_timestamp LIMIT 1`, so
         // velocity and recovery bound to the OLDER, superseded goal.
         let repos = Repos::new(wl_core::store::open_in_memory().unwrap(), 1);
-        let first = create_seeded_goal(&repos, "First", None, None, COMPLEXITY_DEFAULT, None).unwrap();
-        let second = create_seeded_goal(&repos, "Second", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+        let first =
+            create_seeded_goal(&repos, "First", None, None, COMPLEXITY_DEFAULT, None).unwrap();
+        let second =
+            create_seeded_goal(&repos, "Second", None, None, COMPLEXITY_DEFAULT, None).unwrap();
         let active = repos.active_goals_with_progress().unwrap();
         assert_eq!(
             active.len(),

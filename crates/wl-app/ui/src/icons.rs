@@ -275,6 +275,29 @@ pub fn IconClose() -> Element {
     )
 }
 
+/// A tick — the ledger's only control.
+///
+/// The Entropy Log's one verb (2026-09-27). A tick and not a tick/cross
+/// pair: "not done" would have to mean something to the engine, and the
+/// honest candidate turns out to need a category to be useful, which is
+/// the escape hatch under another name. A tick is unambiguous, reversible
+/// by tapping again, and the only transition the engine implements.
+///
+/// Drawn as two strokes on the 18-unit grid: a short down-left from
+/// (4.75, 9.25) and a longer up-right to (13.25, 4.9). The asymmetry is
+/// the whole mark — a symmetric V reads as a chevron pointing down, and
+/// there is already a chevron in the icon set for "expand".
+#[component]
+pub fn IconCheck() -> Element {
+    frame(
+        "wl-icon-check",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M4.5 9.5 7.75 12.75 13.5 5.25" }
+        },
+    )
+}
+
 /// Sync — two arcs and two arrowheads.
 ///
 /// Settings' sync row. An arc pair rather than the `⇅` glyph the canvas

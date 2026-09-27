@@ -426,6 +426,253 @@ pub struct EntropyView {
     pub still_blocked: bool,
 }
 
+/// One task on the ledger (`task_ledger`).
+///
+/// Replaced the bailout row. `blocked_by` is the field that earns the page:
+/// a task sitting in the queue with nothing visibly wrong with it is
+/// indistinguishable from a stalled app without it, and the answer
+/// ("waiting on Draft the outline") is a sentence someone can act on.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct TaskView {
+    pub directive_id: String,
+    #[serde(default)]
+    pub goal_id: String,
+    #[serde(default)]
+    pub goal_title: String,
+    #[serde(default)]
+    pub milestone_title: String,
+    pub title: String,
+    #[serde(default)]
+    pub instruction: Option<String>,
+    pub estimated_minutes: i64,
+    #[serde(default)]
+    pub state: String,
+    /// `light` … `deep`, resolved by the shell from the goal's rating.
+    #[serde(default)]
+    pub complexity_label: Option<String>,
+    #[serde(default)]
+    pub blocked_by: Option<String>,
+    /// Already filtered by the shell, so a corrupt replicated phase number
+    /// cannot arrive as `Some((9, 4))` and render "Phase 9 of 4".
+    #[serde(default)]
+    pub phase: Option<(i64, i64)>,
+}
+
+impl TaskView {
+    /// Whether this task is waiting on something.
+    ///
+    /// `state` is checked as well as `blocked_by`: a finished task must
+    /// never be re-derived as having outstanding work, whatever a stale
+    /// edge says.
+    pub fn is_blocked(&self) -> bool {
+        self.state != "completed" && self.blocked_by.is_some()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.state == "completed"
+    }
+
+    /// The meta line under a task's title, as the page renders it.
+    ///
+    /// A pure function so the ordering — the thing the user actually reads
+    /// — is testable: milestone, then estimate, then the complexity word,
+    /// and only then the blocker, because the blocker is a sentence and the
+    /// other three are labels.
+    pub fn meta(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.milestone_title.trim().is_empty() {
+            out.push(self.milestone_title.clone());
+        }
+        if self.estimated_minutes > 0 {
+            out.push(format!("{} min", self.estimated_minutes));
+        }
+        if let Some((step, total)) = self.phase {
+            out.push(format!("step {step} of {total}"));
+        }
+        if let Some(word) = self.complexity_label.as_deref() {
+            out.push(word.to_string());
+        }
+        out
+    }
+}
+
+/// The estimator's current state (`calibration_view`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct CalibrationView {
+    pub complexity: i64,
+    pub label: String,
+    pub percent: i64,
+    /// `"4 of 9"` — the counts, not a bare percentage.
+    pub evidence: String,
+    pub observations: i64,
+}
+
+impl CalibrationView {
+    /// The one line the card shows.
+    ///
+    /// A bucket with no observations says the rating is all there is, and
+    /// says so in words — "no record yet" rather than a percentage the user
+    /// would read as a measurement.
+    pub fn line(&self) -> String {
+        if self.observations == 0 {
+            format!("{} · no record yet", self.label)
+        } else {
+            format!(
+                "{} · {} finished · {}%",
+                self.label, self.evidence, self.percent
+            )
+        }
+    }
+}
+
+/// Whether the architect can be called (`ai_readiness`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct AiReadiness {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub model_set: bool,
+    #[serde(default)]
+    pub key_set: bool,
+    /// `None` when Generate can run. The shell owns the phrasing.
+    #[serde(default)]
+    pub missing: Option<String>,
+}
+
+impl AiReadiness {
+    /// Whether the Generate button may be pressed at all.
+    ///
+    /// A local, free, instant check. It exists because the alternative was
+    /// discovering a missing model from a 2.2-second toast, and a missing
+    /// key from a provider error after a billable request had left.
+    pub fn can_generate(&self) -> bool {
+        self.missing.is_none()
+    }
+}
+
+/// One step of a staged plan, as the preview sees it.
+///
+/// The plan crosses the wire as the shell's own `PlanPreview`, and the UI
+/// holds it in a signal until `commit_plan`. This is the shape the preview
+/// SCREENS it in: the dependency graph is derived from `after`, and nothing
+/// is written until the user presses Commit.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanStep {
+    pub title: String,
+    #[serde(default)]
+    pub instruction: Option<String>,
+    pub estimated_minutes: i64,
+    /// Index of the step that must be finished first, within the whole
+    /// plan. `None` = nothing blocks this.
+    #[serde(default)]
+    pub after: Option<usize>,
+    #[serde(default)]
+    pub phases: Vec<PlanPhase>,
+    /// True when the user edited this step's text, so the preview can show
+    /// "yours" rather than claiming the architect wrote it.
+    #[serde(default)]
+    pub edited: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanPhase {
+    pub title: String,
+    pub minutes: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanMilestone {
+    pub title: String,
+    #[serde(default)]
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<PlanStep>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlanDraft {
+    pub title: String,
+    #[serde(default)]
+    pub milestones: Vec<PlanMilestone>,
+    /// The goal's *Estimated Complexity* rating, 1–5. Carried inside the
+    /// payload rather than re-sent, because a rating that has to survive
+    /// two IPC calls as two separate parameters is a rating that can be
+    /// silently defaulted — and a goal written at 3/5 when the user chose
+    /// 5/5 poisons the estimator permanently.
+    pub complexity: i64,
+    /// Set by the shell when the architect's plan was unusable and this is
+    /// the seeded stand-in. Shown, never silently swapped.
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// What repair changed, from the shell. A receipt, not a log: a plan
+    /// that was quietly reshaped is a plan the user approved a preview of.
+    #[serde(default)]
+    pub repair: Vec<String>,
+}
+
+impl PlanDraft {
+    /// Flattened step order, which is what an `after` index refers to.
+    pub fn steps(&self) -> impl Iterator<Item = &PlanStep> {
+        self.milestones.iter().flat_map(|m| m.steps.iter())
+    }
+
+    fn steps_mut(&mut self) -> impl Iterator<Item = &mut PlanStep> {
+        self.milestones.iter_mut().flat_map(|m| m.steps.iter_mut())
+    }
+
+    /// How many tasks the plan holds.
+    pub fn step_count(&self) -> usize {
+        self.milestones.iter().map(|m| m.steps.len()).sum()
+    }
+
+    /// Edits one step's title.
+    ///
+    /// A no-op on an out-of-range index rather than a panic: the index
+    /// comes back over IPC from a payload the user has been editing, and a
+    /// preview that crashes on a stale tap is worse than one that ignores
+    /// it.
+    pub fn rename_step(&mut self, index: usize, title: &str) {
+        if let Some(step) = self.steps_mut().nth(index) {
+            step.title = title.to_string();
+            step.edited = true;
+        }
+    }
+
+    /// Edits one step's estimate, rejecting a value the store would refuse.
+    ///
+    /// The same bound `create_directive` enforces, checked HERE so an edit
+    /// cannot produce something the commit will reject — a failure that
+    /// used to arrive as a write error after the user had already approved
+    /// a preview.
+    pub fn set_step_minutes(&mut self, index: usize, minutes: i64) -> Result<(), String> {
+        crate::domain::check_minutes("estimate", minutes)?;
+        if let Some(step) = self.steps_mut().nth(index) {
+            step.estimated_minutes = minutes;
+            step.edited = true;
+        }
+        Ok(())
+    }
+
+    /// Re-parents a step, or clears the edge with `None`.
+    ///
+    /// Refuses a forward reference and a self-reference, for the same
+    /// reason the store does: the graph would render an edge that the
+    /// committed plan does not have.
+    pub fn set_after(&mut self, index: usize, after: Option<usize>) -> Result<(), String> {
+        if let Some(a) = after {
+            if a >= index {
+                return Err("a task can only depend on an earlier one".into());
+            }
+        }
+        if let Some(step) = self.steps_mut().nth(index) {
+            step.after = after;
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // App state & routing (screen enum — no URL routing needed for the
 // single-window terminal)
@@ -446,12 +693,19 @@ pub enum Screen {
     },
     Canvas,
     GoalCreate,
+    /// The staged plan. Reached only from Generate, and the ONLY thing
+    /// between the architect and the daily queue: nothing is written until
+    /// `commit_plan`, so backing out of this screen leaves no goal behind.
+    PlanPreview,
     EveningCheckIn,
     Dormant,
     Settings,
-    /// Control panel → System Telemetry. The escape-hatch ledger, read
-    /// back: what was bailed out of, why, and which of those are still
-    /// stuck. Opened from the drawer, never on its own.
+    /// The task ledger: every task, grouped by goal, with the one control
+    /// that resolves one. Reached from the drawer.
+    ///
+    /// This was the escape-hatch log, and it was read-only by decision
+    /// (PRD delta 159). The escape hatch is gone (2026-09-27), so it had no
+    /// writer at all, and the page is now the ledger instead.
     EntropyLog,
     /// Control panel → System Telemetry. Required velocity against
     /// observed, which used to be reachable only from inside the evening
@@ -545,7 +799,6 @@ pub struct AppCtx {
     pub toast: Signal<Option<String>>,
     pub directive_busy: Signal<bool>,
     pub toast_task: Signal<Option<Task>>,
-    pub escape_open: Signal<bool>,
     pub telemetry_open: Signal<bool>,
     /// MVP-1 hamburger nav drawer (left slide; GoalCreate/Settings).
     /// Separate from the Ctrl+, telemetry drawer: the drawer is
@@ -565,6 +818,58 @@ pub struct AppCtx {
     /// which is what lets a failed boot recover without the user
     /// relaunching the app.
     pub boot_attempt: Signal<u32>,
+    /// The plan Generate is currently showing, and what it is waiting on.
+    ///
+    /// Held in a signal rather than re-fetched on mount so the preview is
+    /// the ONE copy of the plan: the user can leave it for Settings and come
+    /// back without losing their edits. Nothing here is persisted — that is
+    /// the point, and it is why backing out of the preview costs nothing.
+    pub plan: Signal<Option<PlanDraft>>,
+    /// Which stage the Generate call is in, so the wait is legible.
+    ///
+    /// Two named stages and both are real: `Contacting` is the billable
+    /// command being awaited, and `Writing` is the local commit being
+    /// awaited. There is deliberately no third and no interpolation —
+    /// progress events are not available to this webview (the capability
+    /// file grants no permissions), so anything finer would be invented
+    /// from a timer.
+    pub plan_stage: Signal<PlanStage>,
+    /// Whether the architect can be called at all, and what is missing.
+    pub readiness: Signal<Option<AiReadiness>>,
+}
+
+/// What Generate is doing, or has just done.
+///
+/// A closed set rather than a free string, because the two words on screen
+/// are the only account a user has of a 75-second budget, and a stage that
+/// could be anything is not one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PlanStage {
+    /// Nothing in flight. The compose button reads "Generate".
+    #[default]
+    Idle,
+    /// The billable request is out. This is the stage that can take a
+    /// while, and the one the Cancel button exists for.
+    Contacting,
+    /// The approved plan is being written. Local, fast, and honest to name
+    /// because the command being awaited really is the write.
+    Writing,
+}
+
+impl PlanStage {
+    /// The word shown next to the busy button.
+    pub fn label(self) -> &'static str {
+        match self {
+            PlanStage::Idle => "Generate",
+            PlanStage::Contacting => "Contacting the architect…",
+            PlanStage::Writing => "Writing the plan…",
+        }
+    }
+
+    /// Whether a call is in flight, and the screen may not be left.
+    pub fn is_busy(self) -> bool {
+        !matches!(self, PlanStage::Idle)
+    }
 }
 
 impl AppCtx {
@@ -612,8 +917,6 @@ impl AppCtx {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
     None,
-    /// The escape hatch's categorisation sheet.
-    Escape,
     /// The hamburger's control panel.
     Nav,
     /// The `Ctrl+,` telemetry drawer.
@@ -625,10 +928,8 @@ pub enum Overlay {
 /// Escape modal above the two panels above nothing: the escape sheet is a
 /// centred dialog, so anything open underneath it is strictly less
 /// important to the user than the dialog they are looking at.
-pub fn topmost_overlay(escape_open: bool, nav_open: bool, telemetry_open: bool) -> Overlay {
-    if escape_open {
-        Overlay::Escape
-    } else if nav_open {
+pub fn topmost_overlay(nav_open: bool, telemetry_open: bool) -> Overlay {
+    if nav_open {
         Overlay::Nav
     } else if telemetry_open {
         Overlay::Telemetry
@@ -644,16 +945,11 @@ pub fn topmost_overlay(escape_open: bool, nav_open: bool, telemetry_open: bool) 
 /// rule is a pure function that can be tested without a DOM, a webview,
 /// or a keyboard. A dismissal that closed everything, or nothing when
 /// nothing was open, is the whole class of bug this replaces.
-pub fn dismiss_topmost(
-    escape_open: bool,
-    nav_open: bool,
-    telemetry_open: bool,
-) -> (Overlay, bool, bool, bool) {
-    match topmost_overlay(escape_open, nav_open, telemetry_open) {
-        Overlay::Escape => (Overlay::Escape, false, nav_open, telemetry_open),
-        Overlay::Nav => (Overlay::Nav, escape_open, false, telemetry_open),
-        Overlay::Telemetry => (Overlay::Telemetry, escape_open, nav_open, false),
-        Overlay::None => (Overlay::None, escape_open, nav_open, telemetry_open),
+pub fn dismiss_topmost(nav_open: bool, telemetry_open: bool) -> (Overlay, bool, bool) {
+    match topmost_overlay(nav_open, telemetry_open) {
+        Overlay::Nav => (Overlay::Nav, false, telemetry_open),
+        Overlay::Telemetry => (Overlay::Telemetry, nav_open, false),
+        Overlay::None => (Overlay::None, nav_open, telemetry_open),
     }
 }
 
@@ -664,8 +960,8 @@ pub fn dismiss_topmost(
 /// sibling with a higher z-index, it silently buried the panel the user
 /// had just opened. A shortcut that opens one drawer while another is
 /// open is not a shortcut, it is a race with a z-index.
-pub fn toggle_telemetry_allowed(escape_open: bool, nav_open: bool) -> bool {
-    !escape_open && !nav_open
+pub fn toggle_telemetry_allowed(nav_open: bool) -> bool {
+    !nav_open
 }
 
 fn App() -> Element {
@@ -695,13 +991,15 @@ fn App() -> Element {
         toast: Signal::new_in_scope(None, ScopeId::APP),
         directive_busy: Signal::new_in_scope(false, ScopeId::APP),
         toast_task: Signal::new_in_scope(None, ScopeId::APP),
-        escape_open: Signal::new_in_scope(false, ScopeId::APP),
         telemetry_open: Signal::new_in_scope(false, ScopeId::APP),
         nav_open: Signal::new_in_scope(false, ScopeId::APP),
         sync_status: Signal::new_in_scope("LOCAL".to_string(), ScopeId::APP),
         last_sync_ms: Signal::new_in_scope(None, ScopeId::APP),
         identity_status: Signal::new_in_scope(IdentityStatus::default(), ScopeId::APP),
         boot_attempt: Signal::new_in_scope(0, ScopeId::APP),
+        plan: Signal::new_in_scope(None, ScopeId::APP),
+        plan_stage: Signal::new_in_scope(PlanStage::default(), ScopeId::APP),
+        readiness: Signal::new_in_scope(None, ScopeId::APP),
     });
 
     let ctx = use_context::<AppCtx>();
@@ -815,9 +1113,7 @@ fn App() -> Element {
                     // panel; the drawer is a later sibling with a higher
                     // z-index, so the panel vanished underneath it and the
                     // chord read as "the menu stopped working".
-                    let (escape_open, nav_open) =
-                        (*ctx.escape_open.read(), *ctx.nav_open.read());
-                    if !focus_is_text_entry() && toggle_telemetry_allowed(escape_open, nav_open) {
+                    if !focus_is_text_entry() && toggle_telemetry_allowed(*ctx.nav_open.read()) {
                         let open = *ctx.telemetry_open.read();
                         { let mut s = ctx.telemetry_open; *s.write() = !open; }
                     }
@@ -829,14 +1125,12 @@ fn App() -> Element {
                     // keypress that opened the sheet and left a modal the
                     // user never asked for on top of a panel that had just
                     // gone away.
-                    let (dismissed, escape_open, nav_open, telemetry_open) = dismiss_topmost(
-                        *ctx.escape_open.read(),
+                    let (dismissed, nav_open, telemetry_open) = dismiss_topmost(
                         *ctx.nav_open.read(),
                         *ctx.telemetry_open.read(),
                     );
                     if dismissed != Overlay::None {
                         e.prevent_default();
-                        { let mut s = ctx.escape_open; *s.write() = escape_open; }
                         { let mut s = ctx.nav_open; *s.write() = nav_open; }
                         { let mut s = ctx.telemetry_open; *s.write() = telemetry_open; }
                     }
@@ -874,6 +1168,7 @@ fn App() -> Element {
                     },
                     Screen::Canvas => rsx! { crate::screens::CanvasScreen {} },
                     Screen::GoalCreate => rsx! { crate::screens::GoalCreateScreen {} },
+                    Screen::PlanPreview => rsx! { crate::screens::PlanPreviewScreen {} },
                     Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
                     Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
                     Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
@@ -1259,44 +1554,32 @@ mod tests {
     /// own `Escape` handler for the bailout sheet and the app root ran
     /// another for the drawers; both fired on the same bubbled keydown,
     /// so one press could open a modal AND dismiss a panel. Pinning the
-    /// order as data is what makes that unrepresentable rather than
-    /// merely unlikely.
+    /// order as data is what makes that unrepresentable rather than merely
+    /// unlikely.
+    ///
+    /// The bailout sheet was the top layer until 2026-09-27, when the
+    /// escape hatch was deleted and the ladder lost its top rung. It is a
+    /// two-deep ladder now, and the test says so — adding a third layer
+    /// back without a rule for it fails here.
     #[test]
     fn escape_closes_exactly_the_topmost_layer() {
         // Nothing up: nothing is dismissed, and no flag is disturbed.
-        assert_eq!(
-            dismiss_topmost(false, false, false),
-            (Overlay::None, false, false, false)
-        );
+        assert_eq!(dismiss_topmost(false, false), (Overlay::None, false, false));
         // Each layer alone closes itself and nothing else.
+        assert_eq!(dismiss_topmost(true, false), (Overlay::Nav, false, false));
         assert_eq!(
-            dismiss_topmost(true, false, false),
-            (Overlay::Escape, false, false, false)
+            dismiss_topmost(false, true),
+            (Overlay::Telemetry, false, false)
         );
+        // Stacked: the control panel is above the telemetry drawer, and
+        // dismissing it must leave the drawer underneath standing.
+        // (Collapsing everything is the old behaviour; it is what made one
+        // keypress feel like two unrelated things happened.)
+        assert_eq!(dismiss_topmost(true, true), (Overlay::Nav, false, true));
+        // Second press, then, unwinds the drawer underneath.
         assert_eq!(
-            dismiss_topmost(false, true, false),
-            (Overlay::Nav, false, false, false)
-        );
-        assert_eq!(
-            dismiss_topmost(false, false, true),
-            (Overlay::Telemetry, false, false, false)
-        );
-        // Stacked: the escape sheet is a centred dialog, so it is above
-        // both panels, and dismissing it must leave the panel underneath
-        // standing. (Collapsing everything is the old behaviour; it is
-        // what made one keypress feel like two unrelated things happened.)
-        assert_eq!(
-            dismiss_topmost(true, true, true),
-            (Overlay::Escape, false, true, true)
-        );
-        assert_eq!(
-            dismiss_topmost(false, true, true),
-            (Overlay::Nav, false, false, true)
-        );
-        // Second press, then, unwinds the panel underneath.
-        assert_eq!(
-            dismiss_topmost(false, false, true),
-            (Overlay::Telemetry, false, false, false)
+            dismiss_topmost(false, true),
+            (Overlay::Telemetry, false, false)
         );
     }
 
@@ -1307,10 +1590,14 @@ mod tests {
     #[test]
     fn escape_on_a_clean_screen_dismisses_nothing() {
         for _ in 0..3 {
-            let (dismissed, e, n, t) = dismiss_topmost(false, false, false);
+            let (dismissed, n, t) = dismiss_topmost(false, false);
             assert_eq!(dismissed, Overlay::None);
-            assert!(!e && !n && !t);
+            assert!(!n && !t);
         }
+        // And the chord is refused while the panel is up, rather than
+        // summoning the drawer behind it and burying it.
+        assert!(!toggle_telemetry_allowed(true));
+        assert!(toggle_telemetry_allowed(false));
     }
 
     /// The telemetry chord must not summon a drawer over a panel that is
@@ -1323,10 +1610,8 @@ mod tests {
     /// in a key handler.
     #[test]
     fn the_telemetry_chord_is_refused_over_an_open_layer() {
-        assert!(toggle_telemetry_allowed(false, false));
-        assert!(!toggle_telemetry_allowed(true, false), "escape sheet up");
-        assert!(!toggle_telemetry_allowed(false, true), "control panel up");
-        assert!(!toggle_telemetry_allowed(true, true));
+        assert!(toggle_telemetry_allowed(false));
+        assert!(!toggle_telemetry_allowed(true), "control panel up");
     }
 
     /// The panel's verbs, as a table.

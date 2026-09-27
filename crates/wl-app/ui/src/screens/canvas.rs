@@ -1,18 +1,25 @@
 //! The Stackelberg Single-Directive Canvas (skill §4.A/B, US-3).
 //!
-//! Renders exactly ONE directive and, since 2026-09-27, exactly ONE
+//! Renders exactly ONE directive, and — since 2026-09-27 — exactly ONE
 //! control: the hamburger. The footer that held "Complete Directive" and
-//! "Bailout / Blocked" is gone — the canvas is the directive, not a
-//! dashboard — so completion is `⌘+Enter` and the escape hatch is
-//! `Escape`, both still bound above. The escape modal itself is
-//! untouched: it is still the frictionful categorisation, just reached by
-//! key rather than by a second button competing with the card.
+//! "Bailout / Blocked" had already gone; what went with it this time were
+//! the two keyboard gestures that reached the same state changes,
+//! `⌘+Enter` and `Escape`, and the whole escape-hatch path behind the
+//! latter.
+//!
+//! **The canvas is read-only.** A task is resolved from the ledger, and
+//! that is a deliberate narrowing rather than a gap left by a deletion: the
+//! escape hatch required a categorisation sheet to leave, and the sheet was
+//! a modal on the one surface whose premise is that you are not
+//! administrating. The recorded cost is real and is written down in PRD
+//! delta 226 — nothing on this surface marks a task done, and the ledger
+//! is one hamburger away. See also the "no session timer" note in
+//! `app.rs`, which is the other thing this screen deliberately does not
+//! have.
 
 use dioxus::prelude::*;
 
-use crate::app::{
-    flash, invoke, is_telemetry_chord, set_directive, AppCtx, DirectiveView, VelocityView,
-};
+use crate::app::{flash, invoke, set_directive, AppCtx, DirectiveView, VelocityView};
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -37,7 +44,6 @@ pub fn CanvasScreen() -> Element {
     });
 
     let d = ctx.directive.read().clone();
-    let escaping = *ctx.escape_open.read();
 
     rsx! {
         div {
@@ -53,40 +59,11 @@ pub fn CanvasScreen() -> Element {
             // toast and the error screen, so anything that ever gave
             // `#main` a transform, a filter or a `contain` would move the
             // one control the canvas has. Anchoring the layer to the
-            // screen it floats over is what makes it a property of the
+            // screen that floats over is what makes it a property of the
             // canvas rather than of the frame.
             class: "wl-root wl-canvas-screen",
             tabindex: "0",
             autofocus: "true",
-            onkeydown: move |e: Event<KeyboardData>| {
-                if e.is_auto_repeating() {
-                    return;
-                }
-                // A panel that is already up takes precedence on Escape,
-                // and the panel is what Escape belongs to.
-                //
-                // Only the TELEMETRY drawer used to be checked. With the
-                // control panel open, Escape therefore did two things at
-                // once: this handler opened the bailout sheet, and the
-                // app-root handler (which runs afterwards, on the same
-                // bubbled keydown) closed the panel. The user pressed one
-                // key to dismiss a menu and got a modal instead, on top
-                // of a canvas that had not changed -- which reads, from
-                // the outside, exactly like "the menu does not open".
-                if *ctx.telemetry_open.read() || *ctx.nav_open.read() {
-                    return;
-                }
-                // ⌘+Enter / Ctrl+Enter completes; Escape toggles bailout (skill §7.5).
-                if e.key() == Key::Enter && (e.modifiers().meta() || e.modifiers().ctrl()) {
-                    if !*ctx.escape_open.read() {
-                        complete_current(&ctx);
-                    }
-                } else if e.key() == Key::Escape
-                    && !*ctx.directive_busy.peek() && ctx.directive.peek().is_some() {
-                    let open = *ctx.escape_open.read();
-                    { let mut s = ctx.escape_open; *s.write() = !open; }
-                }
-            },
         // The canvas's only chrome.
         //
         // The header used to be a solid strip spanning the full width with
@@ -99,7 +76,7 @@ pub fn CanvasScreen() -> Element {
         //
         // Milestone, sync status, sync-now and Evening audit moved to the
         // telemetry drawer (Ctrl+,), which already rendered sync stats and
-        // an always-visible Evening audit button — so nothing became
+        // an always-visible Evening audit button -- so nothing became
         // unreachable. The session timer was removed entirely (2026-09-26):
         // a focus timer you cannot see is not a timer, and elapsed time
         // survives only as sync freshness in the telemetry drawer.
@@ -114,7 +91,7 @@ pub fn CanvasScreen() -> Element {
             // the last cycle did.
             //
             // `.wl-circle-btn` is the same 38px circle every page's back
-            // chevron uses — one definition for one control language, so
+            // chevron uses -- one definition for one control language, so
             // this and the button at the top of Settings cannot drift apart.
             button {
                 class: "wl-circle-btn",
@@ -132,7 +109,7 @@ pub fn CanvasScreen() -> Element {
             }
         }
 
-        // Directive card (skill §4.B) — the ONLY directive.
+        // Directive card (skill §4.B) -- the ONLY directive.
         main { class: "wl-directive-container",
             if let Some(d) = d {
                 DirectiveCard { d: d }
@@ -146,16 +123,10 @@ pub fn CanvasScreen() -> Element {
                 div { class: "wl-directive-card",
                     h1 { class: "wl-serif-title", "No active directive." }
                     p { class: "wl-body-muted",
-                        "Open the menu to create a goal or review settings."
+                        "Open the menu to create a goal, review settings, or mark a task done."
                     }
                 }
             }
-        }
-
-
-        // Frictionful escape hatch modal (skill §4.C, §5 "Do")
-        if escaping {
-            EscapeModal {}
         }
         }
     }
@@ -193,259 +164,47 @@ fn valid_phase(phase: Option<(i64, i64)>) -> Option<(i64, i64)> {
     phase.filter(|&(step, total)| step >= 1 && step <= total)
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum BailReason {
-    Dependency,
-    Scope,
-    Energy,
-}
-
-impl BailReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Dependency => "external_dependency",
-            Self::Scope => "miscalculated_scope",
-            Self::Energy => "energy_depletion",
-        }
-    }
-
-    fn from_key(key: &Key) -> Option<Self> {
-        match key {
-            Key::Character(c) if c == "1" => Some(Self::Dependency),
-            Key::Character(c) if c == "2" => Some(Self::Scope),
-            Key::Character(c) if c == "3" => Some(Self::Energy),
-            _ => None,
-        }
-    }
-}
-
-#[component]
-fn EscapeModal() -> Element {
-    let ctx = use_context::<AppCtx>();
-    let mut note = use_signal(String::new);
-    let mut selected = use_signal(|| None::<BailReason>);
-    let mut confirming = use_signal(|| false);
-
-    let bail = move || {
-        let Some(reason) = *selected.peek() else {
-            return;
-        };
-        if !*ctx.escape_open.peek() || *ctx.telemetry_open.peek() || !begin_directive_action(&ctx) {
-            return;
-        }
-        let note = note.read().clone();
-        let reason = reason.as_str().to_string();
-        dioxus::core::spawn_forever(async move {
-            #[derive(serde::Serialize)]
-            struct BailReq {
-                reason: String,
-                note: Option<String>,
-            }
-            // Spec cap: 140 chars of optional context.
-            let trimmed: String = note.chars().take(140).collect();
-            let req = BailReq {
-                reason,
-                note: if trimmed.trim().is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                },
-            };
-            match invoke::<serde_json::Value>("bail_out", req).await {
-                Ok(_) => {
-                    let mut escape = ctx.escape_open;
-                    *escape.write() = false;
-                    flash(&ctx, "VELOCITY ADJUSTED — NO GUILT");
-                    match invoke::<Option<DirectiveView>>("current_directive", ()).await {
-                        Ok(dv) => set_directive(&ctx, dv),
-                        Err(e) => {
-                            set_directive(&ctx, None);
-                            flash(&ctx, &format!("ERR {e}"));
-                        }
-                    }
-                }
-                Err(e) => flash(&ctx, &format!("ERR {e}")),
-            }
-            let mut busy = ctx.directive_busy;
-            busy.set(false);
-        });
-    };
-
-    // Keyboard: 1/2/3 categorize, Esc resumes (spec §1 bindings).
-    let note_len = note.read().chars().count();
-    let busy = *ctx.directive_busy.read();
-
-    rsx! {
-        div {
-            class: "wl-modal-backdrop wl-modal-centered",
-            tabindex: "0",
-            autofocus: "true",
-            onkeydown: move |e: Event<KeyboardData>| {
-                if *ctx.telemetry_open.peek() {
-                    return;
-                }
-                if is_telemetry_chord(&e) {
-                    // The chord belongs to the app root, so this event is
-                    // let through deliberately rather than swallowed.
-                    // The bailout modal is closed first, though: both
-                    // overlays are `z-index: 40` siblings and the drawer
-                    // comes later in the DOM, so leaving the modal open
-                    // stacked a sheet on top of a sheet the user could no
-                    // longer reach. Escape only clears the drawers, so the
-                    // modal reappeared underneath and had to be dismissed
-                    // a second time.
-                    let mut s = ctx.escape_open;
-                    s.set(false);
-                    return;
-                }
-                e.stop_propagation();
-                if e.is_auto_repeating() || *ctx.directive_busy.peek() {
-                    return;
-                }
-                if e.key() == Key::Escape {
-                    let mut s = ctx.escape_open;
-                    s.set(false);
-                } else if !*confirming.peek() && e.modifiers().is_empty() {
-                    if let Some(reason) = BailReason::from_key(&e.key()) {
-                        selected.set(Some(reason));
-                    }
-                }
-            },
-            onclick: move |_| {
-                if !*ctx.directive_busy.peek() {
-                    confirming.set(true);
-                }
-            },
-            div { class: "wl-modal-sheet wl-modal-centered-sheet", onclick: move |e| e.stop_propagation(),
-                if !*confirming.read() {
-                    h2 { class: "wl-modal-header", "Diagnostic: escape hatch" }
-                    p { class: "wl-modal-sub",
-                        "Select stall cause. Worldline will recalibrate your velocity with zero punitive alarms."
-                    }
-                    input {
-                        class: "wl-input",
-                        r#type: "text",
-                        maxlength: "140",
-                        placeholder: "Optional context (max 140 chars)",
-                        value: "{note.read().clone()}",
-                        disabled: busy,
-                        onkeydown: move |e: Event<KeyboardData>| {
-                            if BailReason::from_key(&e.key()).is_some() {
-                                e.stop_propagation();
-                            }
-                        },
-                        oninput: move |e| {
-                            let v: String = e.value().chars().take(140).collect();
-                            note.set(v);
-                        },
-                    }
-                    p { class: "wl-char-count wl-mono", "{note_len}/140" }
-                    button { class: "wl-bailout-reason", disabled: busy,
-                        aria_pressed: selected.read().as_ref() == Some(&BailReason::Dependency),
-                        onclick: move |_| { if !*ctx.directive_busy.peek() { selected.set(Some(BailReason::Dependency)); } },
-                        div { class: "wl-bailout-reason-title", "[1] Dependency blocked" }
-                        div { class: "wl-bailout-reason-sub", "Waiting for 3rd party API, merge, or response." }
-                    }
-                    button { class: "wl-bailout-reason", disabled: busy,
-                        aria_pressed: selected.read().as_ref() == Some(&BailReason::Scope),
-                        onclick: move |_| { if !*ctx.directive_busy.peek() { selected.set(Some(BailReason::Scope)); } },
-                        div { class: "wl-bailout-reason-title", "[2] Scope miscalculation" }
-                        div { class: "wl-bailout-reason-sub", "Directive exceeds allotted time boundary (>2x). Dispatcher splits it; quota untouched." }
-                    }
-                    button { class: "wl-bailout-reason", disabled: busy,
-                        aria_pressed: selected.read().as_ref() == Some(&BailReason::Energy),
-                        onclick: move |_| { if !*ctx.directive_busy.peek() { selected.set(Some(BailReason::Energy)); } },
-                        div { class: "wl-bailout-reason-title", "[3] Cognitive / energy depletion" }
-                        div { class: "wl-bailout-reason-sub", "Focus ceiling reached; request a downscaled task + 10-minute rest." }
-                    }
-                    p { class: "wl-modal-sub",
-                        match *selected.read() {
-                            Some(BailReason::Dependency) => "Selected: dependency blocked",
-                            Some(BailReason::Scope) => "Selected: scope miscalculation",
-                            Some(BailReason::Energy) => "Selected: cognitive / energy depletion",
-                            None => "Select a category before confirming.",
-                        }
-                    }
-                    button { class: "wl-btn-primary", disabled: busy || selected.read().is_none(), onclick: move |_| bail(),
-                        "Confirm bailout"
-                    }
-                    button {
-                        class: "wl-btn-escape",
-                        disabled: busy,
-                        onclick: move |_| {
-                            if !*ctx.directive_busy.peek() {
-                                let mut s = ctx.escape_open;
-                                s.set(false);
-                            }
-                        },
-                        span { "Resume execution directive" }
-                        kbd { class: "wl-kbd-subtle", "Esc" }
-                    }
-                } else {
-                    h2 { class: "wl-modal-header", "Keep the directive active?" }
-                    p { class: "wl-modal-sub", "Closing the hatch without a category keeps your current directive." }
-                    button {
-                        class: "wl-btn-ghost",
-                        disabled: busy,
-                        onclick: move |_| {
-                            if !*ctx.directive_busy.peek() {
-                                let mut s = ctx.escape_open;
-                                s.set(false);
-                                confirming.set(false);
-                            }
-                        },
-                        "Stay on directive"
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn claim_action(busy: &mut bool, has_directive: bool) -> bool {
-    if *busy || !has_directive {
-        return false;
-    }
-    *busy = true;
-    true
-}
-
-fn begin_directive_action(ctx: &AppCtx) -> bool {
-    let mut busy = ctx.directive_busy;
-    let claimed = claim_action(&mut busy.write(), ctx.directive.peek().is_some());
-    claimed
-}
-
-fn complete_current(ctx: &AppCtx) {
-    if *ctx.escape_open.peek() || !begin_directive_action(ctx) {
-        return;
-    }
+/// Refreshes the canvas's task from the shell.
+///
+/// Called after a tick on the ledger, which is the only place a task is
+/// resolved — so the canvas has to be told rather than re-read on its own.
+/// `pub` because the ledger screen is a different component and the
+/// alternative is a second copy of this three-line sequence.
+pub fn refresh_canvas(ctx: &AppCtx) {
     let ctx = *ctx;
     dioxus::core::spawn_forever(async move {
-        match invoke::<Option<DirectiveView>>("complete_directive", ()).await {
-            Ok(next) => {
-                set_directive(&ctx, next);
-                // MVP-3: velocity must move the moment a directive
-                // completes, not wait for the next evening check-in
-                // (the HUD target/ratio live in the same signal the
-                // telemetry drawer and check-in read).
-                if let Ok(v) = invoke::<VelocityView>("velocity", ()).await {
-                    {
-                        let mut s = ctx.velocity;
-                        *s.write() = v;
-                    }
-                }
-            }
+        match invoke::<Option<DirectiveView>>("current_directive", ()).await {
+            Ok(dv) => set_directive(&ctx, dv),
             Err(e) => flash(&ctx, &format!("ERR {e}")),
         }
-        let mut busy = ctx.directive_busy;
-        busy.set(false);
+        // Velocity moves the moment a task resolves, not at the next
+        // evening check-in — the HUD numbers read from the same signal.
+        if let Ok(v) = invoke::<VelocityView>("velocity", ()).await {
+            {
+                let mut s = ctx.velocity;
+                *s.write() = v;
+            }
+        }
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen's own source, with the test module cut off.
+    ///
+    /// A source scan that includes the assertions can never pass: the
+    /// assertion names the very string it is looking for. Cutting at the
+    /// `cfg(test)` marker is what makes the guard check the MARKUP rather
+    /// than the test that checks the markup.
+    fn markup() -> &'static str {
+        let source = include_str!("canvas.rs");
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the source contains its own test module")
+    }
 
     #[test]
     fn invalid_phase_metadata_is_not_rendered() {
@@ -465,32 +224,26 @@ mod tests {
         );
     }
 
+    /// The canvas has no keydown handler any more, and that is the point
+    /// rather than an accident of the refactor: `⌘+Enter` completed a task
+    /// and `Escape` opened the categorisation sheet, and the user asked for
+    /// a surface that cannot resolve anything. The guard below is the only
+    /// way to hold that line from the other side — the markup simply has no
+    /// `onkeydown` on it, so there is nothing for a keypress to reach.
     #[test]
-    fn category_shortcuts_require_an_explicit_supported_digit() {
-        for (key, reason) in [
-            ("1", "external_dependency"),
-            ("2", "miscalculated_scope"),
-            ("3", "energy_depletion"),
-        ] {
-            assert_eq!(
-                BailReason::from_key(&Key::Character(key.into())).map(BailReason::as_str),
-                Some(reason)
-            );
-        }
-        for key in [Key::Enter, Key::Escape, Key::Character("4".into())] {
-            assert!(BailReason::from_key(&key).is_none());
-        }
-    }
-
-    #[test]
-    fn shared_action_guard_rejects_reentry_until_released() {
-        let mut busy = false;
-        assert!(!claim_action(&mut busy, false));
-        assert!(!busy);
-        assert!(claim_action(&mut busy, true));
-        assert!(!claim_action(&mut busy, true));
-        assert!(busy);
-        busy = false;
-        assert!(claim_action(&mut busy, true));
+    fn the_canvas_takes_no_input_but_its_menu() {
+        let source = markup();
+        assert!(
+            !source.contains("onkeydown"),
+            "the canvas must not bind any key handler; completion and the escape hatch moved to the ledger"
+        );
+        assert!(
+            !source.contains("complete_directive"),
+            "the canvas must not reach the shell's completion path"
+        );
+        assert!(
+            !source.contains("bail_out"),
+            "the escape hatch is gone; nothing may call it"
+        );
     }
 }

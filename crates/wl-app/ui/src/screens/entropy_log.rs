@@ -1,188 +1,107 @@
-//! Entropy Log — the escape-hatch ledger, read back.
+//! Entropy Log — the task ledger.
 //!
-//! The escape hatch (skill §5 "Do") demands a reason before a directive
-//! can be abandoned, and that reason was previously write-only: it was
-//! recorded, counted into velocity, and never shown to anyone again. This
-//! page is where it comes back. The point is not a scoreboard — this
-//! product bans failure states and streaks — it is the only place the
-//! three reasons can be compared against each other, which is the only
-//! way "I keep bailing on the same kind of thing" becomes visible before
-//! it becomes a habit.
+//! This page used to be the escape-hatch ledger: a read-only, grouped
+//! listing of bailouts, with a pattern line (`4 events · 2 energy · 1
+//! scope · 1 external`) and nothing you could do with any of it. It was
+//! read-only **by decision** (PRD delta 159) because a blocked directive
+//! had no unblock path in the engine, so a tap target would have been a
+//! control that could not do what it said.
 //!
-//! Grouped by goal, because a bailout only means something next to the
-//! thing it derailed: three bails spread over three goals is noise, three
-//! on one goal is a pattern.
+//! Then the escape hatch was deleted (2026-09-27) — and with it the only
+//! writer those rows had. A page whose entire content is a table nothing
+//! appends to is worse than no page, so this became the thing the product
+//! was missing: **every task, grouped by goal, with the one control that
+//! resolves one.**
 //!
-//! Read-only by decision (2026-09-27). A blocked directive has no unblock
-//! path in the engine yet (PRD delta 33), so offering a tap target here
-//! would be a control that cannot do what it says. The page reports;
-//! changing anything still happens on the canvas.
+//! # Why a task list at all
+//!
+//! The design system bans a scrollable list of future tasks, and the rule
+//! is written against the home screen. This is the other case: a page a
+//! person opens deliberately, from the control panel, to answer "what is
+//! outstanding and what am I done with". The canvas still shows exactly
+//! one directive and still cannot resolve it. The rule was narrowed rather
+//! than broken, and PRD delta 227 records it.
+//!
+//! # One control per row
+//!
+//! A tick, and nothing else. There is no cross: "not done" would have to
+//! mean something to the engine, and the honest candidate — `skipped`, a
+//! velocity adjustment — turns out to need a category to be useful, which
+//! is the escape hatch again under a different name. A tick is
+//! unambiguous, reversible by tapping again, and the only verb the engine
+//! actually implements (PRD delta 225, `Engine::mark_complete`).
+//!
+//! The canvas is where the task is worked and the ledger is where it is
+//! resolved, which is the division the deletion of the escape hatch
+//! forced and the one the page's whole shape follows from.
 
 use dioxus::prelude::*;
 
-use crate::app::{invoke, AppCtx, EntropyView, Screen};
+use crate::app::{flash, invoke, AppCtx, CalibrationView, Screen, TaskView};
 use crate::icons::IconBack;
 
-/// Human-readable name for a stored `bailouts.reason`.
+/// What the summary line says, or nothing at all.
 ///
-/// The three strings are the escape modal's own titles (skill §5), reused
-/// verbatim so the reason a user picked at 23:00 and the reason they read
-/// here at 08:00 are the same words. An unrecognised key renders as
-/// "Unclassified" rather than disappearing: a future shell adding a
-/// fourth reason must not silently shrink this page.
-pub fn reason_label(key: &str) -> &'static str {
-    match key {
-        "external_dependency" => "Dependency blocked",
-        "miscalculated_scope" => "Scope miscalculation",
-        "energy_depletion" => "Cognitive / energy depletion",
-        _ => "Unclassified",
-    }
-}
-
-/// Short form for the summary line, where three full titles would wrap.
-fn reason_short(key: &str) -> &'static str {
-    match key {
-        "external_dependency" => "external",
-        "miscalculated_scope" => "scope",
-        "energy_depletion" => "energy",
-        _ => "other",
-    }
-}
-
-/// The three reasons in the order the escape modal presents them, so the
-/// summary reads the same way every time regardless of which is most
-/// common. Sorting by count would make the line jump around daily and
-/// stop being scannable.
-const REASON_ORDER: [&str; 3] = [
-    "energy_depletion",
-    "miscalculated_scope",
-    "external_dependency",
-];
-
-/// One line of pattern: how many events, split by reason, plus how many
-/// are still stuck.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct EntropySummary {
-    pub total: usize,
-    /// `(short label, count)`, in [`REASON_ORDER`], zeros dropped.
-    pub by_reason: Vec<(&'static str, usize)>,
-    pub still_blocked: usize,
-}
-
-/// Count the ledger.
-///
-/// Only non-zero reasons are reported. A "0 scope" on the summary is
-/// noise that costs horizontal space in a 420px drawer-width page and
-/// teaches the eye to skip the line.
-pub fn summarize(entries: &[EntropyView]) -> EntropySummary {
-    let mut s = EntropySummary {
-        total: entries.len(),
-        ..Default::default()
-    };
-    let mut counted = 0;
-    for key in REASON_ORDER {
-        let n = entries.iter().filter(|e| e.reason == key).count();
-        if n > 0 {
-            s.by_reason.push((reason_short(key), n));
-            counted += n;
+/// Two numbers, both load-bearing: how much is open, and how much of it
+/// cannot start yet. A count of blocked tasks is not a failure figure — it
+/// is the queue's shape, and the product's own instruction is that a
+/// stalled task shows its reason rather than an alarm.
+pub fn summary_line(tasks: &[TaskView]) -> String {
+    let open = tasks.iter().filter(|t| !t.is_done()).count();
+    if open == 0 {
+        if tasks.is_empty() {
+            return String::new();
         }
+        return "Everything is done.".into();
     }
-    // Anything this build does not recognise still has to be counted, or
-    // the headline says "4 events" while the breakdown adds to 3 and the
-    // page quietly under-reports. The remainder is surfaced as "other"
-    // rather than dropped.
-    let other = s.total.saturating_sub(counted);
-    if other > 0 {
-        s.by_reason.push(("other", other));
+    let blocked = tasks.iter().filter(|t| t.is_blocked()).count();
+    if blocked == 0 {
+        return format!("{open} open");
     }
-    s.still_blocked = entries.iter().filter(|e| e.still_blocked).count();
-    s
+    format!("{open} open · {blocked} waiting on something else")
 }
 
-/// Render the summary as the single mono line under the page title.
-pub fn summary_line(s: &EntropySummary) -> String {
-    if s.total == 0 {
-        return String::new();
-    }
-    let mut parts = vec![format!("{} event{}", s.total, plural(s.total))];
-    for (label, n) in &s.by_reason {
-        parts.push(format!("{n} {label}"));
-    }
-    let mut line = parts.join(" · ");
-    if s.still_blocked > 0 {
-        line.push_str(&format!(" · {} still blocked", s.still_blocked));
-    }
-    line
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
-}
-
-/// Group entries under their goal, preserving the order goals first
-/// appear in (the shell returns newest-first, so the most recently active
-/// goal leads).
+/// Groups the ledger under its goals, preserving first-seen order.
 ///
-/// Borrows the entries rather than cloning them, and indexes the groups by
-/// goal name instead of scanning for a match. The ledger is append-only
-/// and nothing prunes it, so this used to be a linear `find` per entry
-/// against a `Vec` of up-to-now clones — quadratic in goals, and one full
-/// copy of every `EntropyView` (six `String`s each) on every render of the
-/// screen. At 200 bailouts over 20 goals that is ~4 000 string comparisons
-/// and 1 200 allocations per render, for a list that is only ever written
-/// once per visit.
-pub fn group_by_goal(entries: &[EntropyView]) -> Vec<(&str, Vec<&EntropyView>)> {
-    let mut groups: Vec<(&str, Vec<&EntropyView>)> = Vec::new();
+/// The shell returns open work first and the store's own order within
+/// that, and goals therefore appear in the order they first have open
+/// work. A bailout only ever meant something next to the thing it
+/// derailed, and the same is true of a task that is waiting on another.
+pub fn group_by_goal(tasks: &[TaskView]) -> Vec<(&str, Vec<&TaskView>)> {
+    let mut groups: Vec<(&str, Vec<&TaskView>)> = Vec::new();
     let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for e in entries {
-        match index.get(e.goal_title.as_str()) {
-            Some(&i) => groups[i].1.push(e),
+    for t in tasks {
+        match index.get(t.goal_title.as_str()) {
+            Some(&i) => groups[i].1.push(t),
             None => {
-                index.insert(e.goal_title.as_str(), groups.len());
-                groups.push((e.goal_title.as_str(), vec![e]));
+                index.insert(t.goal_title.as_str(), groups.len());
+                groups.push((t.goal_title.as_str(), vec![t]));
             }
         }
     }
     groups
 }
 
-/// Render "21 Sep" from the shell's `YYYY-MM-DD`.
-///
-/// A date the shell could not derive (empty, or a shape we do not
-/// recognise) renders as the raw string rather than as a blank gap, so a
-/// malformed row is visible instead of silently unlabelled.
-fn short_date(iso: &str) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mut parts = iso.split('-');
-    let (Some(_y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
-        return iso.to_string();
-    };
-    let Ok(m) = m.parse::<usize>() else {
-        return iso.to_string();
-    };
-    if !(1..=12).contains(&m) || d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit()) {
-        return iso.to_string();
-    }
-    format!("{} {}", d.trim_start_matches('0'), MONTHS[m - 1])
-}
-
 pub fn EntropyLogScreen() -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut entries = use_signal::<Option<Vec<EntropyView>>>(|| None);
+    let mut tasks = use_signal::<Option<Vec<TaskView>>>(|| None);
+    let mut buckets = use_signal(Vec::new);
     let mut error = use_signal(|| None::<String>);
+    // Ids whose tick is in flight, so a double-tap cannot fire two writes.
+    // A checkbox that disables itself for the duration of its own request
+    // is the whole of the "already resolved" problem.
+    let pending = use_signal(Vec::new);
 
+    // A plain mount effect is the whole refresh story: the screen unmounts
+    // when it is closed, so every open re-reads. A task ticked on the
+    // previous visit therefore shows as done the next time, and a goal
+    // created since is here.
     use_effect(move || {
         spawn(async move {
-            match invoke::<Vec<EntropyView>>("entropy_log", ()).await {
+            match invoke::<Vec<TaskView>>("task_ledger", ()).await {
                 Ok(v) => {
                     error.set(None);
-                    entries.set(Some(v));
+                    tasks.set(Some(v));
                 }
                 Err(e) => {
                     // A shell without the command (an older build) answers
@@ -191,19 +110,55 @@ pub fn EntropyLogScreen() -> Element {
                     *error.write() = Some(e);
                 }
             }
+            // The estimator is a second query, and a failure here must not
+            // take the ledger down with it — a missing Calibration card is
+            // a smaller problem than a missing task list.
+            if let Ok(b) = invoke::<Vec<CalibrationView>>("calibration_view", ()).await {
+                buckets.set(b);
+            }
         });
     });
 
-    // Recomputed per render — which is NOT the once-per-toast the audit
-    // assumed. `EntropyLogScreen` takes no props, so a parent re-render
-    // memoizes them and never re-renders this scope at all
-    // (`VNode::diff_vcomponent` returns early when `old_props.memoize`
-    // says the props are unchanged). This runs when `entries` or `error`
-    // changes, which is at most twice per visit. The cost that *did* scale
-    // with the ledger was the grouping itself — see `group_by_goal`.
-    let entries = entries.read();
-    let summary = entries.as_ref().map(|v| summarize(v));
-    let groups = entries.as_deref().map(group_by_goal);
+    let tick = move |(id, _title): (String, String)| {
+        let mut pending = pending;
+        if pending.read().iter().any(|p| p == &id) {
+            return;
+        }
+        pending.write().push(id.clone());
+        let ctx = ctx;
+        spawn(async move {
+            match invoke::<crate::app::DirectiveView>(
+                "mark_task_done",
+                serde_json::json!({ "directive_id": id }),
+            )
+            .await
+            {
+                Ok(_) => {
+                    flash(&ctx, "RECORDED");
+                    // Re-read rather than patch the row locally: the
+                    // milestone, the canvas and the estimator all move with
+                    // a tick, and a locally-patched row would be the only
+                    // one of the four that did not.
+                    if let Ok(v) = invoke::<Vec<TaskView>>("task_ledger", ()).await {
+                        tasks.set(Some(v));
+                    }
+                    if let Ok(b) = invoke::<Vec<CalibrationView>>("calibration_view", ()).await {
+                        buckets.set(b);
+                    }
+                    crate::screens::canvas::refresh_canvas(&ctx);
+                }
+                Err(e) => flash(&ctx, &format!("ERR {e}")),
+            }
+            let mut p = pending;
+            p.write().retain(|x| x != &id);
+        });
+    };
+
+    let loaded = tasks.read().clone();
+    let groups = loaded.as_deref().map(group_by_goal);
+    let summary = loaded.as_deref().map(summary_line);
+    let bucket_list = buckets.read().clone();
+    let in_flight = pending.read().clone();
 
     rsx! {
         div { class: "wl-page",
@@ -222,40 +177,30 @@ pub fn EntropyLogScreen() -> Element {
                 if let Some(err) = error.read().clone() {
                     p { class: "wl-form-error", "{err}" }
                 }
-
-                if let Some(s) = summary {
-                    if s.total > 0 {
-                        p { class: "wl-entropy-summary wl-mono", "{summary_line(&s)}" }
+                if let Some(line) = summary {
+                    if !line.is_empty() {
+                        p { class: "wl-entropy-summary wl-mono", "{line}" }
                     }
                 }
 
                 if let Some(gs) = groups {
                     if gs.is_empty() {
                         div { class: "wl-directive-card",
-                            h2 { class: "wl-entropy-empty-title", "Nothing has been abandoned." }
+                            h2 { class: "wl-entropy-empty-title", "Nothing is queued." }
                             p { class: "wl-body-muted",
-                                "Every directive so far ran to completion. This page fills in the first time the escape hatch is used — it exists to make the reason visible, not to be visited."
+                                "Every task from every goal is finished. This page fills in the moment a plan has work in it — it exists to mark things done, not to be visited."
                             }
                         }
                     } else {
                         for (goal, items) in gs {
                             div { key: "{goal}", class: "wl-entropy-group",
-                                h2 { class: "wl-entropy-goal", "{goal}" }
-                                for e in items {
-                                    div { key: "{e.id}", class: "wl-entropy-entry",
-                                        div { class: "wl-entropy-row",
-                                            span { class: "wl-entropy-date wl-mono", "{short_date(&e.date)}" }
-                                            span { class: "wl-entropy-reason", "{reason_label(&e.reason)}" }
-                                            if e.still_blocked {
-                                                span { class: "wl-chip", "blocked" }
-                                            }
-                                        }
-                                        p { class: "wl-entropy-directive", "{e.directive_title}" }
-                                        if let Some(note) = e.note.as_ref() {
-                                            if !note.trim().is_empty() {
-                                                p { class: "wl-entropy-note", "\"{note}\"" }
-                                            }
-                                        }
+                                h2 { class: "wl-section-title wl-entropy-goal", "{goal}" }
+                                for t in items.iter() {
+                                    TaskRow {
+                                        t: (*t).clone(),
+                                        key: "{t.directive_id}",
+                                        busy: in_flight.contains(&t.directive_id),
+                                        on_tick: Callback::new(tick),
                                     }
                                 }
                             }
@@ -264,6 +209,83 @@ pub fn EntropyLogScreen() -> Element {
                 } else {
                     p { class: "wl-body-muted", "Reading the ledger…" }
                 }
+
+                // The estimator, last, and only if the user has rated
+                // anything. It is a section on this page rather than a page
+                // of its own because it is 200px of text about the same
+                // work these rows are.
+                if !bucket_list.is_empty() {
+                    div { class: "wl-entropy-group wl-calibration-card",
+                        h2 { class: "wl-section-title", "Calibration" }
+                        p { class: "wl-body-muted",
+                            "How often work you rate a given way actually lands. Your rating is the starting point; every task you mark done moves it."
+                        }
+                        for (b, text) in bucket_list.iter().map(|b| (b, b.line())) {
+                            div { key: "{b.complexity}", class: "wl-calibration-row",
+                                span { class: "wl-calibration-card-label", "{b.label}" }
+                                span { class: "wl-calibration-card-value wl-mono", "{text}" }
+                            }
+                        }
+                        p { class: "wl-body-muted wl-mono wl-traj-foot",
+                            "Read into the next plan's sizing. Not applied to estimates yet."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One task, and the one control that resolves it.
+#[component]
+fn TaskRow(t: TaskView, busy: bool, on_tick: EventHandler<(String, String)>) -> Element {
+    let meta = t.meta();
+    // Joined OUTSIDE the rsx: the format string's own quotes and the
+    // separator's quotes are the same character, and rsx cannot nest them.
+    let meta_line = meta.join(" · ");
+    let blocked = t.blocked_by.clone();
+    let done = t.is_done();
+    rsx! {
+        div { class: "wl-task-row", class: if done { "wl-task-row--done" },
+            div { class: "wl-task-body",
+                p { class: "wl-task-title", "{t.title}" }
+                if !meta.is_empty() {
+                    p { class: "wl-task-meta wl-mono", "{meta_line}" }
+                }
+                // Why this task is not running, in a sentence. The whole
+                // reason `blocked_by` exists: a task sitting in the queue
+                // with nothing visibly wrong with it is indistinguishable
+                // from a stalled app.
+                if let Some(why) = blocked {
+                    if !done {
+                        p { class: "wl-task-blocked", "waiting on {why}" }
+                    }
+                }
+                if let Some(body) = t.instruction.as_ref() {
+                    if !body.trim().is_empty() {
+                        p { class: "wl-task-instruction", "{body}" }
+                    }
+                }
+            }
+            // The tick. `aria-pressed` rather than a styled-only state, and
+            // the row's own text carries "done" as well — so nothing on this
+            // page depends on colour alone.
+            button {
+                class: "wl-circle-btn wl-task-tick",
+                class: if done { "wl-task-tick--on" },
+                aria_pressed: if done { "true" } else { "false" },
+                aria_label: if done {
+                    format!("{} is done", t.title)
+                } else {
+                    format!("Mark {} done", t.title)
+                },
+                title: if done { "Done" } else { "Mark done" },
+                disabled: busy,
+                onclick: move |_| on_tick.call((t.directive_id.clone(), t.title.clone())),
+                crate::icons::IconCheck {}
+            }
+            if done {
+                span { class: "wl-task-state wl-mono", "done" }
             }
         }
     }
@@ -273,145 +295,129 @@ pub fn EntropyLogScreen() -> Element {
 mod tests {
     use super::*;
 
-    fn entry(reason: &str, blocked: bool, goal: &str) -> EntropyView {
-        EntropyView {
-            id: format!("{goal}-{reason}"),
+    /// The screen's own source, with the test module cut off — a scan
+    /// that included the assertions could never pass, because the
+    /// assertion names the string it is looking for.
+    fn markup() -> &'static str {
+        let source = include_str!("entropy_log.rs");
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the source contains its own test module")
+    }
+
+    fn task(goal: &str, title: &str, state: &str, blocked_by: Option<&str>) -> TaskView {
+        TaskView {
+            directive_id: title.into(),
             goal_title: goal.into(),
-            directive_id: "d".into(),
-            directive_title: "Draft Section 2.1".into(),
-            reason: reason.into(),
-            note: None,
-            date: "2026-09-21".into(),
-            still_blocked: blocked,
+            milestone_title: "M".into(),
+            title: title.into(),
+            estimated_minutes: 25,
+            state: state.into(),
+            blocked_by: blocked_by.map(str::to_string),
+            ..Default::default()
         }
     }
 
+    /// The summary has to account for every open task, or the page
+    /// contradicts the rows under it.
     #[test]
-    fn every_stored_reason_has_a_label() {
-        for key in REASON_ORDER {
-            assert_ne!(reason_label(key), "Unclassified", "{key} lost its label");
-        }
-    }
-
-    #[test]
-    fn an_unknown_reason_is_reported_not_swallowed() {
-        // A future shell adding a fourth reason must not shrink the page.
-        let s = summarize(&[entry("weather_depression", false, "G")]);
-        assert_eq!(s.total, 1);
-        assert_eq!(s.by_reason, vec![("other", 1)]);
-    }
-
-    #[test]
-    fn the_breakdown_always_accounts_for_every_event() {
-        // The invariant that makes the headline trustworthy: "4 events"
-        // must mean the parts add up to 4, including reasons this build
-        // does not know.
-        let mixed = vec![
-            entry("energy_depletion", false, "G"),
-            entry("external_dependency", true, "G"),
-            entry("weather_depression", false, "G"),
-            entry("weather_depression", false, "G"),
+    fn the_summary_counts_open_and_blocked() {
+        let ledger = vec![
+            task("G", "a", "queued", None),
+            task("G", "b", "queued", Some("a")),
+            task("G", "c", "completed", None),
         ];
-        let s = summarize(&mixed);
-        assert_eq!(s.total, 4);
-        assert_eq!(s.by_reason.iter().map(|(_, n)| n).sum::<usize>(), s.total);
         assert_eq!(
-            s.by_reason,
-            vec![("energy", 1), ("external", 1), ("other", 2)]
+            summary_line(&ledger),
+            "2 open · 1 waiting on something else"
+        );
+        assert_eq!(summary_line(&[]), "");
+        assert_eq!(
+            summary_line(&[task("G", "a", "completed", None)]),
+            "Everything is done."
         );
     }
 
+    /// A finished task is never reported as waiting on something. This is
+    /// the one that bites: a stale edge on a ticked row would otherwise
+    /// read as outstanding work nobody can discharge.
     #[test]
-    fn summary_omits_zero_categories_and_counts_blocked() {
-        let s = summarize(&[
-            entry("energy_depletion", false, "G"),
-            entry("energy_depletion", false, "G"),
-            entry("miscalculated_scope", false, "G"),
-            entry("external_dependency", true, "G"),
-        ]);
-        assert_eq!(s.total, 4);
-        assert_eq!(s.still_blocked, 1);
-        // Energy first, and no zero rows.
-        assert_eq!(
-            s.by_reason,
-            vec![("energy", 2), ("scope", 1), ("external", 1)]
-        );
-        assert_eq!(
-            summary_line(&s),
-            "4 events · 2 energy · 1 scope · 1 external · 1 still blocked"
-        );
+    fn a_finished_task_is_never_blocked() {
+        let t = task("G", "a", "completed", Some("b"));
+        assert!(!t.is_blocked());
+        assert!(t.is_done());
     }
 
     #[test]
-    fn a_single_event_is_not_pluralised() {
-        let s = summarize(&[entry("energy_depletion", false, "G")]);
-        assert_eq!(summary_line(&s), "1 event · 1 energy");
-    }
-
-    #[test]
-    fn an_empty_ledger_has_no_summary_line() {
-        let s = summarize(&[]);
-        assert_eq!(s.total, 0);
-        assert_eq!(summary_line(&s), "");
-    }
-
-    /// The grouping is what makes a single bailout legible: three bails
-    /// over three goals is noise, three on one goal is a pattern. So the
-    /// first-seen order and the per-goal collection are both load-bearing
-    /// — the shell returns newest-first, and the most recently active goal
-    /// has to lead.
-    #[test]
-    fn grouping_keeps_first_seen_goal_order_and_collects_its_entries() {
-        let ledger = [
-            entry("energy_depletion", false, "Ship"),
-            entry("miscalculated_scope", false, "Fleet"),
-            entry("external_dependency", false, "Ship"),
+    fn grouping_keeps_first_seen_goal_order() {
+        let ledger = vec![
+            task("Second", "a", "queued", None),
+            task("First", "b", "queued", None),
+            task("Second", "c", "queued", None),
         ];
         let g = group_by_goal(&ledger);
         assert_eq!(g.len(), 2);
-        assert_eq!(g[0].0, "Ship");
+        assert_eq!(g[0].0, "Second");
         assert_eq!(g[0].1.len(), 2);
-        assert_eq!(g[1].0, "Fleet");
-        assert_eq!(g[1].1.len(), 1);
-        // Borrowed, not copied: the rows are the ledger's own entries, so
-        // rendering this page costs no allocation per bailout. The ledger
-        // is append-only for the life of the install, so a per-render copy
-        // of every entry was a copy that grew forever.
-        let mut seen: Vec<&str> = g
-            .iter()
-            .flat_map(|(_, v)| v.iter())
-            .map(|e| e.id.as_str())
-            .collect();
-        seen.sort_unstable();
-        let mut expected: Vec<&str> = ledger.iter().map(|e| e.id.as_str()).collect();
-        expected.sort_unstable();
-        assert_eq!(seen, expected, "every entry appears exactly once");
+        assert_eq!(g[1].0, "First");
     }
 
-    /// A goal whose title is empty is still a group, and two of them are
-    /// the same group — the old linear scan compared the same way, so this
-    /// is a property the index must not change.
+    /// The meta line's ORDER is what a person actually reads, so it is
+    /// pinned: labels first, the blocker last as a sentence of its own.
     #[test]
-    fn entries_with_no_goal_title_still_group_together() {
-        let ledger = [
-            entry("energy_depletion", false, ""),
-            entry("external_dependency", false, ""),
-            entry("energy_depletion", false, "Ship"),
-        ];
-        let g = group_by_goal(&ledger);
-        assert_eq!(g.len(), 2);
-        assert_eq!(g[0].0, "");
-        assert_eq!(g[0].1.len(), 2);
-        assert_eq!(g[1].0, "Ship");
+    fn the_meta_line_is_labels_then_the_blocker() {
+        let mut t = task("G", "a", "queued", Some("b"));
+        t.complexity_label = Some("heavy".into());
+        t.phase = Some((2, 4));
+        assert_eq!(
+            t.meta(),
+            vec!["M", "25 min", "step 2 of 4", "heavy"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+        // A monolithic, unrated task shows no phase and no word rather
+        // than empty placeholders.
+        let plain = task("G", "a", "queued", None);
+        assert_eq!(plain.meta(), vec!["M".to_string(), "25 min".to_string()]);
     }
 
+    /// The calibration line must say "no record yet" rather than quoting a
+    /// percentage the user would read as a measurement.
     #[test]
-    fn a_malformed_date_shows_itself_instead_of_a_blank_gap() {
-        assert_eq!(short_date("2026-09-01"), "1 Sep");
-        assert_eq!(short_date("2026-12-25"), "25 Dec");
-        // Degenerate clock (HLC physical 0) and junk both pass through.
-        assert_eq!(short_date(""), "");
-        assert_eq!(short_date("not-a-date"), "not-a-date");
-        assert_eq!(short_date("2026-13-01"), "2026-13-01");
+    fn an_unmeasured_bucket_says_so_in_words() {
+        let b = CalibrationView {
+            complexity: 4,
+            label: "heavy".into(),
+            percent: 63,
+            evidence: "0 of 0".into(),
+            observations: 0,
+        };
+        assert_eq!(b.line(), "heavy · no record yet");
+        let measured = CalibrationView {
+            observations: 9,
+            evidence: "4 of 9".into(),
+            ..b
+        };
+        assert_eq!(measured.line(), "heavy · 4 of 9 finished · 63%");
+    }
+
+    /// The page has exactly one control and it is the tick. A cross here
+    /// would be a control with no engine transition behind it, which is the
+    /// failure PRD delta 159 was written about.
+    #[test]
+    fn the_page_offers_a_tick_and_nothing_else() {
+        let source = markup();
+        assert!(
+            !source.contains("bail_out"),
+            "the escape hatch is gone; the ledger must not call it"
+        );
+        assert!(
+            !source.contains("complete_directive"),
+            "and it must not reach the canvas's removed completion path either"
+        );
+        // The one command it does issue that resolves anything.
+        assert!(source.contains("mark_task_done"));
     }
 }
