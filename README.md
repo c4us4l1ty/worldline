@@ -146,6 +146,6 @@ and needs no API key.
 | Core/relay/sync    | `cargo test --workspace`                            | 192 pass |
 | Lints              | `cargo clippy --workspace --all-targets`           | clean  |
 | Formatting         | `cargo fmt --all -- --check`                        | clean  |
-| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 17 pass, clean |
+| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 19 pass, clean |
 | Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 20 pass, clean (live-relay handshake, vault round-trip, real-IPC arg-binding tests) |
 | Desktop bundle     | `cd crates/wl-app && cargo tauri build` (after setup script) | by user |

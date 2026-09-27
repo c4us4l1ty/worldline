@@ -1063,6 +1063,85 @@ Locked decisions from the planning session are marked [approved].
     No new dependency: the assertion lives in the crate that would
     actually break.
 
-122. **Test counts.** Workspace 192, shell 20, UI 17 (225 total). The
-    three shell IPC tests and the boot-routing test are new; the rest of
-    the delta from the previous 217 is the compose screen's own tests.
+122. **Test counts.** Workspace 192, shell 20, UI 19 (231 total). The
+    three shell IPC tests are new; the rest of the delta from the
+    previous 217 is the compose screen's own tests.
+
+## Boot hardening: two frozen splashes (2026-09-27, user-reported)
+
+The app opened to two copies of the boot splash that never resolved.
+Three independent defects could each produce that picture, and the
+design had no way to distinguish them, so all three are closed.
+
+123. **The app mounted twice.** `dx serve`'s hot-reload re-imports the
+    wasm module, and a debug build loads `devUrl`, so a second module
+    execution ran `launch(App)` a second time into the same `#main`.
+    Reproduced in a browser against `:1420`: every boot command fired
+    twice, 384 ms apart. Two component trees meant two sets of `AppCtx`
+    signals, and each tree's writes notified only its own subscribers —
+    so one tree could sit on `Screen::Boot` permanently while the other
+    was perfectly healthy.
+
+    `app::main()` now claims the mount point (clearing any stale tree)
+    and returns without launching if it is already claimed, making
+    execution idempotent. Verified by re-importing the real release
+    bundle: root and card counts are unchanged.
+
+124. **Boot had no failure state, so a wedge looked like patience.**
+    The splash read "Establishing cryptographic session…" forever with
+    no timeout, no error, and no exit. `BOOT_TIMEOUT_MS` (15 s) now arms
+    a watchdog *before* anything is awaited, and the worst case is
+    `BootError` with a working Retry. Verified by making
+    `identity_status` never settle: at 5 s the splash says so, at 15 s
+    the failure screen appears, and clicking Retry after un-wedging the
+    shell lands on the canvas with no relaunch.
+
+    The splash also counts elapsed seconds. A static "starting…" is
+    indistinguishable from a frozen one, which is how a wedged shell
+    presented as a busy app.
+
+125. **One hung boot call blocked the entire boot.** `settings_get` and
+    `identity_status` were awaited in sequence, so a `settings_get` that
+    never settled meant `identity_status` was never attempted. They now
+    run concurrently and independently; routing waits only on identity,
+    and a settings failure is tolerated as it always was.
+
+126. **A render panic left stale DOM with no explanation.** A panic in a
+    component's render leaves the last good DOM in place, which for a
+    boot-time panic is the splash, forever. Every screen now renders
+    inside an `ErrorBoundary` with a fallback that names the error and
+    offers a reload.
+
+127. **`AppCtx` signal ownership is now explicit and documented.**
+    Dioxus warned on every build: *"A Copy Value created in ScopeId(3)
+    … used in ScopeId(0) … may cause reads or writes to fail."* That is
+    correct in general — the signals are `Copy` and are written from
+    detached `spawn`ed tasks, which run at the runtime root scope. It is
+    a false positive here only because the owning scope is the app root,
+    which outlives every writer. All fourteen are now constructed with
+    `Signal::new_in_scope(…, ScopeId::APP)` so the guarantee is stated
+    rather than inherited: the refactor that would actually introduce
+    the bug is moving this construction into a component with a
+    shorter-lived scope, and that must now fail loudly in review.
+
+128. **The app can now say which IPC path it resolved.**
+    `app::transport()` reports `native` / `mock` / `none` and is shown
+    on the boot-failure screen. `invoke-shim.js` falls back to the mock
+    harness whenever `__TAURI_INTERNALS__` is absent, so a window can
+    render a fully working-looking app on canned data with nothing being
+    saved — previously indistinguishable from a healthy install.
+
+129. **The boot budget is a compile-time invariant.**
+    `BOOT_TIMEOUT_MS` is a constant, so asserting its bounds at runtime
+    is a tautology. They are now `const _: () = assert!(…)` checks beside
+    the constant, the same treatment `MAX_SEALED_OP_BYTES` gets, so it is
+    impossible to widen the budget into "never" without failing the
+    build.
+
+**Not verifiable here.** The WebKit remote inspector
+    (`WEBKIT_INSPECTOR_SERVER`) does not accept connections on this
+    machine, so the native IPC handshake *inside the Tauri webview* was
+    not observed directly. It is covered indirectly: the shell's
+    commands are exercised through the real `generate_handler!` in
+    `ipc_tests.rs`, and the same UI bundle was driven screen-by-screen
+    in a browser.

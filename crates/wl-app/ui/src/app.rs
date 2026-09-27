@@ -11,8 +11,84 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::theme::Theme;
 
+/// Entry point. Returns without launching if the mount point is already
+/// claimed.
 pub fn main() {
+    if !claim_mount_point() {
+        return;
+    }
     launch(App);
+}
+
+/// Take exclusive ownership of the `#main` mount point.
+///
+/// This is not defensive padding — it fixes a failure that shipped
+/// visibly. The dev server can execute the wasm module more than once
+/// in a session (its hot-reload path re-imports the module on
+/// rebuild). Each execution ran `launch(App)`, which built a SECOND
+/// independent component tree inside the same `#main`: two roots, two
+/// boot sequences, every shell command issued twice, and two sets of
+/// in-flight async tasks writing into two different copies of the app
+/// state. The window then shows two boot splashes that never resolve,
+/// because the two trees' signal writes do not reach each other's
+/// subscribers.
+///
+/// So execution is made idempotent: the first call claims the page and
+/// empties `#main` (a stale tree from an earlier execution must not
+/// survive underneath the live one), and every later call is a no-op.
+/// A bookkeeping failure must never stop the app from starting, so the
+/// catch claims the mount anyway rather than returning false.
+fn claim_mount_point() -> bool {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_claim_mount() {
+      const KEY = "__wl_mounted__";
+      try {
+        if (window[KEY]) { return false; }
+        window[KEY] = true;
+        const host = document.getElementById("main");
+        if (host) { host.replaceChildren(); }
+        return true;
+      } catch (e) {
+        return true;
+      }
+    }
+  "#)]
+    extern "C" {
+        fn wl_claim_mount() -> bool;
+    }
+    wl_claim_mount()
+}
+
+/// Which IPC transport the shim resolved: `native` when it reached
+/// Tauri's injected `__TAURI_INTERNALS__`, `mock` when it fell back to
+/// the browser harness, `none` when `invoke-shim.js` never loaded.
+///
+/// Surfaced on the boot-failure screen because "the window is showing
+/// canned data" and "the window is showing my data" look identical
+/// from the outside, and a silently-missing native bridge is exactly
+/// the kind of fault that is otherwise invisible until a user
+/// notices their work did not save.
+pub fn transport() -> &'static str {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_transport() {
+      if (typeof window.wlInvoke !== "function") { return "none"; }
+      try {
+        const t = window.__TAURI_INTERNALS__;
+        if (t && typeof t.invoke === "function") { return "native"; }
+      } catch (e) { /* not a Tauri webview */ }
+      return "mock";
+    }
+  "#)]
+    extern "C" {
+        fn wl_transport() -> String;
+    }
+    match wl_transport().as_str() {
+        "native" => "native",
+        "mock" => "mock",
+        _ => "none",
+    }
 }
 
 /// Invoke a Tauri shell command via the JS shim (native) or the mock
@@ -283,6 +359,47 @@ pub fn boot_screen(identity: Result<(), &str>) -> Screen {
     }
 }
 
+/// How long boot may take before the app stops waiting and says so.
+/// Comfortably longer than a cold SQLite open plus a Stronghold unlock
+/// on slow or encrypted storage, and short enough that a wedge reads as
+/// a fault within seconds of attention rather than "still starting"
+/// forever.
+///
+/// Both bounds are enforced at compile time rather than in a test. A
+/// budget that is a constant does not need a runtime assertion — it
+/// needs to be impossible to change into something wrong without the
+/// build failing, which is the same treatment
+/// `MAX_SEALED_OP_BYTES` gets in `wl-sync`.
+pub const BOOT_TIMEOUT_MS: u32 = 15_000;
+const _: () = assert!(
+    BOOT_TIMEOUT_MS >= 5_000,
+    "a cold SQLite open plus a Stronghold unlock must fit inside the boot budget"
+);
+const _: () = assert!(
+    BOOT_TIMEOUT_MS <= 30_000,
+    "a wedged shell must be reported well before a user gives up"
+);
+
+/// The boot-timeout message, as a pure function of its inputs.
+///
+/// Split from [`boot_timeout_detail`] so the wording is testable off a
+/// wasm target — `transport()` is an imported JS function and cannot be
+/// called from a host test.
+pub fn boot_timeout_message(timeout_ms: u32, transport: &str) -> String {
+    format!(
+        "The shell did not answer within {}s (IPC transport: {}).",
+        timeout_ms / 1000,
+        transport
+    )
+}
+
+/// What a timed-out boot reports. Names the transport it found, because
+/// the most expensive fault to debug here is a window that looks alive
+/// while it is quietly not talking to anything.
+pub fn boot_timeout_detail() -> String {
+    boot_timeout_message(BOOT_TIMEOUT_MS, transport())
+}
+
 /// Note: the session timer was removed from the canvas (2026-09-26, user
 /// directive). With it went `TimerSession`, `timer_session`, `fmt_mmss`
 /// and the 1 Hz `start_timer` ticker — they existed only to drive the
@@ -323,58 +440,131 @@ pub struct AppCtx {
     /// unlock/restore/generate in Settings. The drawer, canvas and
     /// settings all read the same signal.
     pub identity_status: Signal<IdentityStatus>,
+    /// Bumped by the boot-failure screen's retry. The boot effect keys
+    /// off it, so retrying is a state change rather than a remount —
+    /// which is what lets a failed boot recover without the user
+    /// relaunching the app.
+    pub boot_attempt: Signal<u32>,
 }
 
 fn App() -> Element {
+    // Every field is owned by `ScopeId::APP` — the root scope, which
+    // lives for the whole app — rather than by whatever scope happens to
+    // be current when `App` first renders.
+    //
+    // This matters because `AppCtx` is `Copy` and its signals are
+    // written from two places that are NOT component scopes: detached
+    // `spawn`ed tasks, which run at the runtime's root scope, and event
+    // handlers. Dioxus warns about exactly this ("a Copy Value created
+    // in ScopeId(3) … used in ScopeId(0)") because a value owned by a
+    // short-lived scope can be dropped while something still holds a
+    // copy. Here the owner IS the root scope, so the value outlives
+    // every writer by construction and the warning is a false positive.
+    //
+    // Stating the owner explicitly — rather than inheriting it from
+    // `App`'s scope, which happens to be the root today — makes that
+    // guarantee deliberate, so it survives the refactor that would
+    // actually introduce the bug: moving this construction into a
+    // component with a shorter-lived scope.
     use_context_provider(|| AppCtx {
-        screen: Signal::new(Screen::Boot),
-        directive: Signal::new(None),
-        velocity: Signal::new(VelocityView::default()),
-        settings: Signal::new(AppSettingsView::default()),
-        toast: Signal::new(None),
-        directive_busy: Signal::new(false),
-        toast_task: Signal::new(None),
-        escape_open: Signal::new(false),
-        telemetry_open: Signal::new(false),
-        nav_open: Signal::new(false),
-        sync_status: Signal::new("LOCAL".to_string()),
-        last_sync_ms: Signal::new(None),
-        identity_status: Signal::new(IdentityStatus::default()),
+        screen: Signal::new_in_scope(Screen::Boot, ScopeId::APP),
+        directive: Signal::new_in_scope(None, ScopeId::APP),
+        velocity: Signal::new_in_scope(VelocityView::default(), ScopeId::APP),
+        settings: Signal::new_in_scope(AppSettingsView::default(), ScopeId::APP),
+        toast: Signal::new_in_scope(None, ScopeId::APP),
+        directive_busy: Signal::new_in_scope(false, ScopeId::APP),
+        toast_task: Signal::new_in_scope(None, ScopeId::APP),
+        escape_open: Signal::new_in_scope(false, ScopeId::APP),
+        telemetry_open: Signal::new_in_scope(false, ScopeId::APP),
+        nav_open: Signal::new_in_scope(false, ScopeId::APP),
+        sync_status: Signal::new_in_scope("LOCAL".to_string(), ScopeId::APP),
+        last_sync_ms: Signal::new_in_scope(None, ScopeId::APP),
+        identity_status: Signal::new_in_scope(IdentityStatus::default(), ScopeId::APP),
+        boot_attempt: Signal::new_in_scope(0, ScopeId::APP),
     });
 
     let ctx = use_context::<AppCtx>();
     let _theme = use_context_provider(Theme::new);
 
-    // Boot: load settings/theme and route straight to the Canvas
-    // (MVP-5). No onboarding screens at boot: identity work (unlock,
-    // restore, generate, 12-word phrase) lives in Settings. The ONLY
-    // boot failure that blocks is the shell refusing to answer — a
-    // silent default would disguise a broken vault as a fresh install,
-    // so the routing decision lives in `boot_screen` and is pinned by a
-    // test rather than being inlined here.
-    let mut booted = use_signal(|| false);
+    // Boot (MVP-5): settings/theme, then route straight to the Canvas.
+    // No onboarding screens at boot: identity work (unlock, restore,
+    // generate, 12-word phrase) lives in Settings. The ONLY boot
+    // failure that blocks is the shell refusing to answer — a silent
+    // default would disguise a broken vault as a fresh install, so the
+    // routing decision lives in `boot_screen` and is pinned by a test
+    // rather than being inlined here.
+    //
+    // Three properties this loop has to have, each of which it did not
+    // have before:
+    //
+    // * **Bounded.** A watchdog fires regardless of what the shell
+    //   does, so the worst case is a BootError with a retry rather
+    //   than a splash that spins forever and says nothing. An
+    //   unbounded boot has no failure state, which is what turned a
+    //   wedged shell into an app that looked merely "still starting".
+    // * **Independent steps.** Settings and identity used to be
+    //   awaited in sequence, so a `settings_get` that never settled
+    //   meant `identity_status` was never even attempted — one stuck
+    //   call blocked the entire boot. They are now concurrent and
+    //   independent; routing waits only on identity.
+    // * **Retryable.** Keyed on `boot_attempt`, so retrying is a state
+    //   change rather than a remount of the whole app.
+    let mut booted_attempt = use_signal(|| u32::MAX);
+    let mut boot_settled = use_signal(|| false);
     use_effect(move || {
-        if *booted.read() {
+        let attempt = *ctx.boot_attempt.read();
+        // `peek` so arming the guard does not subscribe this effect to
+        // its own bookkeeping and re-trigger it forever.
+        if *booted_attempt.peek() == attempt {
             return;
         }
-        booted.set(true);
+        *booted_attempt.write() = attempt;
         let ctx2 = ctx;
         spawn(async move {
             let mut screen = ctx2.screen;
-            let mut settings_sig = ctx2.settings;
-            let settings: AppSettingsView = invoke("settings_get", ()).await.unwrap_or_default();
-            crate::theme::apply_data_theme(if settings.theme == "light" {
-                "light"
-            } else {
-                "dark"
+            let mut identity = ctx2.identity_status;
+            boot_settled.set(false);
+            *screen.write() = Screen::Boot;
+
+            // Arm the watchdog FIRST. Anything awaited below can hang,
+            // and the watchdog is the only thing guaranteed to run.
+            let watchdog = spawn({
+                let mut screen = ctx2.screen;
+                let settled = boot_settled;
+                async move {
+                    gloo_timers::future::TimeoutFuture::new(BOOT_TIMEOUT_MS).await;
+                    if !*settled.read() {
+                        *screen.write() = Screen::BootError {
+                            detail: boot_timeout_detail(),
+                        };
+                    }
+                }
             });
-            *settings_sig.write() = settings;
+
+            // Settings/theme is cosmetic and tolerant: a failure here
+            // must not stop the app from starting, so it runs alongside
+            // identity rather than ahead of it.
+            spawn({
+                let mut settings = ctx2.settings;
+                async move {
+                    if let Ok(s) = invoke::<AppSettingsView>("settings_get", ()).await {
+                        crate::theme::apply_data_theme(if s.theme == "light" {
+                            "light"
+                        } else {
+                            "dark"
+                        });
+                        *settings.write() = s;
+                    }
+                }
+            });
+
             let status = invoke::<IdentityStatus>("identity_status", ()).await;
-            *screen.write() = boot_screen(status.as_ref().map(|_| ()).map_err(String::as_str));
-            if let Ok(status) = status {
-                let mut st = ctx2.identity_status;
-                st.set(status);
+            if let Ok(s) = &status {
+                *identity.write() = s.clone();
             }
+            *screen.write() = boot_screen(status.as_ref().map(|_| ()).map_err(String::as_str));
+            boot_settled.set(true);
+            watchdog.cancel();
         });
     });
 
@@ -396,23 +586,38 @@ fn App() -> Element {
                 }
             },
             style: "display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;",
-            match ctx.screen.read().clone() {
-                Screen::Boot => rsx! { BootSplash {} },
-                Screen::BootError { detail } => rsx! { BootErrorScreen { detail: detail.clone() } },
-                Screen::SeedVault { phrase, verify_indices, restore, has_identity } => rsx! {
-                    crate::screens::SeedVaultScreen {
-                        phrase: phrase.clone(),
-                        verify_indices: verify_indices.clone(),
-                        restore,
-                        has_identity,
-                    }
+            // Every screen renders inside an error boundary. A panic in
+            // a component's render otherwise leaves the LAST GOOD DOM in
+            // place, which for a boot-time panic means the splash stays
+            // on screen forever and looks exactly like a slow start.
+            // This turns "frozen with no explanation" into "failed,
+            // here is why, here is the way out".
+            ErrorBoundary {
+                handle_error: move |error: ErrorContext| {
+                    let detail = error
+                        .error()
+                        .map(|e| format!("{e}"))
+                        .unwrap_or_else(|| "unknown render failure".to_string());
+                    rsx! { RenderErrorScreen { detail } }
                 },
-                Screen::Canvas => rsx! { crate::screens::CanvasScreen {} },
-                Screen::GoalCreate => rsx! { crate::screens::GoalCreateScreen {} },
-                Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
-                Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
-                Screen::MorningBrief => rsx! { crate::screens::MorningBriefScreen {} },
-                Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
+                match ctx.screen.read().clone() {
+                    Screen::Boot => rsx! { BootSplash {} },
+                    Screen::BootError { detail } => rsx! { BootErrorScreen { detail: detail.clone() } },
+                    Screen::SeedVault { phrase, verify_indices, restore, has_identity } => rsx! {
+                        crate::screens::SeedVaultScreen {
+                            phrase: phrase.clone(),
+                            verify_indices: verify_indices.clone(),
+                            restore,
+                            has_identity,
+                        }
+                    },
+                    Screen::Canvas => rsx! { crate::screens::CanvasScreen {} },
+                    Screen::GoalCreate => rsx! { crate::screens::GoalCreateScreen {} },
+                    Screen::EveningCheckIn => rsx! { crate::screens::CheckInScreen {} },
+                    Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
+                    Screen::MorningBrief => rsx! { crate::screens::MorningBriefScreen {} },
+                    Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
+                }
             }
             if *ctx.nav_open.read() {
                 crate::screens::NavDrawer {}
@@ -427,11 +632,76 @@ fn App() -> Element {
     }
 }
 
+/// Render-panic fallback. Reached only when a screen's render throws;
+/// see the `ErrorBoundary` in `App`. Reloading the page is the honest
+/// offer here — the panic may be in a screen's own state, and a
+/// half-initialised component tree is not something to keep running.
+#[component]
+fn RenderErrorScreen(detail: String) -> Element {
+    rsx! {
+        div { class: "wl-directive-container",
+            h1 { class: "wl-serif-title", "This screen could not be drawn." }
+            p { class: "wl-body-muted", style: "margin-top: 10px;",
+                "The interface hit an internal error while rendering. Your directives and goals are untouched in local storage."
+            }
+            p { class: "wl-body-muted wl-mono", style: "margin-top: 10px;", "{detail}" }
+            button {
+                class: "wl-btn-primary",
+                style: "margin-top: 18px;",
+                onclick: move |_| { reload_page(); },
+                "Reload"
+            }
+        }
+    }
+}
+
+/// Full page reload, for the render-error screen's one recovery action.
+fn reload_page() {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_reload() { window.location.reload(); }
+  "#)]
+    extern "C" {
+        fn wl_reload();
+    }
+    wl_reload()
+}
+
+/// Boot splash. Counts elapsed seconds on purpose: a static "starting…"
+/// is indistinguishable from a frozen one, which is exactly how a
+/// wedged shell presented as an app that was merely busy. The counter
+/// dies with the component, so the happy path costs one 1 Hz interval
+/// for the few hundred milliseconds boot actually takes.
+#[component]
 fn BootSplash() -> Element {
+    let elapsed = use_signal(|| 0u32);
+    use_effect(move || {
+        let mut elapsed = elapsed;
+        spawn(async move {
+            // Chained `TimeoutFuture`s rather than `IntervalStream`: one
+            // timer type, no `futures` feature, and the loop dies with
+            // this effect the moment the splash unmounts.
+            loop {
+                gloo_timers::future::TimeoutFuture::new(1000).await;
+                elapsed += 1;
+            }
+        });
+    });
+    let secs = *elapsed.read();
     rsx! {
         div { class: "wl-directive-container",
             h1 { class: "wl-brief-greeting", "Worldline" }
             p { class: "wl-body-muted", "Establishing cryptographic session…" }
+            p { class: "wl-body-muted wl-mono", style: "margin-top: 8px;",
+                "{secs}s"
+            }
+            // Past a third of the budget, stop looking patient and say
+            // the wait is abnormal — the watchdog is about to act.
+            if secs * 1000 >= BOOT_TIMEOUT_MS / 3 {
+                p { class: "wl-body-muted", style: "margin-top: 10px;",
+                    "Taking longer than usual. The shell is not answering; this will report what went wrong."
+                }
+            }
         }
     }
 }
@@ -439,17 +709,34 @@ fn BootSplash() -> Element {
 /// Fail-closed boot (MVP-5): the shell could not answer. Never render
 /// a fresh-looking empty Home over a broken vault — say what failed and
 /// how to recover, without alarm red.
+///
+/// Retry is first because it is what almost always works: a shell that
+/// failed to answer once has usually failed transiently, and making the
+/// user relaunch to find that out is a punishment, not a safeguard.
+/// The transport is shown because "the window looks fine and is not
+/// talking to anything" is otherwise invisible.
 #[component]
 fn BootErrorScreen(detail: String) -> Element {
+    let ctx = use_context::<AppCtx>();
+    let retry = move |_| {
+        let mut attempt = ctx.boot_attempt;
+        attempt += 1;
+    };
     rsx! {
         div { class: "wl-directive-container",
             h1 { class: "wl-serif-title", "Storage could not be opened." }
             p { class: "wl-body-muted", style: "margin-top: 10px;",
-                "Worldline refused to start with an unreadable vault or database rather than risk writing over your data."
+                "Worldline refused to start rather than start wrong. Nothing has been written or changed."
             }
             p { class: "wl-body-muted wl-mono", style: "margin-top: 10px;", "{detail}" }
-            p { class: "wl-body-muted", style: "margin-top: 14px;",
-                "Recover by restoring your 12-word phrase, or wipe the application data directory to start over (this deletes local directives)."
+            p { class: "wl-body-muted wl-mono", style: "margin-top: 6px;",
+                "IPC transport: {transport()}"
+            }
+            div { style: "display: flex; flex-direction: column; gap: 8px; margin-top: 18px;",
+                button { class: "wl-btn-primary", onclick: retry, "Retry" }
+                p { class: "wl-body-muted", style: "margin-top: 6px;",
+                    "If retry does not help, restore your 12-word phrase, or wipe the application data directory to start over (this deletes local directives)."
+                }
             }
         }
     }
@@ -557,6 +844,53 @@ mod tests {
         assert_eq!(elapsed_secs(1000.0, 500.0), 0);
         // Sub-second precision truncates, it does not round up.
         assert_eq!(elapsed_secs(0.0, 999.0), 0);
+    }
+
+    /// The timeout message is the only thing a wedged boot has to say
+    /// for itself, so it has to carry the two facts that make the
+    /// failure diagnosable: how long it waited, and whether it was even
+    /// talking to a shell. The budget's own bounds are enforced by
+    /// `const _: () = assert!(…)` next to the constant, not here — a
+    /// constant does not need a runtime assertion to be checked.
+    #[test]
+    fn boot_failure_message_names_the_budget_and_the_transport() {
+        let detail = boot_timeout_message(BOOT_TIMEOUT_MS, "native");
+        // The message has to name the transport: a window that looks
+        // alive while it is not talking to anything is otherwise
+        // undiagnosable from the outside.
+        assert!(
+            detail.contains("transport") && detail.contains("native"),
+            "boot timeout detail must name the transport: {detail}"
+        );
+        assert!(
+            detail.contains(&(BOOT_TIMEOUT_MS / 1000).to_string()),
+            "boot timeout detail must state the budget: {detail}"
+        );
+        // The three transports are distinguishable in the output, which
+        // is the whole diagnostic value: "mock" means the shell bridge
+        // is missing and nothing you do is being saved.
+        for t in ["native", "mock", "none"] {
+            assert!(
+                boot_timeout_message(BOOT_TIMEOUT_MS, t).contains(t),
+                "transport {t} must be visible in the failure message"
+            );
+        }
+    }
+
+    /// A shell that answers is the only thing that opens the canvas, and
+    /// a shell that does not must never be papered over. Both halves,
+    /// because the second is the fail-closed rule the whole screen
+    /// exists to enforce.
+    #[test]
+    fn boot_routes_to_canvas_or_fails_closed_never_silently() {
+        assert_eq!(boot_screen(Ok(())), Screen::Canvas);
+        let failed = boot_screen(Err("vault: unreadable snapshot"));
+        match failed {
+            Screen::BootError { detail } => {
+                assert_eq!(detail, "vault: unreadable snapshot")
+            }
+            other => panic!("a failed boot must not render {other:?}"),
+        }
     }
 
     #[test]

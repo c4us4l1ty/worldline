@@ -3,7 +3,7 @@
 ## Commands
 
 ```bash
-cargo test --workspace        # THE verification gate (192 tests; 225 total with shell+UI)
+cargo test --workspace        # THE verification gate (192 tests; 231 total with shell+UI)
 cargo clippy --workspace      # must be warning-free
 cargo fmt --all               # run before committing
 ```
@@ -75,6 +75,40 @@ unless `dx serve --port 1420` is already up.
   not the `Wry` default, or the mock-runtime test app cannot register it.
 - Bearer tokens live only in `AppState.relay_token` (memory); re-handshake
   on HTTP 401 and retry once (`sync_now`). Session TTL is 1h server-side.
+
+## UI boot invariants (2026-09-27 — the app showed two frozen splashes)
+
+- **The wasm module can execute more than once.** `dx serve`'s
+  hot-reload re-imports it, and a debug build loads `devUrl`, so a
+  second execution used to `launch(App)` a second component tree into
+  the same `#main`: two roots, every shell command issued twice, and
+  two sets of tasks writing into two different copies of app state.
+  `app::main()` now claims the mount point first and returns without
+  launching if it is already claimed. **Do not remove the guard** — and
+  if you ever mount the app somewhere else, claim it there too.
+- **Boot is bounded, always.** `BOOT_TIMEOUT_MS` (15 s) arms a
+  watchdog before anything is awaited; the worst case is
+  `BootError` + Retry, never an unbounded splash. Its bounds are
+  `const _: () = assert!(…)` invariants, not tests.
+- **Boot steps are independent.** `settings_get` and `identity_status`
+  run concurrently. They used to be sequential, so one hung call meant
+  the other was never even attempted.
+- **Retry is a state change, not a remount.** It bumps
+  `ctx.boot_attempt`; the boot effect keys off that counter.
+- **`AppCtx` signals are owned by `ScopeId::APP` explicitly.** They are
+  `Copy` and written from detached `spawn`ed tasks, which run at the
+  runtime root scope — Dioxus warns about this on every build. The
+  warning is a false positive *because* the owner is the root scope, so
+  do not "fix" it by inheriting a nearer scope, and do not restructure
+  the signals without re-checking ownership.
+- **Every screen renders inside an `ErrorBoundary`.** A panic during
+  render otherwise leaves the last good DOM in place, which for a
+  boot-time panic means the splash stays forever and reads as "still
+  starting".
+- **`transport()` reports which IPC path resolved** (`native` /
+  `mock` / `none`) and is shown on the boot-failure screen. A window
+  running on the mock looks identical to a working one from outside,
+  and nothing you do is being saved.
 
 ## Architecture rules
 
