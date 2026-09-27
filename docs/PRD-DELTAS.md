@@ -2685,3 +2685,104 @@ compose screen's complexity track had both reached for `.wl-calibration`,
 and the track's `margin` was silently overriding the card's separator. The
 card is now `.wl-calibration-card`. **Someone with a browser should still
 look at these five screens before shipping them.**
+
+## A stray selector prefix cost dark mode its cards, and every lint passed (2026-09-27)
+
+Reported as "the dark mode doesn't match the light mode", with the Settings
+screen as the example. One rule, one line, and it is worth the space
+because **the interesting part is that the checks I had written all passed
+over it.**
+
+241. **`.wl-section` was silently light-mode-only.** `wl.css:612` carried a
+    bare `[data-theme="light"] ` with no declaration block. The CSS parser
+    binds such a prefix to the *next* rule, so this:
+
+    ```css
+    [data-theme="light"]        /* nothing follows it */
+
+    /* …section comment… */
+    .wl-section { background-color: …; border: …; border-radius: …;
+                  padding: 18px 16px; margin-bottom: 14px; }
+    ```
+
+    is not a syntax error — it is the valid rule
+    `[data-theme="light"] .wl-section { … }`. In dark mode those cards
+    therefore have **no background, no border, no radius, no padding and
+    no margin**. `.wl-section` is the container behind all four Settings
+    sections (Identity, Appearance, Intelligence, Sync) and is also used by
+    the ledger and the plan preview.
+
+    **Cause:** I removed the dead escape-modal rules with unanchored
+    Python regexes. The pattern `\]\.wl-kbd \{[^}]*\}` matched the *tail*
+    of `[data-theme="light"] .wl-kbd { … }`, deleted the block, and left
+    the prefix on its own line. The other twenty removals in that pass
+    were intended and were correct; this one was a single character-class
+    too greedy.
+
+242. **A class-existence lint cannot see a rule that got narrower.** This
+    is the part that generalises, and it is the argument for the new gate.
+
+    The four checks I wrote immediately after the first pass —
+    undefined custom property, duplicate selector, class-without-a-rule,
+    dead rule — **all passed on the broken file.** Every one of their
+    preconditions still held:
+
+    | check | why it passed |
+    |---|---|
+    | undefined token | the tokens were all still defined |
+    | duplicate selector | `.wl-section` was still unique |
+    | class without a rule | `.wl-section` still had a rule |
+    | dead rule | `.wl-section` is still used in four places |
+
+    The only thing that changed was the selector's **scope**, and nothing
+    short of comparing scopes notices that. A linter that asks "does this
+    class exist?" is structurally incapable of asking "is this rule as
+    broad as it was?" — so the fix was a check that diffs the selector set
+    against a baseline, not a better version of the existing checks.
+
+    `scripts/css-lint.py` therefore has two checks aimed at this class:
+
+    * **`dangling-theme-prefix`** — a `[data-theme="…"]` alone on a line.
+      This one has to run on the *raw* text, because once the parser
+      absorbs the prefix the damage is unrecoverable from the parsed
+      stylesheet: the result is a valid rule. Verified by reverting the
+      fix and re-running, which reports `wl.css:612` and names the
+      mechanism.
+    * **`themed-shadowed`** — a `[data-theme="light"] X` selector that is
+      new while `X` used to be unconditional. Catches the same bug one
+      step downstream, and forces a deliberate answer for every themed
+      rule that is added on purpose. Needs a baseline, so it is the
+      `--against` flag's reason to exist.
+
+243. **The linter's own first version had three false positives, all of
+    the same kind as the bug it was written to catch.** Recorded because
+    the fix is the pattern, and because a linter that cries wolf gets
+    ignored:
+
+    * `@keyframes` step selectors — `from` and `to` were reported as
+      class selectors defined four times each.
+    * `var(--wl-text-primary)` and `--wl-accent-coral` were read as markup
+      asking for `.wl-text-primary` and `.wl-accent-coral`; custom-property
+      *names* are not classes.
+    * and the good one: the custom-property stripper was
+      `re.sub(r"--[a-z0-9-]+", …)`, which ate the `--done` out of
+      `"wl-task-row--done"` and reported every BEM modifier in the file as
+      a dead rule. It needed `(?<![\w-])` so it strips only *leading*
+      `--`. A BEM modifier is also a `--` token, and that is not an
+      exotic coincidence — it is why the unanchored regex broke the
+      stylesheet too.
+
+244. **"The browser shows the old version" was a stale tab, not a stale
+    server.** `cargo tauri dev` runs `dx serve --port 1420`; the Tauri
+    window and a browser tab are two *separate* WebViews loading the same
+    URL, and the tab does not hot-reload. Proven rather than assumed:
+    `curl -sI` showed the served wasm at 49,713,226 bytes with an
+    on-disk `mtime` of 22:36, against a `tauri dev` start of 22:20 — so
+    the server was serving the current build and the tab predated it.
+
+    Recorded in AGENTS.md because it will recur and it is expensive to
+    re-diagnose: the debug wasm is ~49 MB at an unhashed path
+    (`/wasm/wl-ui_bg.wasm`), so a stale tab costs a hard reload to clear
+    and there is nothing to make a browser re-fetch it eagerly. **When
+    the browser and the Tauri window disagree, establish which is stale
+    before believing either.**

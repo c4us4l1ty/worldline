@@ -609,8 +609,6 @@ button:disabled { cursor: not-allowed; }
 }
 .wl-btn-escape:disabled { opacity: 0.5; }
 
-[data-theme="light"] 
-
 /* ==========================================================================
    6. Cards, fieldsets, and the value row
    ========================================================================== */

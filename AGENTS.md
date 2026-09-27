@@ -6,6 +6,7 @@
 cargo test --workspace        # THE verification gate (218 tests; 295 total with shell+UI)
 cargo clippy --workspace      # must be warning-free
 cargo fmt --all               # run before committing
+scripts/css-lint.py           # THE gate for any wl.css change (7 checks)
 ```
 
 - Desktop shell (`crates/wl-app`) is EXCLUDED from the workspace because it
@@ -54,6 +55,23 @@ unless `dx serve --port 1420` is already up.
   is how a dead `--wl-text-tertiary` inverted the control panel's hierarchy
   and how a cascade-ordering bug shipped a non-full-height sheet — both
   invisible in the source, both obvious rendered.
+- **`scripts/css-lint.py` gates every `wl.css` change** (7 checks, ~1s).
+  Run it before committing CSS; `--against <ref>` diffs the selector set
+  against a known-good baseline. Its `dangling-theme-prefix` and
+  `themed-shadowed` checks exist because a class-existence lint cannot
+  see a rule that got *narrower*: after the parser absorbs a stray
+  `[data-theme="light"]` prefix into the following rule, `.wl-section` is
+  still defined, still used, still unique and still not dead. Every other
+  check passes and dark mode loses the card entirely (PRD delta 241).
+- **A browser tab open on `:1420` is not evidence about the current
+  build.** `cargo tauri dev` starts `dx serve`; the tab is a *separate*
+  WebView loading the same URL, and it does not hot-reload. The debug wasm
+  is ~49 MB at an unhashed path (`/wasm/wl-ui_bg.wasm`), so a stale tab
+  costs a hard reload (Ctrl+Shift+R) to clear. When the browser and the
+  Tauri window disagree, check *which is stale* before believing either:
+  `curl -sI` the asset and compare `content-length` and `last-modified`
+  against the file in `ui/target/dx/wl-ui/*/web/public/`. The Tauri window
+  is usually the current one, because it reloaded with the build.
 
 ## Shell conventions (hard-won — do not regress)
 
