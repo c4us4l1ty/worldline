@@ -124,6 +124,8 @@ pub fn ModelPicker(
     models: Vec<ModelInfoView>,
     recommended: Vec<String>,
     cached: bool,
+    loading: bool,
+    error: Option<String>,
     on_pick: EventHandler<String>,
     on_close: EventHandler<()>,
 ) -> Element {
@@ -177,6 +179,15 @@ pub fn ModelPicker(
                 p { class: "wl-picker-sub",
                     "{provider} · {models.len()} models"
                     if cached { span { class: "wl-picker-cached", " · cached" } }
+                    // Say so when the numbers are canned. Under `dx serve`
+                    // every shell command is replaced by
+                    // `invoke-shim.js`, so the list is invented and no API
+                    // call is made — and a fabricated model list looks
+                    // exactly like a real one from the outside. This cost
+                    // a whole test cycle once already.
+                    if crate::app::transport() == "mock" {
+                        span { class: "wl-picker-mock", " · MOCK DATA" }
+                    }
                 }
 
                 // Search. `oninput` rather than a submit, and the field
@@ -194,10 +205,27 @@ pub fn ModelPicker(
                     }
                 }
 
+                // The sheet covers the page that would otherwise show
+                // these, so it has to render them itself. "Loading" and
+                // "this failed" are different states and neither is the
+                // same as "the provider has no models" — conflating them
+                // is how a failed fetch reads as an empty catalog.
+                if let Some(err) = error.as_ref() {
+                    p { class: "wl-form-error", "{err}" }
+                } else if loading {
+                    p { class: "wl-picker-empty", "Loading models from {provider}…" }
+                }
+
                 div { class: "wl-picker-list",
                     if models.is_empty() {
-                        p { class: "wl-picker-empty",
-                            "This provider returned no models. Use the manual field below."
+                        if !loading && error.is_none() {
+                            p { class: "wl-picker-empty",
+                                if provider.is_empty() {
+                                    "Choose a provider first."
+                                } else {
+                                    "No models loaded yet. Close, set a key for {provider}, then reopen — or enter an id below."
+                                }
+                            }
                         }
                     } else if results.is_empty() {
                         p { class: "wl-picker-empty",

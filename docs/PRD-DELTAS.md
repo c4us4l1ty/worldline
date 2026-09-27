@@ -1296,15 +1296,25 @@ picker the report actually asked for.
     Google 403 now says *"key not permitted: … — Google now requires an
     API-restricted key"*.
 
-141. **`response_format` was sent unconditionally, and ~12% of models
-    reject it.** This is the defect the catalog also fixes. The live
-    OpenRouter catalog was pulled and measured: **458 models, 443 of them
-    text-output, and `response_format` advertised by 391.** Four
-    (`openrouter/auto`, `openrouter/fusion`, `openrouter/pareto-code`,
-    `openrouter/bodybuilder`) advertise no parameters at all. So picking a
-    flagship such as `anthropic/claude-sonnet-4` — `rf=False` in the live
-    data — failed on the *request shape*, with nothing on screen to
-    explain it.
+141. **`response_format` was sent unconditionally, and ~12% of models do
+    not advertise support for it.** The live OpenRouter catalog was pulled
+    and measured: **458 models, 443 of them text-output, and
+    `response_format` advertised by 391.** Four (`openrouter/auto`,
+    `openrouter/fusion`, `openrouter/pareto-code`,
+    `openrouter/bodybuilder`) advertise no parameters at all, and
+    `anthropic/claude-sonnet-4` — a flagship — is `rf=False`.
+
+    **Corrected after a live probe.** This was first written here as
+    "~12% of models reject it", on the reasoning that an unadvertised
+    parameter is a rejected one. A real call on
+    `nvidia/nemotron-3.5-lightning:free` (also `rf=False`, zero-priced)
+    returned **HTTP 200 with the field present** — OpenRouter tolerated
+    it. So the metadata marks *unsupported* parameters, not ones
+    guaranteed to 400, and the failure is model-specific rather than
+    universal. The fix is still correct and still worth having: it stops
+    sending a field the provider has said it does not support. The
+    original claim was an inference presented as a measurement, which is
+    the wrong way round.
 
     `ProviderAdapter::OpenAiCompat` now carries `json_mode`, set from
     `catalog::json_mode_for`, and omits the field when the catalog says
@@ -1408,3 +1418,64 @@ trimmed slice of the real OpenRouter payload, the error mapper's status
 branches and provider-specific hint, `filter_models` ranking, the row cap,
 context formatting, the three new mock-runtime IPC tests, and a
 `json_mode` request-shape test.
+
+## Catalog bug found by testing against the live API (2026-09-27)
+
+The picker was reported as "says 92 models loaded but I can't search or
+see them". Both halves of that sentence were true, and neither was the
+fault the report assumed.
+
+147. **The tier row wiped the catalog it was about to display.** The
+    `onclick` set `*catalog.write() = None` before opening the sheet,
+    with a comment justifying it as "show a loading state rather than a
+    stale provider's models for one frame". There was no loading state:
+    the load effect only re-runs on a provider or key change, so nothing
+    refetched after the click. Every open therefore produced an empty
+    sheet, and the page behind it — which had the count — said "92 models
+    loaded". The two statements contradicted each other on one screen,
+    which is what made it read as broken rather than empty.
+
+    The row now fetches **only if the catalog is absent** and otherwise
+    opens straight into the list it already has. The sheet also renders
+    `loading` and `error` itself now, because it covers the page that used
+    to show them; "loading", "this failed" and "the provider has no
+    models" are three states and conflating them is how a failed fetch
+    reads as an empty catalog.
+
+148. **"92 models" was the browser mock, not the provider.** OpenRouter
+    serves **458** models; the parser keeps **443** (verified by
+    replicating its filter against the live payload). Ninety-two is
+    `invoke-shim.js`'s fixture — 12 hand-written families plus 80 padding
+    rows. Under `dx serve` every shell command is replaced by canned
+    data, so the list was fabricated and **no API request was made at
+    all**. A mock list is indistinguishable from a real one from the
+    outside, which is the same class of problem as delta #128 (a window
+    rendering on mock data while looking perfectly healthy).
+
+    The sheet's subtitle now renders `· MOCK DATA` in coral when
+    `app::transport()` reports `mock`, so this cannot mislead the next
+    test cycle. The real path needs `cargo tauri dev` (or a release
+    build) — a plain `cargo build` binary loads `devUrl` and shows the
+    browser's own error page, per the table in AGENTS.md.
+
+149. **The live path was verified end to end with the supplied dummy
+    key**, on zero-priced models only:
+    * `GET /api/v1/models` → HTTP 200, 751 735 bytes, 458 models,
+      `total_count` 458 — and identically 200 *without* an
+      `Authorization` header, confirming the list is public while the
+      key-gate remains a deliberate simplification (delta #144).
+    * `POST /api/v1/chat/completions` with
+      `model: "liquid/lfm-2.5-2.6b:free"` (zero-priced,
+      `response_format` advertised) → **HTTP 200**, and the body matched
+      what `ProviderAdapter::extract_text` reads:
+      `choices[0].message.content` = `{"ok":true}`. So the base URL, the
+      `Authorization: Bearer` header, the request shape and the response
+      contract are all confirmed against the real service rather than
+      assumed.
+    * The same call against `nvidia/nemotron-3.5-lightning:free` (also
+      zero-priced, `rf=False`) with `response_format` present also
+      returned 200 — which corrected entry 141 above.
+
+    Not exercised: Google's and bytez.com's model endpoints (no keys),
+    and a full `master_plan` round trip through the shell (needs the
+    assembled binary). The parsing half of all three is fixture-tested.

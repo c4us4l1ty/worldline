@@ -868,6 +868,9 @@ body {
   flex-shrink: 0;
 }
 .wl-picker-cached { opacity: 0.7; }
+/* "MOCK DATA" — visible proof that the list came from
+   `invoke-shim.js` and not from the provider. */
+.wl-picker-mock { color: var(--wl-accent-coral); }
 .wl-picker-search { flex-shrink: 0; margin-bottom: 10px; }
 .wl-picker-input { font-family: var(--font-mono); font-size: 13px; }
 .wl-picker-list {

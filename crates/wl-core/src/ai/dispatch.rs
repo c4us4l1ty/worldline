@@ -54,13 +54,20 @@ pub enum ProviderAdapter {
         model: String,
         /// Whether to send `response_format: {"type":"json_object"}`.
         ///
-        /// This is per-model, not per-provider. Sending it
-        /// unconditionally was a latent 400: of OpenRouter's 443
+        /// This is per-model, not per-provider. Of OpenRouter's 443
         /// text-output models only 391 advertise the parameter, and a
         /// handful (`openrouter/auto`, `openrouter/fusion`, …) advertise
-        /// none at all — so picking a flagship such as
-        /// `anthropic/claude-sonnet-4` failed on a request shape rather
-        /// than on anything the user could see.
+        /// none at all, so the field is not universally accepted and a
+        /// model that rejects it fails on the request *shape* — with
+        /// nothing on screen to explain it.
+        ///
+        /// How universal that failure is, honestly: a live probe on
+        /// 2026-09-27 showed OpenRouter *accepting* the field on
+        /// `nvidia/nemotron-3.5-lightning:free`, which does not advertise
+        /// it. So the metadata marks unsupported parameters, not ones
+        /// guaranteed to 400, and this flag removes a field the provider
+        /// has told us it does not support rather than fixing a
+        /// universal break.
         ///
         /// Derived from the live catalog via
         /// [`crate::ai::catalog::json_mode_for`], which only turns it

@@ -525,12 +525,20 @@ pub fn SettingsScreen() -> Element {
                             onclick: {
                                 let t = tier;
                                 move |_| {
-                                    // Drop any list we were holding so
-                                    // the sheet shows a loading state
-                                    // rather than a stale provider's
-                                    // models for one frame.
-                                    *catalog.write() = None;
                                     catalog_error.set(None);
+                                    // Fetch only if we have nothing. This
+                                    // used to null the catalog on every
+                                    // open, on the reasoning that the
+                                    // sheet should show a loading state —
+                                    // but nothing refetched it, because
+                                    // the load effect only reacts to a
+                                    // provider or key change. So the
+                                    // sheet opened empty and reported "no
+                                    // models" while the page behind it
+                                    // said "92 models loaded".
+                                    if catalog.peek().is_none() {
+                                        refresh_catalog(false);
+                                    }
                                     *open_picker.write() = Some(t);
                                 }
                             },
@@ -783,6 +791,8 @@ pub fn SettingsScreen() -> Element {
                     .map(|c| c.recommended.clone())
                     .unwrap_or_default(),
                 cached: catalog.read().as_ref().is_some_and(|c| c.cached),
+                loading: *catalog_busy.read(),
+                error: catalog_error.read().clone(),
                 on_pick: move |id: String| {
                     // Writes the draft only; Save settings persists it,
                     // exactly like every other field on this page.
