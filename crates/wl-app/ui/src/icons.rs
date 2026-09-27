@@ -157,3 +157,54 @@ pub fn IconSun() -> Element {
         },
     )
 }
+
+/// Entropy — a run that decayed.
+///
+/// The control-panel's Entropy Log: every directive that was bailed out of.
+/// The mark is deliberately NOT a warning triangle. This product bans red
+/// failure states outright (skill §30: skips are "velocity adjustments",
+/// never alarms), so a hazard sign would contradict the one rule the whole
+/// visual language is built on. It is also not a clock or a magnifier,
+/// which both belong to other pages.
+///
+/// What it is: a trace that rises, breaks, and resumes lower. The gap is
+/// the whole idea — the run did not fail loudly, it lost its line and
+/// picked one up somewhere else. Drawn on the same 18-unit grid as the
+/// menu so the two canvas-adjacent marks share a weight.
+#[component]
+pub fn IconEntropy() -> Element {
+    frame(
+        "wl-icon-entropy",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M2.5 12.5 6 9l2.5 2.2" }
+            path { d: "M11.5 9.5 15.5 6" }
+            path { d: "M6 9 8.5 11.2 10 9.5" }
+        },
+    )
+}
+
+/// Velocity — a gauge arc with a needle.
+///
+/// The control panel's Trajectory page: required velocity per day against
+/// what is actually being observed. A gauge rather than a rising line
+/// because `IconEntropy` already owns the "line that goes somewhere" idea,
+/// and the two sit twelve pixels apart in the same drawer — they have to
+/// be told apart at a glance, not parsed.
+///
+/// The needle is drawn at roughly 2 o'clock, where the needle points when
+/// the user is ahead of the required rate. A gauge resting at its low
+/// corner would read as failure, which is the same mistake the entropy
+/// mark avoids.
+#[component]
+pub fn IconVelocity() -> Element {
+    frame(
+        "wl-icon-velocity",
+        "0 0 18 18",
+        rsx! {
+            path { d: "M2.75 13.25a7.5 7.5 0 0 1 12.5 0" }
+            path { d: "M9 13.25 12.4 7.9" }
+            path { d: "M9 13.25h.01" }
+        },
+    )
+}

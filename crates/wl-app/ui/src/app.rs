@@ -341,6 +341,51 @@ pub struct ModelListView {
     pub truncated_from: Option<usize>,
 }
 
+/// One active goal with its milestone tally, for the drawer's
+/// "Active Worldlines" readout (`list_goals`).
+///
+/// The counts are the shell's, not a UI computation: the store is the
+/// only thing that knows what counts as complete after a merge, and a
+/// progress bar that disagrees with the canvas is worse than none.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct GoalView {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub target_date: Option<String>,
+    #[serde(default)]
+    pub milestone_done: usize,
+    #[serde(default)]
+    pub milestone_total: usize,
+}
+
+/// One row of the Entropy Log (`entropy_log`).
+///
+/// `still_blocked` is the whole reason this is a flag and not a separate
+/// list: a directive bailed out for `external_dependency` is parked in
+/// `blocked` and never recovers (PRD delta 33), while the other two
+/// reasons resolve on the spot — scope downsizes and requeues, energy
+/// skips. So the blocked ones are the residue, and they get badged in
+/// place rather than shown twice.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct EntropyView {
+    pub id: String,
+    #[serde(default)]
+    pub goal_title: String,
+    #[serde(default)]
+    pub directive_id: String,
+    #[serde(default)]
+    pub directive_title: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub still_blocked: bool,
+}
+
 // ---------------------------------------------------------------------------
 // App state & routing (screen enum — no URL routing needed for the
 // single-window terminal)
@@ -370,6 +415,14 @@ pub enum Screen {
     Dormant,
     MorningBrief,
     Settings,
+    /// Control panel → System Telemetry. The escape-hatch ledger, read
+    /// back: what was bailed out of, why, and which of those are still
+    /// stuck. Opened from the drawer, never on its own.
+    EntropyLog,
+    /// Control panel → System Telemetry. Required velocity against
+    /// observed, which used to be reachable only from inside the evening
+    /// audit — i.e. after the fact, and only if you remembered to log.
+    Trajectory,
 }
 
 /// Where a boot lands, given whether the shell answered.
@@ -650,6 +703,8 @@ fn App() -> Element {
                     Screen::Dormant => rsx! { crate::screens::DormantScreen {} },
                     Screen::MorningBrief => rsx! { crate::screens::MorningBriefScreen {} },
                     Screen::Settings => rsx! { crate::screens::SettingsScreen {} },
+                    Screen::EntropyLog => rsx! { crate::screens::EntropyLogScreen {} },
+                    Screen::Trajectory => rsx! { crate::screens::TrajectoryScreen {} },
                 }
             }
             if *ctx.nav_open.read() {

@@ -1,7 +1,12 @@
-//! The Stackelberg Single-Directive Canvas (skill §4.A/B/C, US-3).
+//! The Stackelberg Single-Directive Canvas (skill §4.A/B, US-3).
 //!
-//! Renders exactly ONE directive. ⌘+Enter completes; Escape opens the
-//! frictionful escape hatch modal requiring categorization.
+//! Renders exactly ONE directive and, since 2026-09-27, exactly ONE
+//! control: the hamburger. The footer that held "Complete Directive" and
+//! "Bailout / Blocked" is gone — the canvas is the directive, not a
+//! dashboard — so completion is `⌘+Enter` and the escape hatch is
+//! `Escape`, both still bound above. The escape modal itself is
+//! untouched: it is still the frictionful categorisation, just reached by
+//! key rather than by a second button competing with the card.
 
 use dioxus::prelude::*;
 
@@ -30,7 +35,6 @@ pub fn CanvasScreen() -> Element {
     });
 
     let d = ctx.directive.read().clone();
-    let unavailable = d.is_none() || *ctx.directive_busy.read();
     let escaping = *ctx.escape_open.read();
 
     rsx! {
@@ -116,26 +120,6 @@ pub fn CanvasScreen() -> Element {
             }
         }
 
-        // Action controls (skill §4.C)
-        footer { class: "wl-actions",
-            button { class: "wl-btn-primary",
-                disabled: unavailable || escaping,
-                onclick: move |_| complete_current(&ctx),
-                span { "Complete Directive" }
-                kbd { class: "wl-kbd", "⌘↵" }
-            }
-            button { class: "wl-btn-escape",
-                disabled: unavailable,
-                onclick: move |_| {
-                    if !*ctx.directive_busy.peek() && ctx.directive.peek().is_some() {
-                        let mut s = ctx.escape_open;
-                        s.set(true);
-                    }
-                },
-                span { "Bailout / Blocked" }
-                kbd { class: "wl-kbd-subtle", "Esc" }
-            }
-        }
 
         // Frictionful escape hatch modal (skill §4.C, §5 "Do")
         if escaping {

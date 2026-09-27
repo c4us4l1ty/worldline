@@ -1316,3 +1316,294 @@ fn an_oversized_write_is_rejected_rather_than_enqueued_undrainable() {
         "no oversized op may reach the outbox"
     );
 }
+
+#[test]
+fn active_goals_with_progress_counts_only_completed_milestones() {
+    let r = setup();
+    let (g, ms) = goal_with_milestones(&r);
+    r.set_milestone_status(&ms[0].id, MilestoneStatus::Completed, None)
+        .unwrap();
+    r.set_milestone_status(&ms[1].id, MilestoneStatus::Active, None)
+        .unwrap();
+    let rows = r.active_goals_with_progress().unwrap();
+    assert_eq!(rows.len(), 1);
+    let p = &rows[0];
+    assert_eq!(p.id, g.id);
+    assert_eq!(p.title, "Ship Worldline v0.1");
+    assert_eq!(p.target_date.as_deref(), Some("2026-10-01"));
+    // `active` is not `completed`: a half-run milestone is not progress.
+    assert_eq!((p.milestones_done, p.milestones_total), (1, 2));
+}
+
+#[test]
+fn active_goals_with_progress_keeps_a_goal_with_no_milestones() {
+    let r = setup();
+    let g = r.create_goal("Unplanned", None, None, None).unwrap();
+    let rows = r.active_goals_with_progress().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, g.id);
+    assert_eq!(rows[0].target_date, None);
+    assert_eq!((rows[0].milestones_done, rows[0].milestones_total), (0, 0));
+}
+
+#[test]
+fn active_goals_with_progress_excludes_achieved_and_archived_goals() {
+    let r = setup();
+    let kept = r.create_goal("Live", None, None, None).unwrap();
+    let achieved = r.create_goal("Shipped", None, None, None).unwrap();
+    let archived = r.create_goal("Dropped", None, None, None).unwrap();
+    r.set_goal_status(&achieved.id, GoalStatus::Achieved, None)
+        .unwrap();
+    r.set_goal_status(&archived.id, GoalStatus::Archived, None)
+        .unwrap();
+    let rows = r.active_goals_with_progress().unwrap();
+    assert_eq!(
+        rows.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec![kept.id.as_str()],
+        "only `active` goals belong in the panel's goal list"
+    );
+}
+
+#[test]
+fn active_goals_with_progress_is_newest_first() {
+    let r = setup();
+    let a = r.create_goal("First", None, None, None).unwrap();
+    let b = r.create_goal("Second", None, None, None).unwrap();
+    let c = r.create_goal("Third", None, None, None).unwrap();
+    let rows = r.active_goals_with_progress().unwrap();
+    let order: Vec<&str> = rows.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(order, vec![c.id.as_str(), b.id.as_str(), a.id.as_str()]);
+}
+
+#[test]
+fn bailout_log_round_trips_every_reason_and_joins_the_goal() {
+    let r = setup();
+    let (g, ms) = goal_with_milestones(&r);
+    let d1 = r
+        .create_directive(
+            &ms[0].id,
+            "Client sign-off",
+            None,
+            30,
+            1,
+            "2026-09-13",
+            &[],
+            None,
+        )
+        .unwrap();
+    let d2 = r
+        .create_directive(
+            &ms[1].id,
+            "Rewrite the parser",
+            None,
+            30,
+            1,
+            "2026-09-13",
+            &[],
+            None,
+        )
+        .unwrap();
+    let d3 = r
+        .create_directive(&ms[1].id, "Long day", None, 30, 1, "2026-09-13", &[], None)
+        .unwrap();
+    let recorded = [
+        r.record_bailout(
+            &d1.id,
+            BailoutReason::ExternalDependency,
+            Some("awaiting client"),
+            None,
+        )
+        .unwrap(),
+        r.record_bailout(&d2.id, BailoutReason::MiscalculatedScope, None, None)
+            .unwrap(),
+        r.record_bailout(&d3.id, BailoutReason::EnergyDepletion, None, None)
+            .unwrap(),
+    ];
+
+    let rows = r.bailout_log(10).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            recorded[2].id.as_str(),
+            recorded[1].id.as_str(),
+            recorded[0].id.as_str()
+        ],
+        "the ledger must read newest-first"
+    );
+    let by_id = |id: &str| rows.iter().find(|e| e.id == id).unwrap();
+    let mut reasons: Vec<BailoutReason> = rows.iter().map(|e| e.reason).collect();
+    reasons.sort_by_key(|reason| reason.as_str());
+    assert_eq!(
+        reasons,
+        vec![
+            BailoutReason::EnergyDepletion,
+            BailoutReason::ExternalDependency,
+            BailoutReason::MiscalculatedScope,
+        ],
+        "every CHECK-permitted reason must survive the enum mapping"
+    );
+    for b in &recorded {
+        let e = by_id(&b.id);
+        assert_eq!(e.reason, b.reason);
+        assert_eq!(e.note, b.note);
+        assert_eq!(e.goal_id, g.id);
+        assert_eq!(e.goal_title, "Ship Worldline v0.1");
+    }
+    assert_eq!(by_id(&recorded[0].id).directive_id, d1.id);
+    assert_eq!(by_id(&recorded[0].id).directive_title, "Client sign-off");
+    assert_eq!(by_id(&recorded[1].id).directive_title, "Rewrite the parser");
+    assert_eq!(by_id(&recorded[2].id).directive_title, "Long day");
+}
+
+#[test]
+fn bailout_log_flags_only_the_directives_still_parked() {
+    // Engine semantics decide which bailouts are permanent: an external
+    // dependency blocks the directive for good, a miscalculated scope
+    // is requeued, and an energy bailout is skipped. The panel badges on
+    // current state, so the reason alone must not set the flag.
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let parked = r
+        .create_directive(
+            &ms[0].id,
+            "Waiting on vendor",
+            None,
+            30,
+            1,
+            "2026-09-13",
+            &[],
+            None,
+        )
+        .unwrap();
+    let requeued = r
+        .create_directive(&ms[0].id, "Resized", None, 30, 1, "2026-09-13", &[], None)
+        .unwrap();
+    let skipped = r
+        .create_directive(&ms[1].id, "Ran dry", None, 30, 1, "2026-09-13", &[], None)
+        .unwrap();
+    r.set_directive_state(&parked.id, DirectiveState::Blocked, None)
+        .unwrap();
+    r.set_directive_state(&requeued.id, DirectiveState::Queued, None)
+        .unwrap();
+    r.set_directive_state(&skipped.id, DirectiveState::Skipped, None)
+        .unwrap();
+    r.record_bailout(&parked.id, BailoutReason::ExternalDependency, None, None)
+        .unwrap();
+    r.record_bailout(&requeued.id, BailoutReason::MiscalculatedScope, None, None)
+        .unwrap();
+    r.record_bailout(&skipped.id, BailoutReason::EnergyDepletion, None, None)
+        .unwrap();
+
+    let rows = r.bailout_log(10).unwrap();
+    let flag = |id: &str| {
+        rows.iter()
+            .find(|e| e.directive_id == id)
+            .unwrap()
+            .still_blocked
+    };
+    assert!(flag(&parked.id));
+    assert!(!flag(&requeued.id));
+    assert!(!flag(&skipped.id));
+}
+
+#[test]
+fn bailout_log_derives_a_well_formed_local_date() {
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let d = r
+        .create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", &[], None)
+        .unwrap();
+    let b = r
+        .record_bailout(&d.id, BailoutReason::EnergyDepletion, None, None)
+        .unwrap();
+    let rows = r.bailout_log(10).unwrap();
+    let date = rows[0].date.clone();
+    assert!(
+        chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok(),
+        "derived date {date:?} is not YYYY-MM-DD"
+    );
+    // Recorded moments ago, so it is today — allow the midnight rollover.
+    let today = today_local();
+    let yesterday = date_plus_days(&today, -1).unwrap();
+    assert!(
+        date == today || date == yesterday,
+        "expected {today:?} (or {yesterday:?} across a rollover), got {date:?}"
+    );
+
+    // A degenerate clock (physical 0 — what migration 0004 backfills)
+    // must degrade to the epoch, not panic and not drop the row.
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE bailouts SET hlc_timestamp = '00000000000000000000.00000.00000' WHERE id = ?1",
+            [&b.id],
+        )
+        .unwrap();
+    let rows = r.bailout_log(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        chrono::NaiveDate::parse_from_str(&rows[0].date, "%Y-%m-%d").is_ok(),
+        "a zeroed clock must still yield a parseable date, got {:?}",
+        rows[0].date
+    );
+}
+
+#[test]
+fn bailout_log_clamps_rather_than_rejects_an_oversized_limit() {
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let d = r
+        .create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", &[], None)
+        .unwrap();
+    r.record_bailout(&d.id, BailoutReason::EnergyDepletion, None, None)
+        .unwrap();
+    assert!(r.bailout_log(0).unwrap().is_empty());
+    // A panel passing `usize::MAX` (e.g. "show everything") must get the
+    // ledger, not a `StoreError::Invalid` it cannot act on.
+    assert_eq!(r.bailout_log(usize::MAX).unwrap().len(), 1);
+}
+
+#[test]
+fn bailout_log_maps_a_corrupt_reason_to_an_error_not_a_panic() {
+    // The CHECK constraint is the first line of defence, but the mapper
+    // is what a row that predates it (or arrives via remote LWW apply)
+    // hits — it must surface `BadEnum` as a store error, never abort.
+    let r = setup();
+    let (_, ms) = goal_with_milestones(&r);
+    let d = r
+        .create_directive(&ms[0].id, "T", None, 10, 1, "2026-09-13", &[], None)
+        .unwrap();
+    let b = r
+        .record_bailout(&d.id, BailoutReason::EnergyDepletion, None, None)
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE bailouts RENAME TO bailouts_guarded;
+             CREATE TABLE bailouts (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 directive_id TEXT NOT NULL,
+                 reason TEXT NOT NULL,
+                 note TEXT,
+                 hlc_timestamp TEXT NOT NULL
+             );
+             INSERT INTO bailouts SELECT * FROM bailouts_guarded;",
+        )
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE bailouts SET reason = 'not_a_reason' WHERE id = ?1",
+            [&b.id],
+        )
+        .unwrap();
+    let err = r.bailout_log(10);
+    assert!(
+        matches!(err, Err(store::StoreError::Sqlite(_))),
+        "a corrupt reason must map to a store error, got {err:?}"
+    );
+}

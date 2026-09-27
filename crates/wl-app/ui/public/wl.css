@@ -1040,14 +1040,15 @@ body {
 
 /* ==========================================================================
    C. Action Controls & Escape Hatch (skill §4.C)
-   ========================================================================== */
-.wl-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-top: 16px;
-  flex-shrink: 0;
-}
+   ==========================================================================
+   `.wl-actions` (the canvas footer holding Complete Directive and
+   Bailout / Blocked) was removed 2026-09-27. The canvas is now the
+   directive and nothing else: completion is ⌘+Enter, the escape hatch is
+   Escape, and the hamburger is the only control on the surface. The
+   buttons themselves survive — `.wl-btn-primary` and `.wl-btn-escape` are
+   still the CTA and the frictionful bail on the compose, briefing and
+   dormant screens. `.wl-actions-row` is a different, unrelated class
+   (the compose screen's button pair) and is untouched. */
 .wl-btn-primary {
   width: 100%;
   height: 52px;
@@ -1551,43 +1552,308 @@ body {
      the product's one logotype. */
   color: var(--wl-cta-bg);
 }
-.wl-nav-spacer { flex: 1; min-height: 24px; }
-.wl-nav-actions {
+
+/* --------------------------------------------------------------------------
+   Control panel body (2026-09-27).
+
+   The sheet is now a scroll column: a fixed top bar, a scrolling middle
+   holding the primary action plus two groups, and a fixed Settings row at
+   the bottom. The old design pinned two big buttons to the floor with a
+   `flex: 1` spacer above them, which is what left the void — the spacer
+   *was* the layout. `flex-shrink: 0` on the top and foot is what keeps
+   Settings reachable once a user has six goals and an entropy log. */
+.wl-nav-top {
   display: flex;
-  flex-direction: row;
-  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
 }
-.wl-nav-btn {
-  flex: 1;
-  height: 52px;
-  border-radius: var(--wl-radius-btn);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
+.wl-nav-close {
+  /* There is no global `button` reset in this file — every button class
+     carries its own background and border. Omitting them painted the
+     UA's default light button chrome inside a graphite sheet. */
+  background: none;
+  border: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform var(--duration-instant) var(--ease-tactile),
-              filter var(--duration-instant) var(--ease-tactile);
-}
-/* Icons are inline SVG, so they need an explicit box; `font-size` above
-   only sizes the one remaining text glyph. */
-.wl-nav-btn svg { display: block; }
-.wl-nav-btn:hover { filter: brightness(1.06); }
-.wl-nav-btn:active { transform: scale(0.97); }
-.wl-nav-btn-create {
-  background-color: var(--wl-accent-coral);
-  color: var(--wl-canvas);
-  border: none;
-}
-.wl-nav-btn-settings {
-  /* `--wl-surface-high`, one step above the sheet's `--wl-surface-card`.
-     The spec once said `--wl-surface-card` here, which would have made the
-     button invisible against the drawer it sits on. */
-  background-color: var(--wl-surface-high);
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
   color: var(--wl-text-secondary);
-  border: 1px solid var(--wl-border-subtle);
+  cursor: pointer;
+  transition: background-color var(--duration-instant) var(--ease-tactile),
+              color var(--duration-instant) var(--ease-tactile);
 }
+.wl-nav-close:hover {
+  background-color: var(--wl-surface-high);
+  color: var(--wl-text-primary);
+}
+.wl-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  margin: 14px 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* The primary action, mirroring the reference's highlighted top row. It is
+   the ONE coral surface in the drawer — the beacon, used once. */
+.wl-nav-primary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  border-radius: var(--wl-radius-btn);
+  background-color: var(--wl-surface-high);
+  color: var(--wl-text-primary);
+  font-size: 15px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-nav-primary:hover { background-color: var(--wl-surface-elevated); }
+.wl-nav-primary-glyph {
+  font-size: 17px;
+  line-height: 1;
+  color: var(--wl-accent-coral);
+}
+
+/* Grouped read-out rows. */
+.wl-nav-section { display: flex; flex-direction: column; gap: 2px; }
+.wl-nav-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 4px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--wl-text-tertiary);
+}
+/* `dx serve` fabricates every command response, so a worldline list is
+   invented rather than queried. Delta 148 paid for exactly this ambiguity
+   once with the model catalog; the marker is the fix. */
+.wl-nav-mock {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--wl-accent-coral);
+}
+.wl-nav-row {
+  background: none;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 38px;
+  padding: 0 8px;
+  border-radius: var(--wl-radius-sm);
+  color: var(--wl-text-primary);
+  font-size: 15px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-nav-row:hover { background-color: var(--wl-surface-high); }
+.wl-nav-row-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  flex-shrink: 0;
+  color: var(--wl-text-secondary);
+}
+.wl-nav-row-label { flex: 1; min-width: 0; }
+.wl-nav-chevron {
+  font-size: 17px;
+  line-height: 1;
+  color: var(--wl-text-tertiary);
+  flex-shrink: 0;
+}
+.wl-nav-empty {
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--wl-text-tertiary);
+}
+
+/* Active Worldlines — a readout, deliberately not a button: there is no
+   hover state and no pointer cursor, because tapping one does nothing. */
+.wl-worldline { padding: 7px 8px 9px; }
+.wl-worldline-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.wl-worldline-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--wl-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wl-worldline-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--wl-text-tertiary);
+}
+.wl-worldline-track {
+  height: 3px;
+  border-radius: 2px;
+  background-color: var(--wl-surface-high);
+  overflow: hidden;
+}
+.wl-worldline-fill {
+  height: 100%;
+  border-radius: 2px;
+  background-color: var(--wl-cta-bg);
+  transition: width var(--duration-settle) var(--ease-tactile);
+}
+.wl-nav-more {
+  padding: 6px 8px 0;
+  font-size: 10px;
+  color: var(--wl-text-tertiary);
+}
+
+.wl-nav-foot {
+  flex-shrink: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--wl-border-subtle);
+}
+
+/* ==========================================================================
+   Entropy Log (control panel → System Telemetry)
+   ========================================================================== */
+.wl-entropy-summary {
+  margin: 0 0 14px;
+  font-size: 11px;
+  color: var(--wl-text-tertiary);
+}
+.wl-entropy-group { margin-bottom: 18px; }
+.wl-entropy-goal {
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--wl-text-tertiary);
+}
+.wl-entropy-entry {
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-sm);
+}
+.wl-entropy-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.wl-entropy-date {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--wl-text-tertiary);
+}
+.wl-entropy-reason {
+  flex: 1;
+  font-size: 11px;
+  color: var(--wl-text-secondary);
+}
+/* "Blocked" is a state, not an alarm. Neutral sand outline — this design
+   system has no red failure state, and a coral badge here would be the
+   first one. */
+.wl-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--wl-border-strong);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--wl-text-secondary);
+}
+.wl-entropy-directive {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--wl-text-primary);
+}
+.wl-entropy-note {
+  margin: 5px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--wl-text-tertiary);
+  font-style: italic;
+}
+.wl-entropy-empty-title,
+.wl-traj-empty-title {
+  margin: 0 0 6px;
+  font-family: var(--font-serif);
+  font-size: 19px;
+}
+
+/* ==========================================================================
+   Trajectory (control panel → System Telemetry)
+   ========================================================================== */
+.wl-traj-card { margin-bottom: 12px; }
+.wl-traj-pace {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.wl-traj-pace-label {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  color: var(--wl-text-primary);
+}
+.wl-traj-pace-note {
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--wl-text-tertiary);
+}
+.wl-traj-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 10px;
+}
+.wl-traj-cell { display: flex; flex-direction: column; gap: 2px; }
+.wl-traj-k {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--wl-text-tertiary);
+}
+.wl-traj-v {
+  font-size: 22px;
+  line-height: 1.1;
+  color: var(--wl-text-primary);
+}
+.wl-traj-u { font-size: 10px; color: var(--wl-text-tertiary); }
+.wl-traj-formula {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--wl-border-subtle);
+  font-size: 10px;
+  color: var(--wl-text-tertiary);
+}
+.wl-traj-foot { margin: 4px 0 0; }
 
 /* ==========================================================================
    Icon sizing
@@ -1609,6 +1875,10 @@ body {
    These are on a 24-unit grid, so the crescent's terminator survives the
    downscale — the earlier 16-unit hand-rolled version did not. */
 .wl-icon-moon, .wl-icon-sun { width: 13px; height: 13px; }
+/* The two control-panel marks. Both sit in `.wl-nav-row-icon`, a 22px
+   column, so they are sized to match the gear beside them rather than to
+   the canvas's larger menu mark. */
+.wl-icon-entropy, .wl-icon-velocity { width: 20px; height: 20px; }
 
 /* Font faces: bundled OFL assets, no CDN (local-first, skill §6) */
 @font-face {

@@ -10,6 +10,7 @@
 mod canvas;
 mod checkin;
 mod dormant;
+mod entropy_log;
 mod goal_create;
 mod model_picker;
 mod morning_brief;
@@ -17,10 +18,12 @@ mod nav_drawer;
 mod seed_vault;
 mod settings;
 mod telemetry;
+mod trajectory;
 
 pub use canvas::*;
 pub use checkin::*;
 pub use dormant::*;
+pub use entropy_log::*;
 pub use goal_create::*;
 pub use model_picker::*;
 pub use morning_brief::*;
@@ -28,3 +31,4 @@ pub use nav_drawer::*;
 pub use seed_vault::*;
 pub use settings::*;
 pub use telemetry::*;
+pub use trajectory::*;

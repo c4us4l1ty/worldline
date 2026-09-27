@@ -86,7 +86,7 @@ Use this skill when:
 | `--bg-dark-base` | `#131312` | 9:16 Canvas viewport, matte warm slate |
 | `--bg-dark-card` | `#20201F` | Primary Directive container card |
 | `--bg-dark-elevated` | `#2A2A29` | Chip badges, secondary controls, inputs |
-| `--bg-cream-primary` | `#DAD5C7` | Primary execution CTA ("Complete Directive") |
+| `--bg-cream-primary` | `#DAD5C7` | Primary action (the compose CTA, a filled progress bar) |
 | `--accent-coral` | `#E26D52` | Active step marker, primary action beacon, security ring |
 | `--text-dark-primary` | `#E5E2E0` | Command titles, high-contrast labels |
 | `--text-dark-secondary` | `#949087` | Execution context, time indicators |
@@ -198,6 +198,16 @@ rounded:
 Overlays the canvas instead of sitting in a bar above it. A full-width header strip fought the core premise — ONE directive, no chrome — and squeezed the empty state into a letterbox, so the bar was removed (2026-09-26). The menu is a floating circular control (top-left), raised off the surface with a soft shadow.
 
 **The canvas has exactly one floating control.** The sync control that used to float opposite the menu (2026-09-27) was a 34px circle that reported nothing until tapped; sync is a *settings* concern, not a canvas one, so it moved to the Sync section of Settings as a full-width row that also shows what the last cycle did. Nothing became unreachable — sync status and the Evening audit were already in the `Ctrl+,` telemetry drawer.
+
+**The menu opens the control panel, not a file list.** Two buttons in an
+otherwise empty 273px sheet was the old drawer, and the void above them
+was the design: a menu that only routes to other menus contradicts a
+product whose premise is that you should never be browsing. The panel
+now answers "where am I?" without leaving the canvas — a primary action,
+a **System Telemetry** group (Entropy Log, Trajectory), an **Active
+Worldlines** readout, and Settings. The worldlines are a *readout*: no
+hover state, no pointer cursor, because a tappable row with no detail
+page behind it is a dead affordance.
 
 ```html
 <div class="wl-float-layer">
@@ -371,10 +381,21 @@ The focal heart of the application. Presents only one directive.
 }
 ```
 
-### C. Stackelberg Action Controls & Escape Hatch
-Controls are anchored at the bottom of the viewport: primary execution completion paired with the deliberate friction bailout.
+### C. Execution & the Escape Hatch
+
+**The canvas carries no action buttons at all** (2026-09-27). The footer
+that held "Complete Directive" and "Bailout / Blocked" is gone. The
+canvas is the directive; completion is `⌘+Enter` and the escape hatch is
+`Escape`, and the menu is the only control on the surface. A second pair
+of buttons under the card competed with the one thing the product is
+for. The trade is deliberate and worth stating: discoverability now rests
+on the two shortcuts, so any new surface must re-teach them.
+
+The escape modal itself is unchanged and still required — categorising the
+reason is the friction, and the friction did not move, only the trigger.
 
 ```html
+<!-- removed; kept as the record of what the canvas no longer renders -->
 <footer class="wl-actions">
   <button class="wl-btn-primary">
     <span>Complete Directive</span>
@@ -387,9 +408,10 @@ Controls are anchored at the bottom of the viewport: primary execution completio
 </footer>
 ```
 
+`.wl-btn-primary` and `.wl-btn-escape` are still the CTA and the
+frictionful bail everywhere else — the compose, briefing and dormant
+screens. Only the canvas footer is gone.
 ```css
-.wl-actions { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; }
-
 /* Warm Cream Primary CTA */
 .wl-btn-primary {
   width: 100%; height: 52px;
@@ -478,17 +500,20 @@ Tactile 12-word recovery display during cryptographic account initialization.
 - **Enforce the Single-Command Rule:** Only one active directive container may be rendered in the DOM at any given execution cycle.
 - **Emphasize Primary CTA Contrast:** The execution button (`.wl-btn-primary`) must always be rendered in warm cream `#DAD5C7` to act as an unequivocal behavioral magnet.
 - **Render Telemetry in Monospace:** All durations, HLC sequence stamps, and sync counts must use `var(--font-mono-telemetry)` to prevent tabular jitter. (Countdowns no longer exist — the session timer was removed 2026-09-26 — but the rule stands for whatever numeric readout comes next.)
-- **Require Confirmation on Escape Hatch:** The bailout button (`.wl-btn-escape`) must open a modal requiring the user to categorize the stall (`Blocked`, `Scope`, `Energy`) before unmounting the directive.
+- **Require Confirmation on Escape Hatch:** The escape hatch (now `Escape`, formerly the `.wl-btn-escape` button) must open a modal requiring the user to categorize the stall (`Blocked`, `Scope`, `Energy`) before unmounting the directive.
 - **Use switches for boolean preferences.** Theme and window pin are `.wl-switch[role=switch]` with `aria-checked`, not a `<select>` and not a label-bearing button. They apply **and persist immediately** — a theme toggle that only takes effect on Save is a broken control, because you cannot evaluate a theme you are not allowed to see. Text fields still wait for the page's Save button; that two-path model is deliberate.
 - **A switch persists from shell-confirmed state, never from the local draft.** `settings_save` writes every field, so persisting the draft would silently commit whatever the user had half-typed into an unrelated field.
 - **Switch state colours are absolute, not theme-derived.** The switch encodes "which theme is selected", not "what is currently rendered"; flipping its tokens with `data-theme` would invert the control the instant it took effect.
+- **The control panel is a readout, not a browser.** Active Worldlines rows carry no hover state and no pointer cursor. Do not make them tappable without a goal-detail page to land on.
+- **An inert number must say it is inert.** `estimate_adjustment` is observed and not applied (PRD delta 33); every surface showing it repeats that. A figure that looks like a setting but changes nothing is the one thing this system will not ship.
+- **Never fabricate a read-out under the mock.** Every `dx serve` response is canned. Anything the drawer renders from a command says `· MOCK` when `transport()` reports the mock, as the model catalog already does (PRD delta 148).
 
 ### Don't:
 - **Never display a scrollable list of future tasks:** The home screen must never show what's coming up this afternoon or tomorrow.
 - **Never use streaks or red failure states:** Missing a directive is a velocity adjustment event, never an alarm. Avoid punitive UI red `#FF0000`.
 - **Never use pure white (`#FFF`) or deep black (`#000`):** Use the specified slate canvas (`#131312`) and muted text tones (`#E5E2E0` / `#CAC6BC`). This holds for switch knobs and tracks too.
 - **No decorative background illustrations or icons:** Maintain tactile, terminal-level discipline. Avoid extraneous emojis and marketing illustrations. UI icons are functional inline SVG (see §4.A); emoji are not UI iconography.
-- **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately; the canvas keeps exactly one floating control.
+- **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately, and the Complete/Bailout footer was removed entirely; the canvas keeps exactly one floating control.
 - **Never split a compose field into a title field plus a details field.** The user types intent in their own words and the architect names the goal; see §4.A3. Corollary: a goal title derived from a raw fragment must be clipped before it reaches `create_goal`, because the manual path seeds the first directive with that title verbatim.
 - **Never accent a page title.** Page titles are one plain serif line in `--wl-text-primary`. The coral beacon belongs to the active step badge, the create-goal button, and cryptographic security badges — not to a heading, and not to a decorative word inside one.
 

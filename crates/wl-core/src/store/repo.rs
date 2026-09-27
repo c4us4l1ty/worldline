@@ -270,6 +270,46 @@ impl Repos {
             .map_err(StoreError::Sqlite)
     }
 
+    /// Every `active` goal with its milestone completion counts,
+    /// newest first.
+    ///
+    /// Aggregated in SQL rather than by looping
+    /// [`Repos::milestones_for_goal`]: a control panel lists all goals
+    /// at once, and the N+1 form is a round trip per goal. The LEFT
+    /// JOIN is load-bearing — a goal the user has not planned yet must
+    /// still appear, with zeroes, or the panel hides a brand-new goal.
+    ///
+    /// `hlc_timestamp` is fixed-width zero-padded text, so the DESC
+    /// sort is chronological, not lexicographic; the `g.id` tail keeps
+    /// a same-instant pair (a restore can reissue one) from swapping
+    /// between renders.
+    pub fn active_goals_with_progress(&self) -> Result<Vec<GoalProgress>, StoreError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT g.id, g.title, g.target_date,
+                    COUNT(m.id) AS milestones_total,
+                    COALESCE(SUM(CASE WHEN m.status = 'completed' THEN 1 ELSE 0 END), 0)
+                        AS milestones_done
+             FROM goals g
+             LEFT JOIN milestones m ON m.goal_id = g.id
+             WHERE g.status = 'active'
+             GROUP BY g.id
+             ORDER BY g.hlc_timestamp DESC, g.id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(GoalProgress {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    target_date: r.get(2)?,
+                    milestones_done: r.get::<_, i64>(4)? as usize,
+                    milestones_total: r.get::<_, i64>(3)? as usize,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ------------------------------------------------------------------
     // Milestones
     // ------------------------------------------------------------------
@@ -1384,6 +1424,62 @@ impl Repos {
         Ok(b)
     }
 
+    /// The escape-hatch ledger, newest first, joined all the way up to
+    /// the goal.
+    ///
+    /// The join is what makes this a *log* rather than a per-goal
+    /// lookup: the panel groups entries under their goal, and doing that
+    /// client-side would need a second round trip per row. Inner joins
+    /// are safe because `foreign_keys = ON` makes the
+    /// bailouts→directives→milestones→goals chain unbreakable — a
+    /// deleted parent would have blocked the delete, not orphaned a row.
+    ///
+    /// `still_blocked` is the *current* directive state, not the state
+    /// at bailout time: only an external dependency parks a directive
+    /// for good, while a miscalculated scope is requeued and an energy
+    /// bailout is skipped — so this flag, not the reason, is what
+    /// separates "needs the user" from "already handled".
+    ///
+    /// `limit` is clamped rather than rejected, unlike
+    /// [`Repos::pending_outbox`]: a log window is a display choice, so
+    /// an over-large request should widen to the cap instead of
+    /// surfacing an error the panel can do nothing about.
+    pub fn bailout_log(&self, limit: usize) -> Result<Vec<EntropyEntry>, StoreError> {
+        let limit = limit.min(MAX_ENTROPY_LOG_ROWS) as i64;
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT b.id, g.id, g.title, d.id, d.title, b.reason, b.note, b.hlc_timestamp,
+                    d.state = 'blocked' AS still_blocked
+             FROM bailouts b
+             JOIN directives d ON d.id = b.directive_id
+             JOIN milestones m ON m.id = d.milestone_id
+             JOIN goals g ON g.id = m.goal_id
+             ORDER BY b.hlc_timestamp DESC, b.id ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                let hlc = parse_hlc(&r.get::<_, String>(7)?)?;
+                Ok(EntropyEntry {
+                    id: r.get(0)?,
+                    goal_id: r.get(1)?,
+                    goal_title: r.get(2)?,
+                    directive_id: r.get(3)?,
+                    directive_title: r.get(4)?,
+                    reason: parse_enum(
+                        "bailout reason",
+                        &r.get::<_, String>(5)?,
+                        BailoutReason::from_str,
+                    )?,
+                    note: r.get(6)?,
+                    date: local_date_from_hlc(&hlc),
+                    still_blocked: r.get::<_, i64>(8)? != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
@@ -1767,12 +1863,64 @@ pub struct OutboxOp {
     pub encrypted_payload: Vec<u8>,
 }
 
+/// An active goal plus its milestone tally, for the control panel.
+/// Counts are `usize` because they are display denominators: nothing
+/// downstream does arithmetic that could overflow or go negative.
+#[derive(Debug, Clone)]
+pub struct GoalProgress {
+    pub id: String,
+    pub title: String,
+    pub target_date: Option<String>,
+    pub milestones_done: usize,
+    pub milestones_total: usize,
+}
+
+/// One row of the escape-hatch ledger, denormalised with the goal and
+/// directive it belongs to.
+#[derive(Debug, Clone)]
+pub struct EntropyEntry {
+    pub id: String,
+    pub goal_id: String,
+    pub goal_title: String,
+    pub directive_id: String,
+    pub directive_title: String,
+    pub reason: BailoutReason,
+    pub note: Option<String>,
+    /// Local YYYY-MM-DD the bailout was recorded on.
+    pub date: String,
+    /// The directive is *still* parked — see [`Repos::bailout_log`].
+    pub still_blocked: bool,
+}
+
+/// Upper bound on [`Repos::bailout_log`]. Matches the 1024-row ceiling
+/// the outbox and check-in readers already use: a local install's whole
+/// ledger is far smaller, and the cap exists so a stray `usize::MAX`
+/// cannot ask SQLite to materialise an unbounded result set.
+const MAX_ENTROPY_LOG_ROWS: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
 
 fn parse_hlc(s: &str) -> Result<HlcTimestamp, rusqlite::Error> {
     HlcTimestamp::parse(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+/// Local YYYY-MM-DD for an HLC's physical component.
+///
+/// The ledger has no date column (see `0001_init.sql`), so a bailout's
+/// day is reconstructed from its clock. This is total, not fallible: a
+/// degenerate clock — physical 0, which migration 0004 deliberately
+/// backfills onto legacy rows — renders as the epoch rather than
+/// failing, because dropping a real bailout from the log over an
+/// unreadable date is strictly worse than showing it dated 1970. An
+/// `i64` count of nanoseconds spans ~584 years, comfortably inside
+/// chrono's range, so there is no value this can panic on.
+fn local_date_from_hlc(ts: &HlcTimestamp) -> String {
+    chrono::DateTime::from_timestamp_nanos(ts.physical as i64)
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 /// A corrupt enum string in a row. Returned as a SQLite-mapping error

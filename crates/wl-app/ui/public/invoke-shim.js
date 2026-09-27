@@ -143,6 +143,48 @@
         milestone_done: 0, milestone_total: 1,
       });
     },
+    // Control panel fixtures. Both are FABRICATED — nothing is queried
+    // under `dx serve`. The drawer renders `· MOCK` beside the section
+    // label whenever `transport()` reports the mock, for the same reason
+    // the model catalog does (PRD delta 148): a list of invented goals
+    // looks exactly like a real one from the outside.
+    list_goals: function () {
+      return Promise.resolve(mockDb.goal ? [
+        {
+          id: 'goal-1',
+          title: mockDb.goal.title || 'Untitled goal',
+          target_date: mockDb.goal.target_date || null,
+          milestone_done: 1,
+          milestone_total: 3,
+        },
+      ] : []);
+    },
+    entropy_log: function () {
+      return Promise.resolve([
+        {
+          id: 'bail-1',
+          goal_id: 'goal-1',
+          goal_title: mockDb.goal ? (mockDb.goal.title || 'Untitled goal') : 'Ship Worldline v0.1',
+          directive_id: 'dir-9',
+          directive_title: 'Draft Section 2.1',
+          reason: 'miscalculated_scope',
+          note: 'kept re-reading, no forward motion',
+          date: '2026-09-21',
+          still_blocked: false,
+        },
+        {
+          id: 'bail-2',
+          goal_id: 'goal-1',
+          goal_title: 'Ship Worldline v0.1',
+          directive_id: 'dir-4',
+          directive_title: 'Send the contract to legal',
+          reason: 'external_dependency',
+          note: null,
+          date: '2026-09-19',
+          still_blocked: true,
+        },
+      ]);
+    },
     sync_now: function () { return Promise.resolve({ pushed: 0, pulled: 0, applied: 0, pending: 0, quarantined: 0, cursor: '' }); },
     relay_authenticate: function () {
       // Real shell returns RelayAuthView { account_id, expires_at }

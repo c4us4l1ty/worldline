@@ -371,6 +371,53 @@ pub struct GoalJson {
     pub milestone_total: usize,
 }
 
+/// One row of the entropy log the Control Panel drawer renders.
+///
+/// A mirror of wl-core's `EntropyEntry` with `BailoutReason` flattened
+/// to its snake_case id — the shell's own domain types are not part of
+/// the JSON contract, so the enum crosses as a plain string. Kept as a
+/// separate struct rather than deriving `Serialize` on the wl-core type
+/// so the wire format is declared here, at the edge that owns it.
+#[derive(Serialize, Clone)]
+pub struct EntropyView {
+    pub id: String,
+    pub goal_id: String,
+    pub goal_title: String,
+    pub directive_id: String,
+    pub directive_title: String,
+    /// `BailoutReason::as_str()` — one of the three snake_case reasons
+    /// the bailout modal offers, so the UI can key its icon off it.
+    pub reason: String,
+    pub note: Option<String>,
+    /// Local `YYYY-MM-DD`, formatted in wl-core where the HLC is.
+    pub date: String,
+    /// The directive is still parked right now, as opposed to having
+    /// been requeued or skipped by the recovery. This flag, not the
+    /// reason, is what separates "needs the user" from "already handled".
+    pub still_blocked: bool,
+}
+
+/// Every active goal with its milestone progress, newest first.
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn list_goals(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ShellResult<Vec<GoalJson>> {
+    let rows = state
+        .repos
+        .active_goals_with_progress()
+        .map_err(ShellError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|g| GoalJson {
+            id: g.id,
+            title: g.title,
+            target_date: g.target_date,
+            milestone_done: g.milestones_done,
+            milestone_total: g.milestones_total,
+        })
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // Stackelberg canvas (US-3)
 // ---------------------------------------------------------------------------
@@ -530,6 +577,42 @@ fn recovery_summary(r: &RecoveryAction) -> String {
         }
         RecoveryAction::LowCognitiveTask { .. } => "low-cognitive".into(),
     }
+}
+
+/// How many bailouts the drawer asks for.
+///
+/// The drawer is a glance, not an archive: fifty rows is several screens
+/// of history on a bad stretch and still one cheap query, while a few
+/// hundred would be a second page the drawer has no UI for. Bounded so a
+/// long-lived install cannot make every drawer open an unbounded
+/// four-table join. wl-core clamps to its own ceiling as well, so the two
+/// limits cannot drift into a footgun.
+const ENTROPY_LOG_LIMIT: usize = 50;
+
+/// Recent bailouts, newest first, joined to the goal and directive they
+/// happened on.
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn entropy_log(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ShellResult<Vec<EntropyView>> {
+    let rows = state
+        .repos
+        .bailout_log(ENTROPY_LOG_LIMIT)
+        .map_err(ShellError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|e| EntropyView {
+            id: e.id,
+            goal_id: e.goal_id,
+            goal_title: e.goal_title,
+            directive_id: e.directive_id,
+            directive_title: e.directive_title,
+            reason: e.reason.as_str().into(),
+            note: e.note,
+            date: e.date,
+            still_blocked: e.still_blocked,
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

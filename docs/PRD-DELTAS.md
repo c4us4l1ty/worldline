@@ -1613,3 +1613,79 @@ almost all its motion into the first ~30ms) and the canvas's
     the goal description) and `estimated_minutes` (never sent by the
     UI) are asserted off the row. `master_plan` covers the remaining
     multi-word key set.
+
+## The control panel (2026-09-27, user-directed)
+
+158. **The hamburger drawer is a control panel, not a menu.** It was two
+    buttons ("Create a goal", a gear) pinned to the bottom of a 273px
+    sheet with a `flex: 1` spacer above them — the void *was* the layout.
+    The user's framing: "It should not be a list of folders; it should be
+    a map of the user's operational reality." It now carries a primary
+    action, a **System Telemetry** group, an **Active Worldlines**
+    readout, and Settings, with a fixed top bar and a fixed Settings foot
+    around a scrolling middle — `flex-shrink: 0` on both is what keeps
+    Settings reachable once a user has six goals.
+
+159. **Two new pages, both read-only.**
+    * **Entropy Log** — the escape-hatch ledger, which until now was
+      write-only: the reason was recorded, counted into velocity, and
+      never shown again. Grouped by goal (a bailout only means something
+      next to what it derailed), with a pattern line
+      (`4 events · 2 energy · 1 scope · 1 external · 1 still blocked`).
+    * **Trajectory** — required velocity against observed, which existed
+      but was only reachable *after* the fact as the evening audit's
+      receipt. Opening it before the check-in is the moment the number
+      can still change a decision.
+
+    Read-only by explicit decision. A blocked directive has no unblock
+    path in the engine (delta 33), so a tap target here would be a
+    control that cannot do what it says.
+
+160. **The canvas lost its Complete/Bailout footer.** The user's call,
+    taken knowingly over a recommendation to keep the cream CTA: the
+    canvas is the directive, not a dashboard, so completion is `⌘+Enter`
+    and the escape hatch is `Escape`, and the menu is the only control on
+    the surface. The recorded cost is discoverability — nothing on screen
+    now names either shortcut. The escape modal is untouched; only its
+    trigger moved. `.wl-actions` is deleted; `.wl-btn-primary` and
+    `.wl-btn-escape` survive everywhere else.
+
+161. **Two new shell commands, both no-argument.** `list_goals` reuses the
+    existing `GoalJson` (no parallel struct) over a new
+    `Repos::active_goals_with_progress` — one LEFT JOIN + GROUP BY, so a
+    goal with zero milestones still appears. `entropy_log` returns a new
+    `EntropyView` over `Repos::bailout_log`, a four-table join.
+    `bailouts` has **no date column**; the date is derived from the HLC's
+    physical component, which is nanoseconds since the epoch.
+
+162. **Blocked entries are badged, not listed twice.** `bail_out` parks an
+    `external_dependency` directive in `blocked` forever, while scope
+    downsizes-and-requeues and energy skips — both resolving on the spot.
+    So the ledger is the spine and `still_blocked` flags the residue.
+    Two lists would have double-counted the blocked ones.
+
+163. **An unrecognised bailout reason is counted, not dropped.** The
+    summary's breakdown is `total` minus the three known reasons, so a
+    future shell adding a fourth cannot make the page under-report its own
+    headline. This one was caught by the test written for it.
+
+164. **The worldlines are not buttons.** No hover state, no pointer
+    cursor. They are capped at four with a `+N more` line, because a fifth
+    row pushes Settings off the bottom of a 747px panel, and Settings is
+    not optional. Making them tappable would promise a goal-detail page
+    that does not exist.
+
+165. **The panel marks its own mock data.** `list_goals` under `dx serve`
+    is invented, not queried, so the System Telemetry label renders `· MOCK`
+    in coral when `transport()` reports the mock — the same guard as delta
+    148, for the same reason: a fabricated list of the user's own goals is
+    indistinguishable from a real one.
+
+166. **Two icons, both refusing the obvious mark.** Entropy is *not* a
+    warning triangle — this system has no red failure state, and a hazard
+    sign would be the first one. It is a trace that rises, breaks, and
+    resumes lower; the gap is the idea. Velocity is a gauge, not a rising
+    line, because the two sit 12px apart in the same drawer and a line
+    would read as the same mark twice. The needle points at roughly two
+    o'clock: a gauge resting in its low corner would itself read as
+    failure.

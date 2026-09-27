@@ -361,3 +361,171 @@ fn single_word_arguments_are_unaffected_by_rename_all() {
     let velocity = call(&app, "velocity", serde_json::json!({})).expect("velocity");
     assert!(velocity.is_object(), "velocity must return an object");
 }
+
+/// The Control Panel's two read-only pages, over the real handler list:
+/// `list_goals` (the goal rail's progress) and `entropy_log` (the
+/// bailout history).
+///
+/// Both take no arguments, so there is no payload to mis-bind here —
+/// what can be wrong is the row that crosses back, and it is wrong
+/// quietly. `milestone_done`/`milestone_total` are the numbers the goal
+/// rail draws, and `reason`/`date`/`still_blocked` are the whole of what
+/// the entropy row says: a bailout reason that serialised as a debug
+/// variant, or a date read as seconds rather than nanoseconds out of the
+/// HLC, would render as a plausible-looking wrong thing. Hence the field
+/// NAMES are asserted, not just the values — the UI destructures by
+/// name, and a renamed field drops to `undefined` there.
+#[test]
+fn control_panel_pages_report_progress_and_bailout_history() {
+    let (app, _scratch) = mock_app();
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let repos = &state.repos;
+
+    // Seeded through `Repos` rather than `create_goal`: this test is
+    // about the two read paths, and `create_goal`'s starter milestone
+    // would make `milestone_total` 1 forever.
+    let goal = repos
+        .create_goal("Ship the relay", None, Some("2026-12-31"), None)
+        .expect("seed goal");
+    let first = repos
+        .create_milestone(&goal.id, "Wire the protocol", None, 0, None)
+        .expect("milestone 1");
+    let second = repos
+        .create_milestone(&goal.id, "Ship the binary", None, 1, None)
+        .expect("milestone 2");
+    repos
+        .set_milestone_status(&first.id, wl_core::domain::MilestoneStatus::Completed, None)
+        .expect("complete milestone 1");
+
+    // One of the two milestones is done, so the rail's fraction is a
+    // real 1-of-2 rather than 0-of-2 or 1-of-1. `assert_bound` is
+    // vacuous for a zero-argument command today, but it is the canary
+    // for the day one of these grows a parameter: a `target_date`-style
+    // key that stops binding is silent here too.
+    let goals = call(&app, "list_goals", serde_json::json!({}));
+    assert_bound(&goals, "list_goals");
+    let goals = goals.expect("list_goals");
+    let goal_rows = goals.as_array().expect("array");
+    assert_eq!(
+        goal_rows.len(),
+        1,
+        "exactly one goal was seeded, active or not: {goals}"
+    );
+    let listed = &goal_rows[0];
+    let mut keys: Vec<&str> = listed
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "id",
+            "milestone_done",
+            "milestone_total",
+            "target_date",
+            "title"
+        ],
+        "list_goals field names are the UI's destructuring contract: {listed}"
+    );
+    assert_eq!(listed["id"], goal.id);
+    assert_eq!(listed["title"], "Ship the relay");
+    assert_eq!(listed["target_date"], "2026-12-31");
+    assert_eq!(listed["milestone_done"], 1);
+    assert_eq!(listed["milestone_total"], 2);
+
+    let directive = repos
+        .create_directive(
+            &second.id,
+            "Cut the release",
+            None,
+            25,
+            1,
+            &today_local(),
+            &[],
+            None,
+        )
+        .expect("directive");
+    let bailout = repos
+        .record_bailout(
+            &directive.id,
+            wl_core::domain::BailoutReason::ExternalDependency,
+            Some("waiting on the relay to come up"),
+            None,
+        )
+        .expect("bailout");
+    // ExternalDependency is the one reason that never self-heals, so
+    // this is the case `still_blocked` exists to distinguish.
+    repos
+        .set_directive_state(
+            &directive.id,
+            wl_core::domain::DirectiveState::Blocked,
+            None,
+        )
+        .expect("block the directive");
+
+    let log = call(&app, "entropy_log", serde_json::json!({}));
+    assert_bound(&log, "entropy_log");
+    let log = log.expect("entropy_log");
+    let entries = log.as_array().expect("array");
+    assert_eq!(entries.len(), 1, "one bailout was recorded: {log}");
+    let entry = &entries[0];
+    let mut keys: Vec<&str> = entry
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "date",
+            "directive_id",
+            "directive_title",
+            "goal_id",
+            "goal_title",
+            "id",
+            "note",
+            "reason",
+            "still_blocked",
+        ],
+        "entropy_log field names are the UI's destructuring contract: {entry}"
+    );
+    assert_eq!(entry["id"], bailout.id);
+    assert_eq!(entry["goal_id"], goal.id);
+    assert_eq!(entry["goal_title"], "Ship the relay");
+    assert_eq!(entry["directive_id"], directive.id);
+    assert_eq!(entry["directive_title"], "Cut the release");
+    assert_eq!(
+        entry["reason"], "external_dependency",
+        "the reason must be the snake_case id the UI keys its icon off, not a debug name"
+    );
+    assert_eq!(entry["note"], "waiting on the relay to come up");
+    // `assert_eq!(…, true)` is a clippy lint; what matters here is the
+    // value is a JSON bool and not the string "true".
+    assert!(
+        entry["still_blocked"]
+            .as_bool()
+            .expect("still_blocked is a bool"),
+        "an ExternalDependency bailout leaves the directive blocked forever: {entry}"
+    );
+
+    // `bailouts` has no date column: the day comes from the HLC's
+    // physical nanoseconds, so it is checked as a real local calendar
+    // date near today rather than a formatted substring — a
+    // seconds-vs-nanoseconds mix-up yields a valid-looking string
+    // thousands of years out, which a length check would pass.
+    let date = entry["date"].as_str().expect("date string");
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .unwrap_or_else(|e| panic!("entropy_log date {date:?} is not YYYY-MM-DD: {e}"));
+    let drift = (parsed - chrono::Local::now().date_naive())
+        .num_days()
+        .abs();
+    assert!(
+        drift <= 1,
+        "a bailout recorded just now must land on today's local date, got {date} ({drift} days off)"
+    );
+}
