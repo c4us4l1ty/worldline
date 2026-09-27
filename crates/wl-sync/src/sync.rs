@@ -196,9 +196,16 @@ pub fn sync_cycle<T: Transport>(
     // LWW arbitration above can merge `active` states from two devices
     // (each side activated while offline). Reconcile deterministically
     // so the single-directive invariant holds across devices too.
-    if applied > 0 {
-        let _ = repos.enforce_single_active(Some(identity));
-    }
+    //
+    // Ungated, and the error PROPAGATES. Both were load-bearing. The
+    // `applied > 0` gate meant a cycle that pulled nothing new — every op
+    // already watermarked, which is the common case for a device that is
+    // merely catching up on the repair — never re-ran it, so one failed
+    // reconciliation left two `active` rows for good while the shell
+    // reported SYNCED. And `let _ =` swallowed the failure outright.
+    // `enforce_single_active` is a no-op query when the invariant already
+    // holds, so running it every cycle costs one indexed read.
+    repos.enforce_single_active(Some(identity))?;
 
     // The relay paginates strictly after the cursor, so watermarks at or
     // below it can never match a future pull: prune instead of growing
@@ -228,7 +235,7 @@ fn apply_pulled_op(
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &op.sealed_b64)
         .map_err(|_| SyncError::Protocol("bad base64 in pulled op".into()))?;
     let sealed = Sealed::from_bytes(&bytes)?;
-    let aad = format!("{}:{}", op.table, op.record_id);
+    let aad = wl_core::crdt::routing_aad(&op.table, &op.record_id, &op.operation_id, &op.hlc);
     let plaintext = aead::unseal(identity, &sealed, aad.as_bytes())?;
     let fields: serde_json::Value = serde_json::from_slice(&plaintext)
         .map_err(|e| SyncError::Protocol(format!("decrypted payload not JSON: {e}")))?;
@@ -285,11 +292,17 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
     // Effective head: stored merge memory, else the live row's own HLC
     // (legacy/local rows predate heads — they lose exact ties, remote
     // wins), else unseen (accept anything).
-    let (h_hlc, h_dev, h_op, h_tomb) = match head {
-        Some(h) => (h.hlc, h.device, h.op_id, h.tombstone),
+    //
+    // The head's tombstone bit is deliberately NOT consulted. It used to
+    // gate a resurrection that the key comparison had already decided, and
+    // that gate is what made two replicas diverge. The bit is still
+    // stored — it is the delete memory a later stale op is arbitrated
+    // against — it just no longer overrides the total order.
+    let (h_hlc, h_dev, h_op) = match head {
+        Some(h) => (h.hlc, h.device, h.op_id),
         None => match row_hlc(&conn, table, &op.record_id)? {
-            Some(row_hlc) => (row_hlc, 0, String::new(), false),
-            None => (String::new(), 0, String::new(), false),
+            Some(row_hlc) => (row_hlc, 0, String::new()),
+            None => (String::new(), 0, String::new()),
         },
     };
     // Op wins iff its key strictly beats the head (total order).
@@ -298,10 +311,18 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
     {
         return Ok(()); // stale: ignore deterministically
     }
+    // Everything below is ONE unit. The caller watermarks the op whether
+    // it succeeded or was quarantined, so a half-applied op is worse
+    // than an unapplied one: the row is gone, the head still says
+    // otherwise, and no future pull will ever revisit it. `apply_check_in_win`
+    // in particular deletes the same-date rows it is displacing, so a
+    // failure after that point used to destroy a real check-in the user
+    // had recorded, on this device only, permanently.
+    let tx = conn.unchecked_transaction()?;
     if op.tombstone {
-        apply_delete(&conn, table, &op.record_id)?;
+        apply_delete(&tx, table, &op.record_id)?;
         store_head(
-            &conn,
+            &tx,
             table.as_str(),
             &op.record_id,
             &ts_s,
@@ -309,33 +330,26 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
             &op.operation_id,
             true,
         )?;
-        return Ok(());
+        return tx.commit().map_err(Into::into);
     }
     let f = op.fields.as_ref().unwrap();
-    if h_tomb && ts_s == h_hlc {
-        // Matches `TableState`: an op that only beats a tombstone via
-        // the device/op tie-break does not resurrect — advance the head
-        // but keep delete memory.
-        store_head(
-            &conn,
-            table.as_str(),
-            &op.record_id,
-            &ts_s,
-            ts.device,
-            &op.operation_id,
-            true,
-        )?;
-        return Ok(());
-    }
     if table == CrdtTable::CheckIns {
-        if !apply_check_in_win(&conn, &op.record_id, f, &ts_s, ts.device, &op.operation_id)? {
-            return Ok(()); // lost the date to a newer same-day row
+        if !apply_check_in_win(&tx, &op.record_id, f, &ts_s, ts.device, &op.operation_id)? {
+            return tx.commit().map_err(Into::into); // lost the date to a newer same-day row
         }
     } else {
-        apply_upsert(&conn, table, &op.record_id, f, &ts_s, &get)?;
+        apply_upsert(&tx, table, &op.record_id, f, &ts_s, &get)?;
     }
+    // No `h_tomb` special case: reaching here means the op's full key
+    // beat the head, so it resurrects a tombstoned row and clears the
+    // delete bit. Comparing `ts` alone (the rule this replaces) ignored
+    // the (device, operation_id) tie-break that had just accepted the
+    // op, so an upsert that beat a tombstone only via the tie-break was
+    // dropped — and two replicas that received those two ops in opposite
+    // orders ended in different states. `TableState::apply` had the same
+    // hole and is the reference contract; both are fixed together.
     store_head(
-        &conn,
+        &tx,
         table.as_str(),
         &op.record_id,
         &ts_s,
@@ -343,16 +357,25 @@ fn apply_op_to_db(repos: &Repos, op: &wl_core::crdt::CrdtOp) -> Result<(), SyncE
         &op.operation_id,
         false,
     )?;
-    Ok(())
+    tx.commit().map_err(Into::into)
 }
 
 /// Merge head for one record: the greatest `(hlc, device, op_id)` key
-/// applied so far, plus whether that winner was a tombstone.
+/// applied so far.
+///
+/// `record_heads.tombstone` is deliberately NOT read. It used to gate
+/// resurrection on `ts > tombstone_ts`, ignoring the `(device,
+/// operation_id)` tie-break that had just decided the op was accepted —
+/// so an upsert that beat a tombstone only via the tie-break was
+/// dropped, and two replicas that saw those two ops in opposite orders
+/// diverged for good. The key alone is the total order, and it decides
+/// everything. The column is still written: it records what happened,
+/// it is part of the on-disk format, and a record's delete state is
+/// useful to anyone reading the database.
 struct Head {
     hlc: String,
     device: u16,
     op_id: String,
-    tombstone: bool,
 }
 
 fn load_head(
@@ -360,19 +383,18 @@ fn load_head(
     table: &str,
     record: &str,
 ) -> Result<Option<Head>, SyncError> {
-    let row: Option<(String, i64, String, i64)> = conn
+    let row: Option<(String, i64, String)> = conn
         .query_row(
-            "SELECT hlc_timestamp, device, operation_id, tombstone FROM record_heads
+            "SELECT hlc_timestamp, device, operation_id FROM record_heads
              WHERE table_name = ?1 AND record_id = ?2",
             rusqlite::params![table, record],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    Ok(row.map(|(hlc, device, op_id, tombstone)| Head {
+    Ok(row.map(|(hlc, device, op_id)| Head {
         hlc,
         device: device as u16,
         op_id,
-        tombstone: tombstone != 0,
     }))
 }
 
@@ -424,16 +446,20 @@ fn row_hlc(
                 |r| r.get(0),
             )
             .optional()?,
-        // Phase ops share the directive-level record id (one op per
-        // step): the coarsest live phase HLC is the fallback.
-        CrdtTable::DirectivePhases => conn
-            .query_row(
-                "SELECT MAX(hlc_timestamp) FROM directive_phases WHERE directive_id = ?1",
-                [record],
+        // Phase records are `"{directive_id}:{step}"`, so the fallback
+        // is the one row, not the coarsest of the set — a MAX() here
+        // would let an unrelated step's newer HLC make a legitimate op
+        // for this step look stale.
+        CrdtTable::DirectivePhases => {
+            let (directive_id, step) = wl_core::crdt::split_phase_record_id(record)
+                .ok_or_else(|| SyncError::Protocol("malformed phase record id".into()))?;
+            conn.query_row(
+                "SELECT hlc_timestamp FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
+                rusqlite::params![directive_id, step],
                 |r| r.get(0),
             )
             .optional()?
-            .flatten(),
+        }
         CrdtTable::CheckIns => conn
             .query_row(
                 "SELECT hlc_timestamp FROM check_ins WHERE id = ?1",
@@ -517,13 +543,18 @@ fn apply_upsert(
             )?;
         }
         CrdtTable::DirectivePhases => {
-            let step = f["step"].as_i64().unwrap_or(0);
+            // The step comes from the RECORD KEY, not the payload: the
+            // key is what the merge head arbitrates on, so letting a
+            // payload name a different step would let one phase's op
+            // overwrite another's row while landing under its own head.
+            let (directive_id, step) = wl_core::crdt::split_phase_record_id(record_id)
+                .ok_or_else(|| SyncError::Protocol("malformed phase record id".into()))?;
             conn.execute(
                 "INSERT INTO directive_phases (directive_id,step,title,instruction,minutes,state,hlc_timestamp)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(directive_id,step) DO UPDATE SET title=?3,instruction=?4,minutes=?5,state=?6,hlc_timestamp=?7",
                 rusqlite::params![
-                    record_id, step, get(f, "title"), get(f, "instruction"),
+                    directive_id, step, get(f, "title"), get(f, "instruction"),
                     f["minutes"].as_i64().unwrap_or(0),
                     get(f, "state").unwrap_or("pending".into()), ts_s
                 ],
@@ -621,6 +652,15 @@ fn apply_check_in_win(
     {
         return Ok(false); // a newer same-day row owns the date
     }
+    // Evict, then write. The order is forced: `check_ins.date` is
+    // UNIQUE (one audit per day), so the displaced row MUST be gone
+    // before the winner claims its date. What makes this safe is the
+    // transaction in `apply_op_to_db` — a failing INSERT rolls the
+    // DELETEs back. It did not used to: every statement autocommitted, so
+    // a payload with a missing or out-of-range `outcome` destroyed a real
+    // same-day check-in and *then* failed, and the caller's quarantine
+    // path watermarked the op as seen, so the row could never come back
+    // on that device while its peer still had it.
     for (id, _, _, _) in sharers.iter().filter(|(id, _, _, _)| id != record_id) {
         conn.execute("DELETE FROM check_ins WHERE id = ?1", [id])?;
         store_head(conn, "check_ins", id, ts_s, device, op_id, true)?;
@@ -634,11 +674,14 @@ fn apply_check_in_win(
     Ok(true)
 }
 
-/// Tombstone apply: remove the row (phases: all steps of the
-/// directive — matching the directive-level record id). Missing rows
-/// are fine (idempotent); FK-blocked deletes (children still present)
-/// surface as constraint errors into the existing quarantine path —
-/// writers delete leaf-first.
+/// Tombstone apply: remove the row. A `directive_phases` record names
+/// ONE step (`"{directive_id}:{step}"`), so deleting a phase leaves its
+/// siblings alone; a whole directive's phases are removed by the
+/// directive's own `directives` tombstone plus the foreign key.
+///
+/// Missing rows are fine (idempotent); FK-blocked deletes (children
+/// still present) surface as constraint errors into the existing
+/// quarantine path — writers delete leaf-first.
 fn apply_delete(
     conn: &rusqlite::Connection,
     table: wl_core::crdt::CrdtTable,
@@ -656,9 +699,14 @@ fn apply_delete(
             conn.execute("DELETE FROM directives WHERE id = ?1", [record_id])?;
         }
         CrdtTable::DirectivePhases => {
+            // A phase tombstone is ONE step. Deleting by directive id
+            // alone erased the whole phase set on every peer, because
+            // every step shared that record id.
+            let (directive_id, step) = wl_core::crdt::split_phase_record_id(record_id)
+                .ok_or_else(|| SyncError::Protocol("malformed phase record id".into()))?;
             conn.execute(
-                "DELETE FROM directive_phases WHERE directive_id = ?1",
-                [record_id],
+                "DELETE FROM directive_phases WHERE directive_id = ?1 AND step = ?2",
+                rusqlite::params![directive_id, step],
             )?;
         }
         CrdtTable::CheckIns => {
@@ -690,10 +738,23 @@ fn current_cursor(repos: &Repos) -> Result<(String, String), SyncError> {
 /// Persists the pull cursor (idempotent; called by `sync_cycle`
 /// itself so the shell cannot forget).
 pub fn save_cursor(repos: &Repos, cursor: &str, op_id: &str) -> Result<(), SyncError> {
+    if !wl_protocol::valid_cursor(cursor, op_id) {
+        return Err(SyncError::Protocol(
+            "refusing to persist a malformed cursor".into(),
+        ));
+    }
     let conn = repos.lock_conn();
+    // Monotonic: the cursor only ever moves forward. Settings and the
+    // telemetry drawer each own an independent sync button, so two
+    // cycles CAN run concurrently against one `Repos`; whichever finished
+    // first wrote the higher cursor, and the slower one used to overwrite
+    // it on the way out. Re-pulling a window is merely wasteful, but the
+    // window's watermarks had already been pruned, so every op in it was
+    // re-decrypted and re-applied on top of a fully-synced device.
     conn.execute(
         "INSERT INTO sync_cursor (id, cursor, op_id) VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET cursor=?1, op_id=?2",
+         ON CONFLICT(id) DO UPDATE SET cursor=?1, op_id=?2
+         WHERE (sync_cursor.cursor, sync_cursor.op_id) < (?1, ?2)",
         rusqlite::params![cursor, op_id],
     )?;
     Ok(())
@@ -790,6 +851,17 @@ fn is_fatal_store_error(e: &SyncError) -> bool {
                     || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
                     || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
                     || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                    // NOT NULL was missing from this list, and it is the
+                    // one every replicated table's `title`/`date`/
+                    // `outcome` column can trip: `apply_upsert` binds
+                    // `get(f, "title")`, which is `None` for any
+                    // payload that omits the key, and SQLite checks NOT
+                    // NULL *before* CHECK. So one sealed `{}` was
+                    // classified fatal, the cycle returned before
+                    // `save_cursor`, and the client re-pulled the same
+                    // op and failed identically on every future sync —
+                    // a permanent wedge from a single crafted op.
+                    || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL
         ),
         SyncError::Store(_) => true,
         _ => false,

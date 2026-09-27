@@ -10,7 +10,9 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{flash, invoke, set_directive, AppCtx, DirectiveView, VelocityView};
+use crate::app::{
+    flash, invoke, is_telemetry_chord, set_directive, AppCtx, DirectiveView, VelocityView,
+};
 
 pub fn CanvasScreen() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -248,8 +250,21 @@ fn EscapeModal() -> Element {
             tabindex: "0",
             autofocus: "true",
             onkeydown: move |e: Event<KeyboardData>| {
-                if *ctx.telemetry_open.peek()
-                    || (e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl()) {
+                if *ctx.telemetry_open.peek() {
+                    return;
+                }
+                if is_telemetry_chord(&e) {
+                    // The chord belongs to the app root, so this event is
+                    // let through deliberately rather than swallowed.
+                    // The bailout modal is closed first, though: both
+                    // overlays are `z-index: 40` siblings and the drawer
+                    // comes later in the DOM, so leaving the modal open
+                    // stacked a sheet on top of a sheet the user could no
+                    // longer reach. Escape only clears the drawers, so the
+                    // modal reappeared underneath and had to be dismissed
+                    // a second time.
+                    let mut s = ctx.escape_open;
+                    s.set(false);
                     return;
                 }
                 e.stop_propagation();

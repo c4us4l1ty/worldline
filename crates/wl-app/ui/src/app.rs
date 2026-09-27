@@ -165,6 +165,52 @@ pub fn autogrow_compose() {
     wl_autogrow_compose();
 }
 
+/// The global telemetry chord, `Ctrl+,` (the web stand-in for the spec's
+/// `⌘,`).
+///
+/// Takes the event by reference and matches the `Key` enum rather than
+/// comparing it to a literal. `Key::Character` owns a `String`, so
+/// `e.key() == Key::Character(",".to_string())` allocated one on EVERY
+/// keydown anywhere in the app — and this handler is on the root, so
+/// "anywhere" is the compose field, the search box, and every settings
+/// text input.
+pub fn is_telemetry_chord(e: &KeyboardData) -> bool {
+    e.modifiers().ctrl() && matches!(e.key(), Key::Character(c) if c == ",")
+}
+
+/// True when the focused element takes text entry.
+///
+/// A chord typed into a text field is the user typing, not a shortcut,
+/// and the two must not be confused. `KeyboardData` in Dioxus 0.7 exposes
+/// no event target — there is no `Event::target` to match on and no
+/// `tag_name()` on a handle — so this asks the document what holds focus.
+/// For any key a person produces, the focused element IS the target, so
+/// this answers the same question.
+///
+/// Non-text `<input>` types are excluded: pressing Ctrl+, with a
+/// checkbox focused is a shortcut, not a paste.
+pub fn focus_is_text_entry() -> bool {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_focus_is_text_entry() {
+      try {
+        const el = document.activeElement;
+        if (!el) { return false; }
+        const tag = (el.tagName || "").toUpperCase();
+        if (tag === "TEXTAREA" || tag === "SELECT") { return true; }
+        if (tag !== "INPUT") { return false; }
+        const type = (el.getAttribute("type") || "text").toLowerCase();
+        return ["checkbox","radio","button","submit","reset","file","range","color","image"]
+          .indexOf(type) === -1;
+      } catch (e) { return false; }
+    }
+  "#)]
+    extern "C" {
+        fn wl_focus_is_text_entry() -> bool;
+    }
+    wl_focus_is_text_entry()
+}
+
 /// Local calendar date as `YYYY-MM-DD`, matching the store's shape-exact
 /// `check_date` (which rejects `2026-9-8` and anything else chrono would
 /// otherwise accept).
@@ -397,11 +443,6 @@ pub enum Screen {
     SeedVault {
         phrase: Vec<String>,
         verify_indices: Vec<usize>,
-        restore: bool,
-        /// True when this install already has an identity (locked-boot
-        /// restore). The restore screen must not offer "create new",
-        /// which can never succeed then (B-004).
-        has_identity: bool,
     },
     Canvas,
     GoalCreate,
@@ -656,10 +697,23 @@ fn App() -> Element {
             onkeydown: move |e: Event<KeyboardData>| {
                 // Global drawer toggle: Ctrl+, (web equivalent of spec ⌘,).
                 // Escape dismisses the drawer when open.
-                if e.key() == Key::Character(",".to_string()) && e.modifiers().ctrl() {
-                    let open = *ctx.telemetry_open.read();
-                    { let mut s = ctx.telemetry_open; *s.write() = !open; }
+                if is_telemetry_chord(&e) {
+                    // Suppressed either way: the chord is claimed by this
+                    // handler, so the browser must not also act on it.
+                    e.prevent_default();
+                    // …but not while a text field has focus. This handler
+                    // is on the app root, so every `<input>` and
+                    // `<textarea>` in the tree is a descendant and its
+                    // keydowns bubble here — the compose box, the API
+                    // key, the mnemonic, the relay URL. Ctrl+, typed into
+                    // the compose field used to pop the telemetry sheet
+                    // over the sentence being written.
+                    if !focus_is_text_entry() {
+                        let open = *ctx.telemetry_open.read();
+                        { let mut s = ctx.telemetry_open; *s.write() = !open; }
+                    }
                 } else if e.key() == Key::Escape && (*ctx.telemetry_open.read() || *ctx.nav_open.read()) {
+                    e.prevent_default();
                     { let mut s = ctx.telemetry_open; *s.write() = false; }
                     { let mut s = ctx.nav_open; *s.write() = false; }
                 }
@@ -670,6 +724,13 @@ fn App() -> Element {
             // on screen forever and looks exactly like a slow start.
             // This turns "frozen with no explanation" into "failed,
             // here is why, here is the way out".
+            //
+            // The two drawers are inside it for the same reason and used
+            // to be the exception that proved the rule false: they are
+            // components, they read shell-supplied data (goal titles,
+            // milestone tallies, the `{provider} · {n} models` line), and
+            // a panic in either left the window frozen with no recovery
+            // affordance — through the two most-used overlays in the app.
             ErrorBoundary {
                 handle_error: move |error: ErrorContext| {
                     let detail = error
@@ -681,12 +742,10 @@ fn App() -> Element {
                 match ctx.screen.read().clone() {
                     Screen::Boot => rsx! { BootSplash {} },
                     Screen::BootError { detail } => rsx! { BootErrorScreen { detail: detail.clone() } },
-                    Screen::SeedVault { phrase, verify_indices, restore, has_identity } => rsx! {
+                    Screen::SeedVault { phrase, verify_indices } => rsx! {
                         crate::screens::SeedVaultScreen {
                             phrase: phrase.clone(),
                             verify_indices: verify_indices.clone(),
-                            restore,
-                            has_identity,
                         }
                     },
                     Screen::Canvas => rsx! { crate::screens::CanvasScreen {} },
@@ -697,12 +756,12 @@ fn App() -> Element {
                     Screen::EntropyLog => rsx! { crate::screens::EntropyLogScreen {} },
                     Screen::Trajectory => rsx! { crate::screens::TrajectoryScreen {} },
                 }
-            }
-            if *ctx.nav_open.read() {
-                crate::screens::NavDrawer {}
-            }
-            if *ctx.telemetry_open.read() {
-                crate::screens::TelemetryDrawer {}
+                if *ctx.nav_open.read() {
+                    crate::screens::NavDrawer {}
+                }
+                if *ctx.telemetry_open.read() {
+                    crate::screens::TelemetryDrawer {}
+                }
             }
             if let Some(msg) = ctx.toast.read().clone() {
                 div { class: "wl-toast", "{msg}" }
@@ -748,24 +807,35 @@ fn reload_page() {
 
 /// Boot splash. Counts elapsed seconds on purpose: a static "starting…"
 /// is indistinguishable from a frozen one, which is exactly how a
-/// wedged shell presented as an app that was merely busy. The counter
-/// dies with the component, so the happy path costs one 1 Hz interval
-/// for the few hundred milliseconds boot actually takes.
+/// wedged shell presented as an app that was merely busy. The happy path
+/// costs one 1 Hz timer for the few hundred milliseconds boot actually
+/// takes.
+///
+/// The ticker is spawned during render and cancelled with the component,
+/// not from inside an effect. `spawn` scopes a task to whatever scope is
+/// current when it is called, and Dioxus 0.7 invokes an effect's closure
+/// with NO scope pushed (`Effect::run` calls the boxed closure directly;
+/// the scope is never re-entered), so a task spawned from an effect
+/// closure is not reliably the component's to cancel. The old comment
+/// asserted the opposite — "the loop dies with this effect the moment the
+/// splash unmounts" — on the strength of a scoping guarantee the runtime
+/// does not make. Owning the handle makes the lifetime a property of
+/// this component instead of an inference about the scheduler.
 #[component]
 fn BootSplash() -> Element {
     let elapsed = use_signal(|| 0u32);
-    use_effect(move || {
+    let ticker = {
         let mut elapsed = elapsed;
+        // Chained `TimeoutFuture`s rather than `IntervalStream`: one
+        // timer type and no `futures` feature.
         spawn(async move {
-            // Chained `TimeoutFuture`s rather than `IntervalStream`: one
-            // timer type, no `futures` feature, and the loop dies with
-            // this effect the moment the splash unmounts.
             loop {
                 gloo_timers::future::TimeoutFuture::new(1000).await;
                 elapsed += 1;
             }
-        });
-    });
+        })
+    };
+    use_drop(move || ticker.cancel());
     let secs = *elapsed.read();
     rsx! {
         div { class: "wl-directive-container",
@@ -782,7 +852,11 @@ fn BootSplash() -> Element {
             }
             // Past a third of the budget, stop looking patient and say
             // the wait is abnormal — the watchdog is about to act.
-            if secs * 1000 >= BOOT_TIMEOUT_MS / 3 {
+            // `saturating_mul`: `secs` is a `u32` and `BOOT_TIMEOUT_MS` is
+            // a constant somebody will eventually loosen. A release-mode
+            // wrap here would flip the "taking longer than usual" warning
+            // off, silently, for exactly the boot that needs it.
+            if secs.saturating_mul(1000) >= BOOT_TIMEOUT_MS / 3 {
                 p { class: "wl-body-muted", style: "margin-top: 10px;",
                     "Taking longer than usual. The shell is not answering; this will report what went wrong."
                 }

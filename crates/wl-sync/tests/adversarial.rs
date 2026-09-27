@@ -12,7 +12,7 @@ use tower::util::ServiceExt;
 use wl_core::crypto::identity::Identity;
 use wl_core::store::open_in_memory;
 use wl_core::store::repo::Repos;
-use wl_sync::sync::{save_cursor, sync_cycle, Transport};
+use wl_sync::sync::{sync_cycle, Transport};
 
 struct AxumTransport {
     app: Router,
@@ -394,7 +394,13 @@ async fn defect_same_hlc_ops_lost_by_strict_cursor() {
                                 "target_date": null, "status": "active"
                             }))
                             .unwrap(),
-                            format!("goals:{rec}").as_bytes(),
+                            wl_core::crdt::routing_aad(
+                                "goals",
+                                rec,
+                                &format!("op-{rec}"),
+                                &shared_ts.to_string(),
+                            )
+                            .as_bytes(),
                         )
                         .unwrap();
                         sealed.to_bytes()
@@ -452,7 +458,13 @@ async fn defect_same_hlc_ops_lost_by_strict_cursor() {
                             "target_date": null, "status": "active"
                         }))
                         .unwrap(),
-                        b"goals:g-three",
+                        wl_core::crdt::routing_aad(
+                            "goals",
+                            "g-three",
+                            "op-g-three",
+                            &shared_ts.to_string(),
+                        )
+                        .as_bytes(),
                     )
                     .unwrap();
                     sealed.to_bytes()
@@ -486,8 +498,24 @@ async fn defect_same_hlc_ops_lost_by_strict_cursor() {
         cursor.is_some(),
         "sync_cursor table must be written by sync_cycle"
     );
-    // save_cursor itself works when called explicitly (API exists).
-    save_cursor(&b, "marker", "").unwrap();
+    // The persisted cursor is a real, canonical HLC — `save_cursor`
+    // refuses anything the relay would reject, so a cycle can never
+    // wedge itself on a cursor it made up.
+    let stored: String = b
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT cursor FROM sync_cursor WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        wl_core::hlc::HlcTimestamp::parse(&stored)
+            .unwrap()
+            .to_string(),
+        stored,
+        "cursor must be canonical, got {stored:?}"
+    );
 }
 
 /// FIXED (was: one push batch per cycle). `sync_cycle` drains the outbox
@@ -626,7 +654,18 @@ async fn tampered_pull_cursor_is_rejected_by_relay() {
 
     let conn = open_in_memory().unwrap();
     let r = Repos::new(conn, 2);
-    save_cursor(&r, "1000000.0.1", "").unwrap();
+    // Seed the bad cursor DIRECTLY: the client refuses to write one
+    // (`save_cursor` validates), and the relay must still reject one
+    // that arrives some other way — that is the property under test.
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO sync_cursor (id, cursor, op_id) VALUES (1, '1000000.0.1', '')
+             ON CONFLICT(id) DO UPDATE SET cursor='1000000.0.1', op_id=''",
+            [],
+        )
+        .unwrap();
     let err = sync_cycle(&r, &identity, &transport, 100).unwrap_err();
     let msg = match &err {
         wl_sync::sync::SyncError::Transport(m) => m.clone(),
@@ -752,3 +791,442 @@ async fn defect_pulled_ops_bypass_sealed_size_and_table_bounds() {
     assert_eq!((stats.pulled, stats.applied, stats.quarantined), (1, 0, 1));
     assert_eq!(stats.cursor, "00000000000000000001.00000.00001");
 }
+
+// ===========================================================================
+// Battle-test campaign: one regression per fixed remote-exploit.
+// ===========================================================================
+
+/// A relay is an UNTRUSTED party. It sees `table`, `record_id`, `hlc` and
+/// `operation_id` in cleartext — they are its routing key and its
+/// pagination cursor — and it cannot read `sealed_b64`. All four are now
+/// bound into the AEAD's associated data, so a rewritten header fails
+/// Poly1305 instead of silently re-ordering the merge.
+///
+/// Before the fix the AAD was `table:record` alone, so a relay could
+/// re-stamp any op to the top of the key space to make it win every
+/// merge, relabel it to defeat the `(device, operation_id)` tie-break,
+/// or rewind it so a real user's edit lost. None of that was detectable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_relay_rewriting_the_hlc_is_detected_and_quarantined() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let repos = Repos::new(open_in_memory().unwrap(), 2);
+    let g = repos.create_goal("Mine", None, None, None).unwrap();
+
+    // An honest op for `g`, sealed correctly.
+    let honest_hlc = "00000000000000000009.00000.00001";
+    let op_id = "op-honest";
+    let sealed = wl_core::crypto::aead::seal(
+        &identity,
+        &serde_json::to_vec(&serde_json::json!({
+            "title": "Original title", "description": null,
+            "target_date": null, "status": "active"
+        }))
+        .unwrap(),
+        wl_core::crdt::routing_aad("goals", &g.id, op_id, honest_hlc).as_bytes(),
+    )
+    .unwrap();
+    // …then the relay rewrites ONLY the cleartext HLC, to the top of the
+    // key space, so the op would beat every honest write forever.
+    let forged_hlc = "00000000000000000099.00000.00001";
+    let body = serde_json::json!({
+        "ops": [{
+            "operation_id": op_id,
+            "hlc": forged_hlc,
+            "table": "goals",
+            "record_id": g.id,
+            "sealed_b64": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD, sealed.to_bytes()),
+        }]
+    });
+    transport.post("/sync/push", &body).unwrap();
+
+    let stats = sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        (stats.pulled, stats.applied, stats.quarantined),
+        (1, 0, 1),
+        "a rewritten routing header must be quarantined, never merged"
+    );
+    let row = repos.goal(&g.id).unwrap().unwrap();
+    assert_eq!(
+        row.title, "Mine",
+        "the local row must be untouched by an op whose header was forged"
+    );
+    // The cursor still advanced, so the poison cannot wedge sync.
+    assert_eq!(stats.cursor, forged_hlc);
+}
+
+/// The same class, one field over: `operation_id` is the tie-break. A
+/// relay that relabels it can decide which of two same-HLC ops wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_relay_relabelling_the_operation_id_is_detected() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let repos = Repos::new(open_in_memory().unwrap(), 2);
+    let g = repos.create_goal("Mine", None, None, None).unwrap();
+    let hlc = "00000000000000000009.00000.00001";
+    let sealed = wl_core::crypto::aead::seal(
+        &identity,
+        &serde_json::to_vec(&serde_json::json!({
+            "title": "Original", "description": null,
+            "target_date": null, "status": "active"
+        }))
+        .unwrap(),
+        wl_core::crdt::routing_aad("goals", &g.id, "op-real", hlc).as_bytes(),
+    )
+    .unwrap();
+    transport
+        .post(
+            "/sync/push",
+            &serde_json::json!({"ops": [{
+                "operation_id": "op-zzz-relabelled", "hlc": hlc, "table": "goals",
+                "record_id": g.id,
+                "sealed_b64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD, sealed.to_bytes()),
+            }]}),
+        )
+        .unwrap();
+    let stats = sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!((stats.applied, stats.quarantined), (0, 1));
+}
+
+/// One pulled op whose HLC is `u64::MAX` must not be able to brick the
+/// client.
+///
+/// The chain: `Hlc::observe` adopted the remote physical verbatim, the
+/// head was persisted to `hlc_clock`, and the next local write carried
+/// into an `.expect()` that PANICKED — in the write path, on every
+/// device of the account, surviving restarts. One crafted op, no
+/// authentication required, unrecoverable short of deleting the data dir.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_maxed_wire_hlc_cannot_brick_the_local_clock() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let repos = Repos::new(open_in_memory().unwrap(), 2);
+    let g = repos.create_goal("Mine", None, None, None).unwrap();
+    let maxed = "18446744073709551615.65535.00001";
+    let fields = serde_json::json!({
+        "title": "Poison", "description": null, "target_date": null, "status": "active"
+    });
+    // Sealed honestly under the maxed HLC: a hostile RELAY cannot forge
+    // this (the AAD binds the HLC), but a hostile PEER sharing the
+    // account key can, and the client must survive it either way.
+    let sealed = wl_core::crypto::aead::seal(
+        &identity,
+        &serde_json::to_vec(&fields).unwrap(),
+        wl_core::crdt::routing_aad("goals", &g.id, "op-maxed", maxed).as_bytes(),
+    )
+    .unwrap();
+    transport
+        .post(
+            "/sync/push",
+            &serde_json::json!({"ops": [{
+                "operation_id": "op-maxed", "hlc": maxed, "table": "goals",
+                "record_id": g.id,
+                "sealed_b64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD, sealed.to_bytes()),
+            }]}),
+        )
+        .unwrap();
+
+    let stats = sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!((stats.pulled, stats.applied), (1, 1));
+
+    // The data landed (fail-open on the payload) …
+    assert_eq!(repos.goal(&g.id).unwrap().unwrap().title, "Poison");
+    // … and the clock is still usable: more than a full counter's worth
+    // of writes, strictly increasing, no panic.
+    let mut last = repos.hlc.now(repos.device_id());
+    for _ in 0..70_000 {
+        let next = repos.hlc.now(repos.device_id());
+        assert!(next >= last, "clock went backwards: {next:?} < {last:?}");
+        last = next;
+    }
+    // A real write still lands.
+    repos
+        .create_goal("After the storm", None, None, None)
+        .expect("local writes must still work");
+    assert!(repos.goal(&g.id).unwrap().is_some());
+}
+
+/// A NOT NULL violation on any replicated table must quarantine, not
+/// abort the cycle.
+///
+/// `is_fatal_store_error` allow-listed CHECK/FK/PK/UNIQUE but not NOT
+/// NULL, and SQLite checks NOT NULL *before* CHECK — so a single sealed
+/// `{}` was classified fatal, the cycle returned before `save_cursor`,
+/// and the client re-pulled and re-failed on every future sync. A
+/// permanent, unrecoverable wedge from one op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_not_null_violation_quarantines_instead_of_wedging_sync() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let repos = Repos::new(open_in_memory().unwrap(), 2);
+    let op = |op_id: &str, hlc: &str, rec: &str, body: serde_json::Value| {
+        let sealed = wl_core::crypto::aead::seal(
+            &identity,
+            &serde_json::to_vec(&body).unwrap(),
+            wl_core::crdt::routing_aad("goals", rec, op_id, hlc).as_bytes(),
+        )
+        .unwrap();
+        serde_json::json!({
+            "operation_id": op_id, "hlc": hlc, "table": "goals", "record_id": rec,
+            "sealed_b64": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD, sealed.to_bytes()),
+        })
+    };
+    // `goals.title` is NOT NULL; the payload omits it.
+    let bad = op(
+        "op-no-title",
+        "00000000000000000001.00000.00001",
+        "g-bad",
+        serde_json::json!({"description": null, "status": "active"}),
+    );
+    // A good op AFTER it, so "the cursor advanced past the poison" is
+    // observable rather than merely implied.
+    let good = op(
+        "op-good",
+        "00000000000000000002.00000.00001",
+        "g-good",
+        serde_json::json!({
+            "title": "Landed", "description": null,
+            "target_date": null, "status": "active"
+        }),
+    );
+    transport
+        .post("/sync/push", &serde_json::json!({"ops": [bad, good]}))
+        .unwrap();
+
+    let stats = sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        (stats.pulled, stats.applied, stats.quarantined),
+        (2, 1, 1),
+        "the poison must quarantine and the good op behind it must still land"
+    );
+    assert!(repos.goal("g-good").unwrap().is_some());
+    assert!(repos.goal("g-bad").unwrap().is_none());
+    assert!(!stats.cursor.is_empty(), "the cursor must have advanced");
+
+    // A second cycle is a no-op, not a repeat failure.
+    let again = sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!((again.pulled, again.quarantined), (0, 0));
+}
+
+/// A malformed check-in payload must NOT destroy the user's real
+/// same-date check-in.
+///
+/// `apply_check_in_win` deleted (and tombstoned) the rows it was
+/// displacing BEFORE inserting the winner, with every statement
+/// autocommitting. A payload whose `outcome` was missing or out of the
+/// CHECK list failed the INSERT — after the DELETE had already landed —
+/// and the op was then quarantined, so the row could never come back on
+/// that device while its peer still had it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_poison_check_in_cannot_destroy_a_real_one() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let repos = Repos::new(open_in_memory().unwrap(), 2);
+    // The user's genuine check-in for 2026-09-18.
+    let mine = repos
+        .upsert_check_in("2026-09-18", wl_core::domain::CheckInOutcome::Done, Some("real"), None)
+        .unwrap();
+    let before: i64 = repos
+        .lock_conn()
+        .query_row("SELECT COUNT(*) FROM check_ins", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, 1);
+
+    // A peer op for the SAME date with an outcome outside the CHECK
+    // list. Its HLC must BEAT the local check-in's, or arbitration
+    // rejects it as stale and the delete path is never reached — the
+    // property under test is the one that only fires on a WINNING op.
+    let (head, _) = repos.hlc.head();
+    let hlc = wl_core::hlc::HlcTimestamp {
+        physical: head + 60_000_000_000,
+        counter: 0,
+        device: 9,
+    }
+    .to_string();
+    let sealed = wl_core::crypto::aead::seal(
+        &identity,
+        &serde_json::to_vec(&serde_json::json!({
+            "date": "2026-09-18", "outcome": "not-a-real-outcome", "note": null
+        }))
+        .unwrap(),
+        wl_core::crdt::routing_aad("check_ins", &mine.id, "op-bad-checkin", &hlc).as_bytes(),
+    )
+    .unwrap();
+    transport
+        .post(
+            "/sync/push",
+            &serde_json::json!({"ops": [{
+                "operation_id": "op-bad-checkin", "hlc": hlc, "table": "check_ins",
+                "record_id": mine.id,
+                "sealed_b64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD, sealed.to_bytes()),
+            }]}),
+        )
+        .unwrap();
+
+    let stats = sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!(stats.quarantined, 1, "the bad op must quarantine");
+    let after: i64 = repos
+        .lock_conn()
+        .query_row("SELECT COUNT(*) FROM check_ins", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(after, 1, "the real check-in must survive the poison op");
+    let kept = repos
+        .check_in_for_date("2026-09-18")
+        .unwrap()
+        .expect("the user's check-in is still there");
+    assert_eq!(kept.outcome, wl_core::domain::CheckInOutcome::Done);
+    assert_eq!(kept.note.as_deref(), Some("real"));
+}
+
+/// Deleting ONE phase on device A must not delete the others on device B.
+///
+/// Every step of a progressive directive shared the directive's record
+/// id, so all of them were one merge record: the peer's apply ran
+/// `DELETE FROM directive_phases WHERE directive_id = ?`, and removing
+/// step 2 erased step 1 on every other device too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_deleting_one_phase_keeps_the_others_on_peers() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let a = Repos::new(open_in_memory().unwrap(), 1);
+    // Every writer needs the identity: without it nothing is enqueued
+    // for the outbox and the peer's FK chain has no root.
+    let g = a.create_goal("Ship it", None, None, Some(&identity)).unwrap();
+    let m = a.create_milestone(&g.id, "M1", None, 0, Some(&identity)).unwrap();
+    let d = a
+        .create_directive(
+            &m.id,
+            "Progressive",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &[("A".into(), None, 5), ("B".into(), None, 25)],
+            Some(&identity),
+        )
+        .unwrap();
+    assert_eq!(a.phases_for_directive(&d.id).unwrap().len(), 2);
+
+    // A publishes, B pulls.
+    let pushed = sync_cycle(&a, &identity, &transport, 100).unwrap();
+    assert!(pushed.pushed > 0, "A's ops must reach the relay first");
+    let b = Repos::new(open_in_memory().unwrap(), 2);
+    let got = sync_cycle(&b, &identity, &transport, 100).unwrap();
+    assert_eq!(got.quarantined, 0, "every phase op must apply cleanly");
+    assert_eq!(
+        b.phases_for_directive(&d.id).unwrap().len(),
+        2,
+        "both phases must replicate"
+    );
+
+    // A deletes ONLY step 2.
+    a.delete_directive_phase(&d.id, 2, Some(&identity)).unwrap();
+    assert_eq!(a.phases_for_directive(&d.id).unwrap().len(), 1);
+    sync_cycle(&a, &identity, &transport, 100).unwrap();
+
+    sync_cycle(&b, &identity, &transport, 100).unwrap();
+    let on_b = b.phases_for_directive(&d.id).unwrap();
+    assert_eq!(
+        on_b.len(),
+        1,
+        "a one-step delete must not wipe the sibling phase on a peer: {on_b:?}"
+    );
+    assert_eq!(on_b[0].step, 1, "the surviving phase is the one not deleted");
+}
+
+/// A local write must advance the record's merge head.
+///
+/// Only the delete writers did, so the head lagged behind the row on
+/// every ordinary write. The pull side prefers the head over the row's
+/// own HLC, so: peer op at T_r lands (head = T_r) → the user changes a
+/// setting at T_l > T_r (row = T_l, head still T_r) → a third device's
+/// op at T_m between them beats the head and blind-upserts the STALE
+/// value over the user's newer edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn defect_stale_remote_op_cannot_clobber_a_newer_local_write() {
+    let app = relay_app();
+    let identity = Identity::from_phrase(PHRASE).unwrap();
+    let token = authenticate(&app, &identity).await;
+    let transport = AxumTransport { app, token };
+
+    let repos = Repos::new(open_in_memory().unwrap(), 2);
+    let mut settings = repos.settings().unwrap();
+    settings.theme = "dark".into();
+    repos.save_settings(&settings, None).unwrap();
+
+    // Peer op lands at T_r.
+    let push = |op_id: &str, hlc: &str, theme: &str| {
+        let sealed = wl_core::crypto::aead::seal(
+            &identity,
+            &serde_json::to_vec(&serde_json::json!({
+                "theme": theme, "ai_provider": null, "tier1_model": null,
+                "tier2_model": null, "relay_url": null
+            }))
+            .unwrap(),
+            wl_core::crdt::routing_aad("app_settings", "1", op_id, hlc).as_bytes(),
+        )
+        .unwrap();
+        serde_json::json!({
+            "operation_id": op_id, "hlc": hlc, "table": "app_settings",
+            "record_id": "1",
+            "sealed_b64": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD, sealed.to_bytes()),
+        })
+    };
+    transport
+        .post(
+            "/sync/push",
+            &serde_json::json!({"ops": [
+                push("op-peer-1", "00000000000000000001.00000.00001", "dark")
+            ]}),
+        )
+        .unwrap();
+    sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!(repos.settings().unwrap().theme, "dark");
+
+    // The user switches to light locally — a strictly later write.
+    let mut mine = repos.settings().unwrap();
+    mine.theme = "light".into();
+    repos.save_settings(&mine, None).unwrap();
+    assert_eq!(repos.settings().unwrap().theme, "light");
+
+    // A third device's op at an HLC BETWEEN the peer's and the user's.
+    transport
+        .post(
+            "/sync/push",
+            &serde_json::json!({"ops": [
+                push("op-peer-2", "00000000000000000002.00000.00001", "dark")
+            ]}),
+        )
+        .unwrap();
+    sync_cycle(&repos, &identity, &transport, 100).unwrap();
+    assert_eq!(
+        repos.settings().unwrap().theme,
+        "light",
+        "an op older than the user's own edit must not win last-writer-wins"
+    );
+}
+

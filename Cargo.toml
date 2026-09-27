@@ -58,7 +58,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Async / server
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs"] }
 axum = { version = "0.8", features = ["json", "tokio"] }
-tower = { version = "0.5", features = ["util"] }
+# `timeout` + `limit` back the relay's request deadline and concurrency
+# ceiling. Both are load-bearing against resource exhaustion, not
+# preferences: without a deadline a client that dribbles a body holds a
+# task and its read buffer open forever, and without a ceiling the
+# in-flight count is whatever the attacker chooses.
+tower = { version = "0.5", features = ["util", "timeout", "limit"] }
 hyper = "1.4"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 

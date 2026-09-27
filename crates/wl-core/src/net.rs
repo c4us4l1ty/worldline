@@ -15,8 +15,9 @@
 //! Residual TOCTOU: the name is validated at save/use time but resolved
 //! at connect time, so a hostile DNS (rebinding) can still steer the
 //! connection. Impact is capped by design — the relay is a blind blob
-//! store (E2EE via `aead::seal` with `table:record` AAD), so a rogue
-//! endpoint sees only routing headers + ciphertext, never plaintext.
+//! store (E2EE via `aead::seal` with the full routing header bound into
+//! the AAD), so a rogue endpoint sees only routing headers + ciphertext,
+//! never plaintext.
 //!
 //! The check lives in wl-core (platform-clean) so the shell and any
 //! future mobile client share one policy.
@@ -49,8 +50,18 @@ pub fn validate_relay_url(raw: &str) -> Result<String, String> {
         return Err("relay URL has no host".into());
     }
     // GCE metadata hostname (exact + subdomains).
+    //
+    // The trailing root label is stripped first. `metadata.google.internal.`
+    // is the SAME name to the resolver — the URL spec's domain-to-ASCII
+    // does not remove the root dot — but it is neither equal to
+    // `metadata.google.internal` nor `.ends_with()` it, so the block was
+    // bypassed by appending one character, and `relay_url` is a
+    // replicated CRDT field a hostile peer can write.
     let host_lc = host.to_ascii_lowercase();
-    if host_lc == "metadata.google.internal" || host_lc.ends_with(".metadata.google.internal") {
+    let host_trimmed = host_lc.trim_end_matches('.');
+    if host_trimmed == "metadata.google.internal"
+        || host_trimmed.ends_with(".metadata.google.internal")
+    {
         return Err("cloud metadata hosts are not allowed as relays".into());
     }
     // Cloud instance-metadata IPs, in every representable form
@@ -62,8 +73,17 @@ pub fn validate_relay_url(raw: &str) -> Result<String, String> {
             }
         }
         Some(url::Host::Ipv6(v6)) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                if is_metadata_ipv4(&mapped) {
+            // `to_ipv4` unwraps BOTH the mapped form (`::ffff:a.b.c.d`)
+            // and the deprecated IPv4-compatible form (`::a.b.c.d`), and
+            // `to_ipv4_mapped` only handles the first — so a bare
+            // `::a9fe:a9fe` (169.254.169.254) sailed through the old arm
+            // even though `connect(2)` still honours it on Linux. A
+            // NAT64 prefix is deliberately NOT unwrapped: guessing the
+            // well-known prefix is a heuristic, and the honest fix for
+            // that is the DNS-rebinding note in the module header, not a
+            // guess.
+            if let Some(v4) = v6.to_ipv4() {
+                if is_metadata_ipv4(&v4) {
                     return Err("cloud metadata hosts are not allowed as relays".into());
                 }
             } else if v6.is_unspecified() || v6.segments()[0] & 0xffc0 == 0xfe80 {
@@ -79,9 +99,13 @@ pub fn validate_relay_url(raw: &str) -> Result<String, String> {
 }
 
 /// Cloud metadata / link-local IPv4: 169.254.0.0/16, 100.100.100.200
-/// (Alibaba), 0.0.0.0 (unspecified = any-interface rebinding risk).
+/// (Alibaba), 0.0.0.0 (unspecified = any-interface rebinding risk), and
+/// Oracle's 192.0.0.192.
 fn is_metadata_ipv4(v4: &std::net::Ipv4Addr) -> bool {
-    v4.is_link_local() || v4.is_unspecified() || *v4 == std::net::Ipv4Addr::new(100, 100, 100, 200)
+    v4.is_link_local()
+        || v4.is_unspecified()
+        || *v4 == std::net::Ipv4Addr::new(100, 100, 100, 200)
+        || *v4 == std::net::Ipv4Addr::new(192, 0, 0, 192)
 }
 
 #[cfg(test)]

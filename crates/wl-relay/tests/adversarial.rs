@@ -33,47 +33,74 @@ async fn body_text(resp: axum::http::Response<Body>) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-/// FIXED (was: unbounded unauthenticated account registration).
-/// Account registration is now capped (`AccountQuota`): minting rows
-/// requires no auth, so the cap is the storage-exhaustion bound. At
-/// the HTTP layer the flood gets 429s past the cap.
+/// FIXED (was: unbounded unauthenticated account registration, and then
+/// a cap that ratcheted shut forever).
+///
+/// Registration needs no auth and the public key is caller-chosen, so
+/// `ACCOUNT_CAP` is the storage bound. The first fix refused the 10 001st
+/// registration and deleted only the row it had just inserted — the
+/// previous 10 000 were never reclaimed, and the table is a file that
+/// outlives the process. Every legitimate new device then got 429 on
+/// `/auth/challenge` and could never onboard, with no remedy but a manual
+/// database edit. The cap is now a SLIDING WINDOW: over the cap, the
+/// oldest unreferenced accounts are evicted, so the bound holds without
+/// deciding permanently who is allowed to exist.
 #[tokio::test]
 async fn defect_unbounded_unauthenticated_account_registration() {
-    // Drive registration through the store directly (the HTTP layer
-    // maps AccountQuota → 429; the cap itself lives in the backend).
-    let store = wl_relay::SqliteForTest::open_in_memory().unwrap();
     use wl_relay::store::BlobStore;
-    let mut minted = 0usize;
-    let mut quota_hit = false;
-    for i in 0..20_000i64 {
-        let pk = format!("{:064x}", i);
-        match store.register_account(&pk) {
-            Ok(()) => minted += 1,
-            Err(wl_relay::store::StoreError::AccountQuota) => {
-                quota_hit = true;
-                break;
-            }
-            Err(e) => panic!("unexpected: {e}"),
-        }
+    let store = wl_relay::SqliteForTest::open_in_memory().unwrap();
+    const CAP: i64 = 10_000;
+    for i in 0..(CAP + 200) {
+        let pk = format!("{i:064x}");
+        store
+            .register_account(&pk)
+            .unwrap_or_else(|e| panic!("registration {i} must not be refused: {e}"));
     }
-    assert!(quota_hit, "registration cap never engaged");
-    assert!(minted <= 10_000, "cap allows {minted} accounts");
+    let held: i64 = store
+        .account_row_count_for_test()
+        .expect("count is queryable");
+    assert!(
+        held <= CAP,
+        "the cap is the storage bound: {held} rows resident for a {CAP} cap"
+    );
 
-    // HTTP surface: over-cap registration is refused (429), not stored.
-    let state = Arc::new(wl_relay::AppStateForTest {
-        auth: wl_relay::AuthForTest::new(),
-        blobs: Box::new(store),
-    });
-    let app = wl_relay::router_for_test(state);
-    let over = format!("{:064x}", 50_000u64);
-    let resp = post(
-        &app,
-        "/auth/challenge",
-        format!("{{\"public_key\":\"{over}\"}}"),
-        None,
-    )
-    .await;
-    assert_eq!(resp.status(), 429, "over-cap registration must 429");
+    // The oldest account was evicted…
+    assert!(
+        !store.account_exists(&format!("{:064x}", 0i64)).unwrap(),
+        "the oldest unreferenced account must be the one evicted"
+    );
+    // …and a fresh one still registers. This is the property the old
+    // one-shot ratchet destroyed: onboarding never becomes permanently
+    // impossible.
+    let late = format!("{:064x}", 9_999_999i64);
+    store
+        .register_account(&late)
+        .expect("a brand-new device must still be able to onboard");
+
+    // An account that still holds ops is NOT evicted: the `ops` FK
+    // points at `accounts`, so reclaiming it would either fail or take
+    // the user's ciphertext with it.
+    let holder = format!("{:064x}", 8_888_888i64);
+    store.register_account(&holder).unwrap();
+    store
+        .insert_ops(&[wl_relay::store::StoredOp {
+            operation_id: "op-1".into(),
+            account: holder.clone(),
+            hlc: "00000000000000000001.00001.00001".into(),
+            table: "goals".into(),
+            record_id: "g1".into(),
+            sealed: vec![1, 2, 3],
+        }])
+        .expect("op insert");
+    for i in 0..(CAP + 400) {
+        store
+            .register_account(&format!("{i:064x}"))
+            .expect("registration stays open");
+    }
+    assert!(
+        store.account_exists(&holder).unwrap(),
+        "an account with stored ops must never be evicted"
+    );
 }
 
 /// FIXED (was: challenge map unbounded within the TTL). In-flight
@@ -766,4 +793,271 @@ async fn ordinary_pull_pages_are_not_truncated() {
     let pulled: wl_protocol::PullResponse = serde_json::from_str(&body_text(resp).await).unwrap();
     assert_eq!(pulled.ops.len(), 10, "all 10 ops must come back");
     assert!(pulled.exhausted, "a short page means nothing remains");
+}
+
+// ===========================================================================
+// Battle-test campaign: one regression per fixed defect.
+// ===========================================================================
+
+/// The pull byte budget is the only thing between a hostile store and an
+/// unbounded response, and the client reads with exactly that ceiling.
+/// The old estimate summed raw `str::len()` of the routing headers — but
+/// serde_json escapes a control character as SIX bytes, so a
+/// 128-character header of U+0001 counted as 128 and serialised as 768.
+/// The response sailed past `MAX_PULL_BYTES`, the client rejected the
+/// page, and because the cursor is only saved from a DECODED response it
+/// never advanced: the account could never sync again.
+#[tokio::test]
+async fn defect_pull_byte_budget_counts_the_serialized_op() {
+    let (app, token) = authed_app().await;
+    // Sized so the two estimates STRADDLE the budget:
+    //   old (raw str::len): 500 x 16_005 = 8_002_500  <= 8_388_608  -> all 500 in
+    //   real (serialized):  500 x ~17_400 = ~8_700_000  >  8_388_608  -> must truncate
+    // Each header is 128 control characters: 128 raw, 768 escaped.
+    const SEALED: usize = 11_400;
+    let hostile = "\u{1}".repeat(128);
+    let mut stored = 0usize;
+    for batch in 0..4 {
+        let from = batch * 125;
+        let count = 125;
+        let ops: Vec<serde_json::Value> = (from..from + count)
+            .map(|i| {
+                serde_json::json!({
+                    "operation_id": hostile,
+                    "hlc": format!("{:020}.00000.00001", 1_000_000u64 + i as u64),
+                    "table": "goals",
+                    "record_id": hostile,
+                    "sealed_b64":
+                        base64::engine::general_purpose::STANDARD.encode(vec![0u8; SEALED]),
+                })
+            })
+            .collect();
+        let resp = post(
+            &app,
+            "/sync/push",
+            serde_json::json!({"ops": ops}).to_string(),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "batch {batch} must be accepted");
+        stored += count;
+    }
+    assert_eq!(stored, 500, "the fixture must fill one full pull page");
+
+    let pulled = post(
+        &app,
+        "/sync/pull",
+        serde_json::json!({"since_hlc": "", "since_op_id": "", "limit": 500}).to_string(),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(pulled.status(), 200);
+    let body = body_text(pulled).await;
+    assert!(
+        body.len() <= wl_protocol::MAX_PULL_BYTES,
+        "a pull response must fit the client's reader: {} > {}",
+        body.len(),
+        wl_protocol::MAX_PULL_BYTES
+    );
+    // Truncation is only safe because the cursor comes from the last op
+    // actually INCLUDED, and a short page must not claim exhaustion.
+    let parsed: wl_protocol::PullResponse = serde_json::from_str(&body).unwrap();
+    assert!(
+        parsed.ops.len() < stored,
+        "this fixture is calibrated to overflow; if it no longer does, \
+         the escaping ratio it depended on has changed"
+    );
+    assert!(
+        !parsed.exhausted,
+        "a truncated page must not tell the client to stop"
+    );
+    assert_eq!(parsed.next_cursor.len(), 32, "the cursor must be canonical");
+}
+
+/// A hex-valid public key that is not a curve point is CLIENT input. It
+/// was answered 500, which pollutes 5xx budgets and trips client retry
+/// logic — and it was never logged, because the only `tracing::warn!` in
+/// the file was on the challenge path.
+#[tokio::test]
+async fn defect_non_curve_public_key_is_a_400_not_a_500() {
+    use ed25519_dalek::Signer;
+    let state = Arc::new(wl_relay::AppStateForTest {
+        auth: wl_relay::AuthForTest::new(),
+        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
+    });
+    let app = wl_relay::router_for_test(state);
+    let bad_pk = "00".repeat(32);
+    let ch_resp = post(
+        &app,
+        "/auth/challenge",
+        serde_json::json!({"public_key": bad_pk}).to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(ch_resp.status(), 200, "a challenge is mintable for any key");
+    let ch: wl_protocol::Challenge = serde_json::from_str(&body_text(ch_resp).await).unwrap();
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let payload = wl_protocol::challenge_signing_payload(&ch.nonce, ch.expires_at);
+    let sig = hex::encode(sk.sign(&payload).to_bytes());
+    let v = app
+        .clone()
+        .oneshot(
+            Request::post("/auth/verify")
+                .header("content-type", "application/json")
+                .header("x-nonce", &ch.nonce)
+                .header("x-expires", ch.expires_at.to_string())
+                .body(Body::from(
+                    serde_json::json!({"public_key": bad_pk, "signature": sig}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // `VerifyingKey::from_bytes` is infallible for an all-zero point —
+    // ed25519-dalek decompresses inside `verify_strict` — so this lands
+    // on the signature arm. The property that matters is that NO bad
+    // input produces a 5xx: the generic arm used to answer 500 here,
+    // polluting error budgets and tripping client retry logic, and it
+    // was never logged.
+    assert!(
+        v.status().is_client_error(),
+        "bad input must never be reported as a server fault: {}",
+        v.status()
+    );
+    assert_ne!(v.status(), 500);
+}
+
+/// A failed signature must BURN the challenge.
+///
+/// The claim ran only after `verify_strict` had already succeeded, so a
+/// bad signature left the nonce in the map and the four nonces
+/// `MAX_CHALLENGES_PER_ACCOUNT` allows served an unbounded number of
+/// retries — each paying a point decompression plus a double-scalar
+/// multiply (the deliberately slow variant) on an UNAUTHENTICATED route.
+/// One keypair could hold the relay's CPU indefinitely. The nonce is a
+/// 256-bit secret the client holds, so burning it costs a real client
+/// nothing: it asks for another.
+#[tokio::test]
+async fn defect_bad_signature_burns_the_challenge() {
+    use ed25519_dalek::{Signer, SigningKey};
+    let state = Arc::new(wl_relay::AppStateForTest {
+        auth: wl_relay::AuthForTest::new(),
+        blobs: Box::new(wl_relay::SqliteForTest::open_in_memory().unwrap()),
+    });
+    let app = wl_relay::router_for_test(state);
+    let sk = SigningKey::from_bytes(&[9u8; 32]);
+    let pk = hex::encode(sk.verifying_key().as_bytes());
+
+    async fn mint(app: &Router, pk: &str) -> wl_protocol::Challenge {
+        let r = post(
+            app,
+            "/auth/challenge",
+            serde_json::json!({"public_key": pk}).to_string(),
+            None,
+        )
+        .await;
+        serde_json::from_str(&body_text(r).await).unwrap()
+    }
+    async fn submit(
+        app: &Router,
+        pk: &str,
+        ch: &wl_protocol::Challenge,
+        sig: &str,
+    ) -> axum::http::StatusCode {
+        app.clone()
+            .oneshot(
+                Request::post("/auth/verify")
+                    .header("content-type", "application/json")
+                    .header("x-nonce", &ch.nonce)
+                    .header("x-expires", ch.expires_at.to_string())
+                    .body(Body::from(
+                        serde_json::json!({"public_key": pk, "signature": sig}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    let ch = mint(&app, &pk).await;
+    let wrong = "11".repeat(64);
+    assert_eq!(submit(&app, &pk, &ch, &wrong).await, 401);
+    // A CORRECT signature over the burned nonce must still fail: the
+    // expensive check does not get a free retry.
+    let payload = wl_protocol::challenge_signing_payload(&ch.nonce, ch.expires_at);
+    let right = hex::encode(sk.sign(&payload).to_bytes());
+    assert_eq!(
+        submit(&app, &pk, &ch, &right).await,
+        401,
+        "a burned challenge must not authenticate on a retry"
+    );
+    // A fresh challenge still works, so a real client that fat-fingered
+    // a signature is not locked out.
+    let ch2 = mint(&app, &pk).await;
+    let payload2 = wl_protocol::challenge_signing_payload(&ch2.nonce, ch2.expires_at);
+    let right2 = hex::encode(sk.sign(&payload2).to_bytes());
+    assert_eq!(submit(&app, &pk, &ch2, &right2).await, 200);
+}
+
+/// A session token must not carry a counter. The old shape was
+/// `"{fetch_add}-0}-{uuid_v4}"`, handing every token holder a
+/// per-process session counter and an instance fingerprint.
+#[tokio::test]
+async fn defect_session_tokens_are_purely_random() {
+    let (_app, token) = authed_app().await;
+    assert!(
+        !token.contains('-'),
+        "a token must be opaque, not a tuple: {token}"
+    );
+    assert_eq!(token.len(), 64, "32 random bytes, hex-encoded: {token}");
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// No wire input may panic the relay. This walks the whole hostile-input
+/// surface — malformed JSON, wrong types, absurd lengths, control
+/// characters in headers, empty bodies — and asserts only that nothing
+/// dies and the relay is still serving afterwards.
+#[tokio::test]
+async fn defect_no_wire_input_panics_the_relay() {
+    let (app, token) = authed_app().await;
+    let bodies: Vec<String> = vec![
+        String::new(),
+        "null".into(),
+        "[]".into(),
+        "{}".into(),
+        "{\"ops\":null}".into(),
+        "{\"ops\":[{}]}".into(),
+        "{\"ops\":[{\"sealed_b64\":\"!!!!\"}]}".into(),
+        "{\"ops\":\"not-a-list\"}".into(),
+        serde_json::json!({"public_key": "\u{1}".repeat(64)}).to_string(),
+        serde_json::json!({"public_key": "z".repeat(64)}).to_string(),
+        serde_json::json!({"since_hlc": 123, "since_op_id": [], "limit": "lots"}).to_string(),
+        serde_json::json!({"since_hlc": "9".repeat(64)}).to_string(),
+        serde_json::json!({"since_hlc": "\u{1}".repeat(32)}).to_string(),
+        serde_json::json!({"ops": [{"operation_id": 1, "hlc": [], "table": {}}]}).to_string(),
+    ];
+    for path in [
+        "/auth/challenge",
+        "/auth/verify",
+        "/sync/push",
+        "/sync/pull",
+    ] {
+        for body in &bodies {
+            let r = post(&app, path, body.clone(), Some(&token)).await;
+            let status = r.status();
+            assert!(
+                status.is_client_error() || status.is_success(),
+                "{path} with {body:?} produced {status}"
+            );
+        }
+    }
+    let r = post(
+        &app,
+        "/sync/pull",
+        serde_json::json!({"since_hlc": "", "since_op_id": "", "limit": 10}).to_string(),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(r.status(), 200, "the relay survives hostile input");
 }

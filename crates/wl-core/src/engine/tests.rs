@@ -81,21 +81,28 @@ fn single_active_directive_invariant() {
     assert_eq!(active.id, directive_id);
 }
 
+/// Walks the real user loop: load the canvas (`current`, which activates
+/// whatever is runnable), then press ⌘+Enter (`complete`).
+///
+/// The loop used to call `complete` alone and lean on it activating the
+/// next directive when none was active. That was the stray-keystroke bug
+/// — ⌘+Enter on an idle canvas started a directive nobody asked for —
+/// and this test had encoded the bug as the contract. Activating is the
+/// canvas load's job, so that is what the test does now.
 #[test]
 fn completion_unlocks_next_and_completes_milestones() {
     let r = setup_full();
     let e = engine(&r);
-    // Drive the engine until it goes idle: each `complete` either
-    // activates, advances a progressive phase, or completes a
-    // directive. Two directives today (one monolithic, one with 2
-    // phases) ⇒ 1 activate + 1 complete + 1 activate + 2 phase
-    // completions = 5 calls, +1 safety margin.
     let mut saw_completed = false;
     for _ in 0..8 {
-        match e.complete(TODAY).unwrap() {
-            EngineOutcome::DirectiveCompleted { .. } => saw_completed = true,
+        match e.current(TODAY).unwrap() {
             EngineOutcome::DirectiveActive { .. } => {}
             EngineOutcome::Idle => break,
+            o => panic!("unexpected {o:?}"),
+        }
+        match e.complete(TODAY).unwrap() {
+            EngineOutcome::DirectiveCompleted { .. } => saw_completed = true,
+            EngineOutcome::DirectiveActive { .. } | EngineOutcome::Idle => {}
             o => panic!("unexpected {o:?}"),
         }
     }

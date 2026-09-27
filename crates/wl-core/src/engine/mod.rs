@@ -103,10 +103,16 @@ impl<'a> Engine<'a> {
         let Some(next) = self.repos.next_runnable_directive(date)? else {
             return Ok(EngineOutcome::Idle);
         };
+        // Compute the phase view and validate the milestone BEFORE the
+        // write. The order matters: `set_directive_state(.., Active)`
+        // commits, and `ensure_milestone_active` can then fail with
+        // `MilestoneMissing` — leaving an active directive whose
+        // milestone was never promoted, with the caller holding an Err
+        // and no idea the activation landed.
         let estimated_minutes = self.current_phase_minutes(&next)?;
+        self.ensure_milestone_active(&next.milestone_id)?;
         self.repos
             .set_directive_state(&next.id, DirectiveState::Active, self.identity)?;
-        self.ensure_milestone_active(&next.milestone_id)?;
         let phase = self.phase_view(&next);
         Ok(EngineOutcome::DirectiveActive {
             directive_id: next.id.clone(),
@@ -125,32 +131,47 @@ impl<'a> Engine<'a> {
     // Completion — ⌘+Enter path.
     // ------------------------------------------------------------------
 
-    /// Marks the active directive (or its current progressive phase)
-    /// complete. For progressive directives, intermediate completions
-    /// advance the phase instead of closing the directive (§5.2). The
-    /// reported minutes always come from the POST-advance row (E1), and
-    /// the final phase row is marked done before the directive closes
-    /// (E2) so peers never replicate a junk active-final-phase state.
-    pub fn complete(&self, date: &str) -> Result<EngineOutcome, EngineError> {
+    /// ⌘+Enter with nothing active is `Idle`, not an implicit activation,
+    /// so `date` is no longer consulted here. The parameter stays so the
+    /// command surface and the canvas call site keep their shape; the
+    /// canvas activates via [`Engine::current`] on load.
+    pub fn complete(&self, _date: &str) -> Result<EngineOutcome, EngineError> {
+        // ⌘+Enter on an idle canvas is `Idle`, not "start the next
+        // thing". It used to fall through to `activate_next`, so a stray
+        // keystroke on an empty canvas began a directive the user never
+        // asked for.
         let Some(d) = self.repos.active_directive()? else {
-            return self.activate_next(date);
+            return Ok(EngineOutcome::Idle);
         };
         if d.uses_progressive_activation() && d.progressive_step < d.progressive_total {
-            self.repos.advance_progressive_step(&d.id, self.identity)?;
-            // Re-read: the pre-advance snapshot still points at the old
-            // step, so its minutes belong to the phase just finished.
-            let fresh = self
-                .repos
-                .directive(&d.id)?
-                .ok_or_else(|| StoreError::NotFound(format!("directive {}", d.id)))?;
-            let estimated_minutes = self.current_phase_minutes(&fresh)?;
-            let phase = self.phase_view(&fresh);
-            return Ok(EngineOutcome::DirectiveActive {
-                directive_id: fresh.id,
-                milestone_id: fresh.milestone_id,
-                phase,
-                estimated_minutes,
-            });
+            // Self-heal first. `advance_progressive_step` hard-fails on a
+            // missing phase row, and only `activate_next` ran the repair
+            // — so a progressive directive whose phase rows went missing
+            // (a truncated pull) could never be completed: every ⌘+Enter
+            // errored until the canvas happened to reload.
+            self.current_phase_minutes(&d)?;
+            // The return value is load-bearing. It is `false` when the
+            // row moved under us (a concurrent sync merge), and the old
+            // code discarded it with `?` — so the phase was marked done
+            // and the caller was told the directive was still active at
+            // `phase: (total, total)`, having advanced nothing.
+            if self.repos.advance_progressive_step(&d.id, self.identity)? {
+                // Re-read: the pre-advance snapshot still points at the
+                // old step, so its minutes belong to the phase just
+                // finished.
+                let fresh = self
+                    .repos
+                    .directive(&d.id)?
+                    .ok_or_else(|| StoreError::NotFound(format!("directive {}", d.id)))?;
+                let estimated_minutes = self.current_phase_minutes(&fresh)?;
+                let phase = self.phase_view(&fresh);
+                return Ok(EngineOutcome::DirectiveActive {
+                    directive_id: fresh.id,
+                    milestone_id: fresh.milestone_id,
+                    phase,
+                    estimated_minutes,
+                });
+            }
         }
         if d.uses_progressive_activation() {
             // Final phase: close the phase row first (replicated via
@@ -186,13 +207,17 @@ impl<'a> Engine<'a> {
             return Err(StoreError::Invalid("bad date".into()).into());
         }
         let Some(d) = self.repos.active_directive()? else {
-            return self.activate_next(date);
+            return Ok(EngineOutcome::Idle);
         };
         if reason == BailoutReason::MiscalculatedScope && date_plus_days(date, 1).is_none() {
             return Err(StoreError::Invalid("bad date".into()).into());
         }
-        self.repos
-            .record_bailout(&d.id, reason, note, self.identity)?;
+        // The STATE change is the event; the ledger row is the record of
+        // it. Recording first meant a failure in the second step (a
+        // peer-supplied `progressive_total` larger than the downsized
+        // estimate makes `reschedule_directive` reject) left a bailout
+        // row replicated to every device describing something that never
+        // happened, while the directive stayed active.
         let recovery = match reason {
             BailoutReason::ExternalDependency => {
                 self.repos
@@ -221,6 +246,14 @@ impl<'a> Engine<'a> {
                 })
             }
         };
+        // Ledger last: it must describe a transition that actually
+        // happened. Recorded first, a failure in the branch above (a
+        // peer-supplied `progressive_total` larger than the downsized
+        // estimate makes `reschedule_directive` reject) left a bailout
+        // row replicated to every device describing an event that never
+        // occurred, while the directive stayed active.
+        self.repos
+            .record_bailout(&d.id, reason, note, self.identity)?;
         Ok(EngineOutcome::BailedOut {
             directive_id: d.id,
             reason,
@@ -302,14 +335,25 @@ impl<'a> Engine<'a> {
             return Ok(minutes);
         }
         let rebuilt = self.repos.ensure_phases(&d.id, self.identity)?;
+        // A step beyond the total is a replicated-op artefact, not a
+        // corrupt user plan: `apply_upsert` writes `progressive_step`
+        // and `progressive_total` straight from the payload with no
+        // cross-field check, so a peer (or a half-applied merge) can set
+        // `step = 9, total = 2`. The rebuild only makes steps 1..=2, so
+        // the old error fired on every canvas load and no engine path
+        // could ever requeue the directive. Reset to the first phase —
+        // the cheapest state that is inside the directive's own plan.
+        if d.progressive_step > d.progressive_total {
+            self.repos.reset_progressive_step(&d.id, self.identity)?;
+        }
         rebuilt
             .into_iter()
-            .find(|p| p.step == d.progressive_step)
+            .find(|p| p.step == 1)
             .map(|p| p.minutes)
             .ok_or_else(|| {
                 StoreError::Invalid(format!(
-                    "directive {} is corrupt: no phase {} after rebuild — reschedule it",
-                    d.id, d.progressive_step
+                    "directive {} is corrupt: no phase after rebuild — reschedule it",
+                    d.id
                 ))
                 .into()
             })
@@ -327,7 +371,14 @@ impl<'a> Engine<'a> {
             .optional()
             .map_err(StoreError::Sqlite)?
             .ok_or(EngineError::MilestoneMissing(milestone_id.into()))?;
-        if m == "pending" {
+        // Reopen a `completed` or `demoted` milestone too. Only
+        // `pending` used to be promoted, so a directive created against
+        // a finished milestone (by a peer, or by re-planning) ran with
+        // the milestone still marked done: `velocity` stopped counting it
+        // as remaining, and `maybe_complete_milestone` re-completed it as
+        // a no-op. A milestone with live work under it is `active`,
+        // whatever it was before.
+        if m != "active" {
             self.repos.set_milestone_status(
                 milestone_id,
                 MilestoneStatus::Active,
@@ -337,14 +388,22 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    /// Milestone completes when no queued/active directives remain.
+    /// Milestone completes when no outstanding directives remain.
+    ///
+    /// `skipped` counts as OUTSTANDING. It used to be left out of the
+    /// set, so a milestone with two directives — one bailed out for
+    /// energy (→ `skipped`) and one completed — was marked `completed`
+    /// with the skipped directive still unstarted and unreachable:
+    /// `next_runnable_directive` only selects `queued`, and nothing
+    /// requeues a skip. The milestone was then reported as done while
+    /// real work sat inside it.
     fn maybe_complete_milestone(&self, milestone_id: &str) -> Result<(), EngineError> {
         let remaining: i64 = self
             .repos
             .lock_conn()
             .query_row(
                 "SELECT COUNT(*) FROM directives WHERE milestone_id = ?1
-                 AND state IN ('queued', 'active', 'blocked')",
+                 AND state IN ('queued', 'active', 'blocked', 'skipped')",
                 [milestone_id],
                 |r| r.get(0),
             )

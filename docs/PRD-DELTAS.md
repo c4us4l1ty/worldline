@@ -1883,15 +1883,17 @@ pin-above-other-windows feature was removed at the user's request.
     It is the single highest-value layout change in the redesign and it
     cost one line of CSS.
 
-183. **`preview.html` exists so this never has to be reviewed by reading
-    CSS again.** `crates/wl-app/ui/preview.html` renders every screen's
-    markup against the real `public/wl.css` with no wasm and no Tauri
-    shell. It lives beside `index.html` rather than in `public/`, so `dx`'s
-    asset copier never ships it into the bundle. It was added because the
-    only available verification path was a headless screenshot of a
-    partially-booted wasm app — which caught nothing — and the defects above
-    were found by reading a stylesheet. Two of them (the cascade-ordering bug
-    in §11 of `wl.css`, and the dead `--wl-text-tertiary`) were only ever
+183. **A static `preview.html` harness was added, and then removed (2026-09-27,
+    user directive: no standalone HTML in this project).** While it existed it
+    rendered every screen's markup against the real `public/wl.css` with no
+    wasm and no Tauri shell; it was added because the only available
+    verification path was a headless screenshot of a partially-booted wasm app
+    — which caught nothing — and the defects above were found by reading a
+    stylesheet. It is gone, along with every reference to it. The verification
+    path is `scripts/dx.sh serve --port 1420`, which draws the real screens
+    against the same stylesheet in a browser behind the mock shell. The
+    original diagnosis stands: two of the defects above (the cascade-ordering
+    bug in §11 of `wl.css`, and the dead `--wl-text-tertiary`) were only ever
     visible rendered.
 
 ## Two defects found in the shipped build (2026-09-27, user-reported)
@@ -1914,10 +1916,12 @@ pin-above-other-windows feature was removed at the user's request.
     would have silently un-ringed any future genuinely-focusable custom
     control, so the exclusion is explicit.
 
-    Note what the fix is NOT: the `tabindex` is still there and the element
-    is still focusable. Suppressing the ring does not suppress focus, so
-    ⌘+Enter and Escape are unaffected. The `focus-visible` frame in
-    `preview.html` exists to keep this honest.
+   Note what the fix is NOT: the `tabindex` is still there and the element
+   is still focusable. Suppressing the ring does not suppress focus, so
+   ⌘+Enter and Escape are unaffected. The regression is guarded in
+   `crates/wl-app/ui/src/app.rs` instead: the canvas root's `tabindex="0"`
+   and its `autofocus` are asserted there, so the ring cannot later be
+   "fixed" by deleting the focus target.
 
 185. **The control panel is full height again, at the user's direction.**
     Delta 181 had the sheet hug its content. The user rejected that: a

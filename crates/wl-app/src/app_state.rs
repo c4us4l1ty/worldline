@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::Manager;
@@ -14,6 +14,7 @@ use wl_core::store::repo::Repos;
 
 use crate::vault::Vault;
 use crate::ShellError;
+use crate::ShellResult;
 
 /// How long a fetched model list is served from memory before a refetch.
 ///
@@ -23,10 +24,17 @@ use crate::ShellError;
 /// `force`, so waiting is never the only way to see a new model.
 const CATALOG_TTL: Duration = Duration::from_secs(3600);
 
-/// A cached catalog plus the moment it was fetched.
+/// A cached catalog plus the moment it was fetched and whether the
+/// fetch was itself truncated.
 pub struct CatalogEntry {
     pub fetched_at: Instant,
     pub models: Vec<ModelInfo>,
+    /// `Some(n)` when the provider's list was cut at
+    /// [`wl_core::ai::catalog::MAX_MODELS`] and only `n` models were
+    /// kept. Carried with the models so a cache hit reports the same
+    /// thing the fetch did — otherwise a truncated catalog claims to be
+    /// complete every time after the first.
+    pub truncated_from: Option<usize>,
 }
 
 pub struct RelaySession {
@@ -43,10 +51,12 @@ impl RelaySession {
 
 pub struct AppState {
     pub repos: Repos,
-    pub identity: Mutex<Option<Identity>>,
+    /// The unlocked identity, held behind an `Arc` so a command that
+    /// performs network I/O can keep using it after releasing the lock.
+    /// See [`AppState::identity_handle`].
+    pub identity: Mutex<Option<Arc<Identity>>>,
     pub vault: Vault,
     pub relay_token: Mutex<Option<RelaySession>>,
-    pub relay_url: Mutex<Option<String>>,
     /// Provider model lists, keyed by provider id.
     ///
     /// **Deliberately not in SQLite.** `app_settings` is a replicated
@@ -64,34 +74,37 @@ impl AppState {
             .path()
             .app_data_dir()
             .map_err(|e| ShellError::Io(e.to_string()))?;
-        std::fs::create_dir_all(&dir).map_err(|e| ShellError::Io(e.to_string()))?;
+        // The vault opens FIRST because it is what puts the data
+        // directory at `0700` (`vault::private_directory`). Opening the
+        // database first created it `0644` inside a `0755` directory,
+        // and that state is permanent whenever the vault then fails to
+        // open — a populated, world-readable store left behind by an
+        // app that refuses to start. Vault open is fatal by design:
+        // without it neither identity unlock nor BYOK calls can work,
+        // and silent fallback would lose keys.
+        let vault = Vault::open(&dir).map_err(|e| ShellError::Vault(e.to_string()))?;
         let db = dir.join("worldline.sqlite");
         let conn = wl_core::store::open(&db)?;
+        restrict_db_permissions(&db)?;
         // Device id: low 2 bytes of a random UUID (non-secret),
         // persisted so CRDT tie-breaks stay stable across restarts.
         let repos = Repos::new(conn, device_id_for(&dir)?);
-        // Pre-load the relay URL from persisted settings so sync works
-        // immediately at boot without waiting for a settings save.
-        // Tolerant: a fresh DB yields defaults (None) here.
-        let relay_url = repos.settings().ok().and_then(|s| s.relay_url);
-        // Vault open is fatal: without it neither identity unlock nor
-        // BYOK calls can work, and silent fallback would lose keys.
-        let vault = Vault::open(&dir).map_err(|e| ShellError::Vault(e.to_string()))?;
         Ok(Self {
             repos,
             identity: Mutex::new(None),
             vault,
             relay_token: Mutex::new(None),
-            relay_url: Mutex::new(relay_url),
             catalog: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Cached catalog for a provider, if still inside the TTL.
-    pub fn catalog_fresh(&self, provider: &str) -> Option<Vec<ModelInfo>> {
+    /// Cached catalog for a provider, if still inside the TTL, with the
+    /// truncation flag the fetch reported.
+    pub fn catalog_fresh(&self, provider: &str) -> Option<(Vec<ModelInfo>, Option<usize>)> {
         let guard = self.catalog.lock_recover();
         let entry = guard.get(provider)?;
-        (entry.fetched_at.elapsed() < CATALOG_TTL).then(|| entry.models.clone())
+        (entry.fetched_at.elapsed() < CATALOG_TTL)
+            .then(|| (entry.models.clone(), entry.truncated_from))
     }
 
     /// One model from the fresh cache, used to decide whether a request
@@ -107,15 +120,39 @@ impl AppState {
         entry.models.iter().find(|m| m.id == model).cloned()
     }
 
-    pub fn store_catalog(&self, provider: &str, models: Vec<ModelInfo>) {
+    pub fn store_catalog(
+        &self,
+        provider: &str,
+        models: Vec<ModelInfo>,
+        truncated_from: Option<usize>,
+    ) {
         let mut guard = self.catalog.lock_recover();
         guard.insert(
             provider.to_string(),
             CatalogEntry {
                 fetched_at: Instant::now(),
                 models,
+                truncated_from,
             },
         );
+    }
+
+    /// The relay base to dial right now, read from the replicated
+    /// settings row.
+    ///
+    /// This used to be a boot-time snapshot kept in its own `Mutex`,
+    /// rewritten only by `settings_save`. `app_settings` is a
+    /// replicated CRDT table, so a peer changing the relay URL landed
+    /// in the row without touching that snapshot and the shell kept
+    /// dialling — and caching a bearer token for — the old relay. There
+    /// is nothing to keep in sync now that the row is the only copy.
+    pub fn relay_base(&self) -> ShellResult<String> {
+        let configured = self
+            .repos
+            .settings()?
+            .relay_url
+            .ok_or(ShellError::NoRelay)?;
+        wl_core::net::validate_relay_url(&configured).map_err(ShellError::Invalid)
     }
 
     /// Unlocked identity or error.
@@ -124,7 +161,7 @@ impl AppState {
         f: impl FnOnce(&Identity) -> Result<T, ShellError>,
     ) -> Result<T, ShellError> {
         let guard = self.identity.lock_recover();
-        match guard.as_ref() {
+        match guard.as_deref() {
             Some(id) => f(id),
             None => Err(ShellError::Locked),
         }
@@ -133,13 +170,48 @@ impl AppState {
     /// Unlocked identity when available, `None` when the vault is locked.
     /// Read paths and vault-independent writes use this; only sync and
     /// auth require the strict variant above.
+    ///
+    /// The guard is held only for the closure. Anything that talks to
+    /// the network must use [`AppState::identity_handle`] instead.
     pub fn with_identity_opt<T>(
         &self,
         f: impl FnOnce(Option<&Identity>) -> Result<T, ShellError>,
     ) -> Result<T, ShellError> {
         let guard = self.identity.lock_recover();
-        f(guard.as_ref())
+        f(guard.as_deref())
     }
+
+    /// A shareable handle to the unlocked identity, taken without
+    /// holding the lock.
+    ///
+    /// `master_plan` and `sync_now` need the identity across a provider
+    /// or relay request that can take the better part of two minutes.
+    /// Holding the mutex for that window made every other
+    /// identity-gated command — `identity_status`, `check_in`,
+    /// `settings_save`, the canvas — block a tokio worker thread behind
+    /// the slowest request in the app, and two concurrent waiters were
+    /// enough to starve the runtime. The `Arc` costs one atomic
+    /// increment and leaves the lock free for the whole request.
+    pub fn identity_handle(&self) -> Option<Arc<Identity>> {
+        self.identity.lock_recover().clone()
+    }
+}
+
+/// Tightens the SQLite file to `0600`, the same envelope as the vault
+/// snapshot and its key. The `0700` parent directory is the real
+/// boundary; this stops the file from being readable through a bind
+/// mount, a backup tool, or anything else that reaches past the
+/// directory mode.
+#[cfg(unix)]
+fn restrict_db_permissions(path: &Path) -> Result<(), ShellError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| ShellError::Io(e.to_string()))
+}
+
+#[cfg(not(unix))]
+fn restrict_db_permissions(_path: &Path) -> Result<(), ShellError> {
+    Ok(())
 }
 
 /// Stable per-install device id (0 < id < u16::MAX, never 0).

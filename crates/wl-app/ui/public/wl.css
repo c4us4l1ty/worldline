@@ -49,10 +49,11 @@
    That is not hypothetical — `--wl-text-tertiary` was referenced thirteen
    times, defined zero times, and inverted the control panel's hierarchy.
 
-   Then RENDER it. `../../preview.html` draws every screen's markup against
-   this file with no wasm and no Tauri shell. Reviewing a design by reading
-   a stylesheet is how the cascade-ordering bug in §11 shipped a
-   non-full-height control panel that looked like it belonged to nothing.
+   Then RENDER it. `dx serve` (scripts/dx.sh serve --port 1420) draws the
+   real screens against this file in a browser, with the mock shell behind
+   it. Reviewing a design by reading a stylesheet is how the
+   cascade-ordering bug in §11 shipped a non-full-height control panel that
+   looked like it belonged to nothing.
    ========================================================================== */
 
 
@@ -1057,6 +1058,17 @@ button:disabled { cursor: not-allowed; }
   border-radius: 0;
   animation: wl-modal-fade var(--duration-instant) var(--ease-tactile);
 }
+
+/* The scrim, per theme.
+   `.wl-nav-backdrop` had its own light override but `.wl-modal-backdrop`
+   did not, and the picker sheet, the telemetry drawer and the bailout
+   modal all inherit this one — so on the parchment canvas the nav drawer
+   dimmed to 42% while three other overlays dimmed to 80%. The heaviest
+   scrim in the app on the lightest theme, and the §12 rationale ("a menu
+   that only routes…") contradicted by the theme that renders it.
+   Specificity (0,2,0) beats the (0,1,0) modifiers below, so this holds
+   wherever in the file it lands. */
+[data-theme="light"] .wl-modal-backdrop { background: rgba(29, 28, 19, 0.42); }
 @keyframes wl-modal-fade {
   from { opacity: 0; }
   to   { opacity: 1; }
@@ -1254,7 +1266,16 @@ button:disabled { cursor: not-allowed; }
 .wl-nav-close:hover { background-color: var(--wl-surface-high); color: var(--wl-text-primary); }
 .wl-nav-close svg { display: block; }
 
-.wl-nav-scroll {
+/* Compound, not single-class. The element carries BOTH `.wl-scroll-region`
+   (§19) and `.wl-nav-scroll`, and both declare `flex` at specificity
+   (0,1,0) — so source order alone decided which one applied, and §19
+   sits 640 lines later. That is precisely the coin flip §11 warns about:
+   the next edit to either block would have flipped the drawer's flex
+   basis silently. `.wl-nav-scroll.wl-scroll-region` is (0,2,0) and wins
+   by declaration instead of by position. The rendered height is
+   unchanged — one growing item in a `height: 100%` column absorbs the
+   slack either way. */
+.wl-nav-scroll.wl-scroll-region {
   /* Grows to fill the sheet, so the groups spread over the full 747px
      instead of leaving the bottom third empty. */
   flex: 1 1 auto;

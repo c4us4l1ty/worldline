@@ -11,6 +11,22 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use crate::poison::LockRecover;
 
+/// How far ahead of the LOCAL wall clock a remote timestamp's physical
+/// component may sit before [`Hlc::observe`] stops adopting it.
+///
+/// One hour is deliberately far wider than any real device skew (NTP
+/// holds peers within seconds; a phone offline for a month still resumes
+/// at the right time because the *local* clock is the reference, not the
+/// remote one) while sitting 4.6× below the top of the `u64` nanosecond
+/// range. The bound is what makes the module's "bounded drift from
+/// physical time" promise true in the presence of an ADVERSARY: the HLC
+/// on the wire is cleartext routing metadata, so an unbounded merge lets
+/// one crafted value drag a device's clock to the year 2554 and hold it
+/// there — every later local write then loses last-writer-wins to
+/// nothing, and once the counter carries, the old `.expect()` panicked
+/// in the write path on every device of the account, forever.
+pub const MAX_REMOTE_DRIFT_NANOS: u64 = 60 * 60 * 1_000_000_000;
+
 /// Wall-clock offset applied to `SystemTime::now()` (nanoseconds).
 /// Used in tests to simulate clock drift; always zero in production.
 pub struct Hlc {
@@ -70,7 +86,7 @@ impl Hlc {
         // restored head in now()/observe().
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
+            .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
         now.saturating_add(drift)
     }
@@ -81,6 +97,9 @@ impl Hlc {
     /// physical component by one tick instead of wrapping: timestamps
     /// stay strictly monotonic even on coarse wall clocks during bulk
     /// enqueues (E6 — `wrapping_add` used to regress mid-burst).
+    ///
+    /// At the very top of the representable range the clock
+    /// **saturates** rather than panicking — see [`Self::increment`].
     pub fn now(&self, device: u16) -> HlcTimestamp {
         let mut inner = self.inner.lock_recover();
         let wall = self.wall_nanos();
@@ -101,11 +120,24 @@ impl Hlc {
     /// Merges a remote timestamp into the local clock (receive event).
     /// Returns the timestamp to stamp on any resulting local update.
     /// Same overflow rule as [`Hlc::now`]: never wraps, steps physical
-    /// forward instead.
+    /// forward instead, and saturates at the top of the range.
+    ///
+    /// The remote physical component is bounded by
+    /// [`MAX_REMOTE_DRIFT_NANOS`] above the local wall clock. This is
+    /// the "bounded-drift from physical time" the module promises, and
+    /// it is a security property, not a refinement: a relay or peer can
+    /// put any 32-character HLC on the wire (the value is cleartext
+    /// routing metadata), and adopting it verbatim let one hostile op
+    /// pin this device's clock to year 2554 — where the next
+    /// counter-carry reached a `.expect()` and every local write
+    /// panicked, permanently, across restarts.
     pub fn observe(&self, remote: &HlcTimestamp, device: u16) -> HlcTimestamp {
         let mut inner = self.inner.lock_recover();
         let wall = self.wall_nanos();
-        let pt = wall.max(inner.last_wall_nanos).max(remote.physical);
+        let horizon = wall.saturating_add(MAX_REMOTE_DRIFT_NANOS);
+        let pt = wall
+            .max(inner.last_wall_nanos)
+            .max(remote.physical.min(horizon));
         let next = if pt == inner.last_wall_nanos && pt == remote.physical {
             Self::increment(pt, inner.counter.max(remote.counter))
         } else if pt == inner.last_wall_nanos {
@@ -123,10 +155,29 @@ impl Hlc {
         }
     }
 
+    /// Advances one HLC tick, saturating at the top of the range.
+    ///
+    /// The counter carries into the physical component (so a same-instant
+    /// burst stays strictly monotonic), and when even that overflows the
+    /// clock **holds** at `(u64::MAX, u16::MAX)`. It does not panic.
+    ///
+    /// A panic here is not a loud failure, it is a permanent brick:
+    /// `observe`/`now` are called from every row mutation, and the state
+    /// that reached the panic — `(u64::MAX, u16::MAX)` — is reachable
+    /// from a wire HLC, so the panic could be triggered remotely and
+    /// survived restarts through the persisted `hlc_clock` head. Holding
+    /// is the correct degradation: `u64::MAX` nanoseconds is the year
+    /// 2554 and the total order still holds, because `(physical, counter,
+    /// device, operation_id)` remains a *total* order even with repeated
+    /// `(physical, counter)` pairs. Duplicated ticks lose their strict
+    /// monotonicity; a bricked client loses everything.
     fn increment(physical: u64, counter: u16) -> (u64, u16) {
         match counter.checked_add(1) {
             Some(counter) => (physical, counter),
-            None => (physical.checked_add(1).expect("HLC timestamp exhausted"), 0),
+            None => match physical.checked_add(1) {
+                Some(physical) => (physical, 0),
+                None => (physical, counter),
+            },
         }
     }
 
@@ -398,17 +449,57 @@ mod tests {
     }
 
     #[test]
-    fn observe_remote_future_advances_remote_counter() {
+    fn observe_adopts_a_plausible_remote_future() {
         let hlc = Hlc::new();
+        let local = hlc.now(1);
+        // Half the drift bound ahead of the tick we just issued: inside
+        // the bound, and indistinguishable from a peer whose clock runs
+        // fast. This is the case that must keep working.
         let remote = HlcTimestamp {
-            physical: u64::MAX - 100,
+            physical: local.physical + MAX_REMOTE_DRIFT_NANOS / 2,
             counter: 7,
             device: 9,
         };
         let merged = hlc.observe(&remote, 1);
-        assert_eq!((merged.physical, merged.counter), (remote.physical, 8));
+        assert_eq!(merged.physical, remote.physical);
+        assert_eq!(merged.counter, 8);
         assert!(merged > remote);
         assert_eq!(hlc.head(), (remote.physical, 8));
+    }
+
+    #[test]
+    fn observe_refuses_to_be_dragged_past_the_drift_horizon() {
+        // A relay rewrites a cleartext routing header to any value it
+        // likes. Adopting one verbatim pinned this device's clock at the
+        // year 2554 — permanently, and across restarts, because the head
+        // is persisted to `hlc_clock`. The horizon is what stops it.
+        //
+        // 1s of slack: the wall clock only moves forward between `before`
+        // and the observes, so the head may legitimately sit a hair past
+        // `before + bound`.
+        const SLACK: u64 = 1_000_000_000;
+        let hlc = Hlc::new();
+        let before = hlc.now(1);
+        for physical in [u64::MAX - 1, u64::MAX] {
+            let remote = HlcTimestamp {
+                physical,
+                counter: 7,
+                device: 9,
+            };
+            hlc.observe(&remote, 1);
+            let (head, _) = hlc.head();
+            assert!(
+                head <= before.physical + MAX_REMOTE_DRIFT_NANOS + SLACK,
+                "head {head} ran away from {before:?}"
+            );
+        }
+        // …and the clock is still usable: ticks keep coming, in order.
+        let mut last = hlc.now(1);
+        for _ in 0..1_000 {
+            let next = hlc.now(1);
+            assert!(next > last, "{next:?} did not advance past {last:?}");
+            last = next;
+        }
     }
 
     #[test]
@@ -474,43 +565,68 @@ mod tests {
 
     #[test]
     fn counter_carry_advances_physical() {
+        // Driven from a LOCAL head, not a remote one: the counter carry
+        // is about the local clock, and a remote physical beyond the
+        // drift horizon is no longer adopted (see
+        // `observe_refuses_to_be_dragged_past_the_drift_horizon`).
         let physical = u64::MAX - 100;
-        for (local_physical, local_counter, remote_counter) in [
-            (physical - 1, 2, u16::MAX),
-            (physical, 2, u16::MAX),
-            (physical, u16::MAX, 2),
-        ] {
-            let hlc = Hlc::new();
-            hlc.restore(local_physical, local_counter);
-            let remote = HlcTimestamp {
-                physical,
-                counter: remote_counter,
-                device: 9,
-            };
-            let merged = hlc.observe(&remote, 1);
-            assert_eq!((merged.physical, merged.counter), (physical + 1, 0));
-            assert!(merged > remote);
-            assert!(hlc.now(1) > merged);
-        }
         let hlc = Hlc::new();
         hlc.restore(physical, u16::MAX);
         let next = hlc.now(1);
         assert_eq!((next.physical, next.counter), (physical + 1, 0));
+        // …and it keeps climbing from there rather than re-wrapping.
+        let after = hlc.now(1);
+        assert_eq!((after.physical, after.counter), (physical + 1, 1));
     }
 
     #[test]
-    #[should_panic(expected = "HLC timestamp exhausted")]
-    fn now_fails_explicitly_at_representational_exhaustion() {
+    fn carry_inside_the_drift_horizon_still_wins_the_tie() {
+        // The same carry, one level down, reached the way a real peer
+        // reaches it: a remote whose physical is inside the horizon and
+        // whose counter is spent.
+        // A fresh clock per case: `restore` only ever RAISES the head, so
+        // reusing one clock would carry the previous case's post-carry
+        // physical into this one and the tie would never be a tie.
+        let base = Hlc::new().now(1).physical + MAX_REMOTE_DRIFT_NANOS / 2;
+        for (local_counter, remote_counter, exp_physical, exp_counter) in [
+            (2u16, u16::MAX, 1u64, 0u16),
+            (u16::MAX, 2, 1, 0),
+            (7, 7, 0, 8),
+        ] {
+            let hlc = Hlc::new();
+            hlc.restore(base, local_counter);
+            let remote = HlcTimestamp {
+                physical: base,
+                counter: remote_counter,
+                device: 9,
+            };
+            let merged = hlc.observe(&remote, 1);
+            assert_eq!(merged.physical, base + exp_physical, "counter tie");
+            assert_eq!(merged.counter, exp_counter, "counter tie");
+            assert!(merged > remote);
+        }
+    }
+
+    #[test]
+    fn now_saturates_at_the_top_of_the_representable_range() {
+        // No input may panic the write path. `restore` is how a local
+        // head reaches the ceiling in production — it replays whatever
+        // `write_hlc_head` persisted — so the ceiling has to be a state
+        // the clock survives, not one it dies in.
         let hlc = Hlc::new();
         hlc.restore(u64::MAX, u16::MAX);
-        hlc.now(1);
+        let held = hlc.now(1);
+        assert_eq!((held.physical, held.counter), (u64::MAX, u16::MAX));
+        assert_eq!(hlc.now(1), held);
     }
 
     #[test]
-    #[should_panic(expected = "HLC timestamp exhausted")]
-    fn observe_fails_explicitly_at_representational_exhaustion() {
+    fn observe_at_the_ceiling_still_returns_a_timestamp() {
+        // The exact value a hostile relay could put on the wire.
         let hlc = Hlc::new();
-        hlc.observe(
+        hlc.restore(u64::MAX, u16::MAX);
+        hlc.set_drift_nanos(u64::MAX);
+        let merged = hlc.observe(
             &HlcTimestamp {
                 physical: u64::MAX,
                 counter: u16::MAX,
@@ -518,5 +634,7 @@ mod tests {
             },
             1,
         );
+        assert_eq!((merged.physical, merged.counter), (u64::MAX, u16::MAX));
+        assert_eq!(merged.device, 1);
     }
 }

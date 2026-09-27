@@ -48,8 +48,10 @@ pub struct PushOutcome {
 /// Storage backend trait.
 pub trait BlobStore: Send + Sync {
     /// Ensures the account's challenge row exists (register on first
-    /// auth challenge). Idempotent. Fails with an account-quota error
-    /// when the relay is at its account cap (DoS guard).
+    /// auth challenge). Idempotent. When the relay is over its account
+    /// cap this evicts the OLDEST accounts that hold no ops, so the
+    /// storage bound holds without the cap ever becoming a permanent
+    /// barrier to onboarding (DoS guard; see the SQLite backend).
     fn register_account(&self, public_key: &str) -> Result<(), StoreError>;
 
     /// Checks the account exists.
@@ -112,6 +114,17 @@ pub mod sqlite_backend {
         pub fn open_in_memory() -> Result<Self, StoreError> {
             let conn = Connection::open_in_memory()?;
             Self::init(conn)
+        }
+
+        /// Test support: how many accounts are resident. The cap is the
+        /// relay's storage bound, and the property under test is that it
+        /// HOLDS — which `register_account`'s return value cannot show
+        /// once the cap evicts instead of refusing.
+        #[doc(hidden)]
+        pub fn account_row_count_for_test(&self) -> Result<i64, StoreError> {
+            let conn = self.conn.lock_recover();
+            conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+                .map_err(StoreError::Sqlite)
         }
 
         fn init(mut conn: Connection) -> Result<Self, StoreError> {
@@ -183,12 +196,46 @@ pub mod sqlite_backend {
             if changed == 0 {
                 return Ok(()); // already registered
             }
-            let count: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
-            if count > ACCOUNT_CAP {
-                // Roll this registration back — the cap is a DoS guard,
-                // not a correctness limit.
-                conn.execute("DELETE FROM accounts WHERE public_key = ?1", [public_key])?;
-                return Err(StoreError::AccountQuota);
+            // The cap is a SLIDING WINDOW, not a one-shot ratchet.
+            //
+            // Registration is unauthenticated and the public key is
+            // attacker-chosen, so 10 001 requests with 10 001 random keys
+            // used to fill `accounts` permanently: the old code deleted
+            // only the row it had just inserted, never reclaimed the
+            // previous 10 000, and the table is a file that outlives the
+            // process. Every legitimate new device then got 429 on
+            // `/auth/challenge` and could never onboard, with no remedy
+            // but a manual database edit.
+            //
+            // Evicting the OLDEST unreferenced rows instead bounds
+            // resident accounts without deciding, permanently, who is
+            // allowed to exist. An evicted account loses only its
+            // relay-side row and re-registers on its next challenge; an
+            // account that still holds ops is skipped, because `ops`
+            // references `accounts` and taking its ciphertext with it
+            // would be data loss.
+            //
+            // Eviction runs to a LOW-WATER MARK, not to the cap. Sweeping
+            // one row at a time would re-run this ORDER BY over the whole
+            // table on every single registration past the cap — turning
+            // the flood guard into the flood. Dropping straight to 90 %
+            // means the sweep runs once per 1 000 registrations instead
+            // of once per registration.
+            const LOW_WATER: i64 = ACCOUNT_CAP * 9 / 10;
+            let held: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
+            if held > ACCOUNT_CAP {
+                conn.execute(
+                    "DELETE FROM accounts
+                     WHERE public_key IN (
+                         SELECT a.public_key FROM accounts a
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM ops o WHERE o.account = a.public_key
+                         )
+                         ORDER BY a.created_at ASC, a.public_key ASC
+                         LIMIT max(0, (SELECT COUNT(*) FROM accounts) - ?1)
+                     )",
+                    rusqlite::params![LOW_WATER],
+                )?;
             }
             Ok(())
         }
@@ -400,11 +447,20 @@ pub mod postgres_backend {
     impl BlobStore for PostgresStore {
         fn register_account(&self, public_key: &str) -> Result<(), StoreError> {
             self.rt.block_on(async {
-                // Atomic cap: the table lock serializes concurrent
-                // registrations (the SQLite backend gets this from its
-                // store mutex; Postgres needs it spelled out).
+                // `pg_advisory_xact_lock` rather than
+                // `LOCK TABLE accounts IN EXCLUSIVE MODE`.
+                //
+                // EXCLUSIVE conflicts with ROW EXCLUSIVE — the mode every
+                // `insert_ops` takes — so taking it on an UNAUTHENTICATED
+                // route serialized every challenge request against all op
+                // writes relay-wide, and held the lock across a full
+                // COUNT(*). An advisory lock on a fixed key gives the same
+                // mutual exclusion between registrations, and conflicts
+                // with nothing else.
+                const REGISTRATION_LOCK: i64 = 0x_576c_5f72_6567;
                 let mut tx = self.pool.begin().await?;
-                sqlx::query("LOCK TABLE accounts IN EXCLUSIVE MODE")
+                sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                    .bind(REGISTRATION_LOCK)
                     .execute(&mut *tx)
                     .await?;
                 let res = sqlx::query("INSERT INTO accounts (public_key) VALUES ($1) ON CONFLICT (public_key) DO NOTHING")
@@ -412,17 +468,30 @@ pub mod postgres_backend {
                     .execute(&mut *tx)
                     .await?;
                 if res.rows_affected() > 0 {
+                    // Sliding window, mirroring the SQLite backend: over
+                    // the cap, evict the oldest accounts that hold no ops
+                    // rather than refusing. A one-shot ratchet filled the
+                    // table permanently and blocked every new device
+                    // forever. Low-water mark so the sweep runs once per
+                    // batch of registrations, not once per registration.
+                    const LOW_WATER: i64 = ACCOUNT_CAP * 9 / 10;
                     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts")
                         .fetch_one(&mut *tx)
                         .await?;
                     if row.0 > ACCOUNT_CAP {
-                        // Roll back this registration — the cap is a DoS
-                        // guard, not a correctness limit.
-                        sqlx::query("DELETE FROM accounts WHERE public_key = $1")
-                            .bind(public_key)
-                            .execute(&mut *tx)
-                            .await?;
-                        return Err(StoreError::AccountQuota);
+                        sqlx::query(
+                            "DELETE FROM accounts WHERE public_key IN (
+                                 SELECT a.public_key FROM accounts a
+                                 WHERE NOT EXISTS (
+                                     SELECT 1 FROM ops o WHERE o.account = a.public_key
+                                 )
+                                 ORDER BY a.created_at ASC, a.public_key ASC
+                                 LIMIT GREATEST(0, (SELECT COUNT(*) FROM accounts) - $1)
+                             )",
+                        )
+                        .bind(LOW_WATER)
+                        .execute(&mut *tx)
+                        .await?;
                     }
                 }
                 tx.commit().await?;

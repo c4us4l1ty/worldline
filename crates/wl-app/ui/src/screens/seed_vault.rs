@@ -42,20 +42,23 @@ pub struct GeneratedIdentity {
     pub verify_indices: Vec<usize>,
 }
 
+/// Generate a new identity, or restore an existing one, and verify the
+/// backup.
+///
+/// The screen opens in `intro` or `display` and offers `restore` as a mode
+/// the user switches into from `intro`. `restore` used to also be a
+/// *prop* that put the screen straight into that mode — and nothing ever
+/// constructed it with `true`, so the prop was dead while the mode it
+/// selected was very much alive. It is the only way an install with no
+/// identity enters an existing phrase, because Settings only shows its
+/// inline restore field once `identity_status.has` is set.
 #[component]
-pub fn SeedVaultScreen(
-    phrase: Vec<String>,
-    verify_indices: Vec<usize>,
-    restore: bool,
-    #[props(default = false)] has_identity: bool,
-) -> Element {
+pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Element {
     let ctx = use_context::<AppCtx>();
     let generated = use_signal::<Option<Vec<String>>>(|| None);
     let gen_indices = use_signal(Vec::<usize>::new);
     let mut mode = use_signal(|| {
-        if restore {
-            "restore"
-        } else if phrase.is_empty() {
+        if phrase.is_empty() {
             "intro"
         } else {
             "display"
@@ -243,28 +246,30 @@ pub fn SeedVaultScreen(
                         },
                         "Restore identity"
                     }
-                    // B-004: when this install already has an identity,
-                    // `identity_generate` can never succeed, so never
-                    // offer "create new" — show honest recovery copy
-                    // instead of an impossible action.
-                    if has_identity {
-                        p { class: "wl-seed-sub",
-                            "This install already has an identity — restore the 12 words or wipe the data dir to start over."
-                        }
-                    } else {
-                        button {
-                            class: "wl-btn-escape",
-                            style: "margin-top: 6px;",
-                            disabled: *busy.read(),
-                            onclick: move |_| {
-                                if !*busy.peek() {
-                                    restore_input.set(String::new());
-                                    error.set(String::new());
-                                    mode.set(if generated.peek().is_some() || !seeded_phrase.is_empty() { "display" } else { "intro" });
-                                }
-                            },
-                            "Create a new identity instead"
-                        }
+                    // The way back out of restore, into generation. Kept
+                    // unconditionally: B-004's rule ("never offer
+                    // `identity_generate` where it cannot succeed") is
+                    // enforced upstream, not here. This screen is only
+                    // reached from Settings' "Generate a new identity",
+                    // which renders when `identity_status.has` is false —
+                    // and a vault that already has an identity reaches its
+                    // own restore field in Settings, never this screen.
+                    // The `has_identity` prop that used to branch here was
+                    // constructed once, always `false`, so the honest-copy
+                    // arm it guarded was unreachable and the button below
+                    // was unconditional in practice.
+                    button {
+                        class: "wl-btn-escape",
+                        style: "margin-top: 6px;",
+                        disabled: *busy.read(),
+                        onclick: move |_| {
+                            if !*busy.peek() {
+                                restore_input.set(String::new());
+                                error.set(String::new());
+                                mode.set(if generated.peek().is_some() || !seeded_phrase.is_empty() { "display" } else { "intro" });
+                            }
+                        },
+                        "Create a new identity instead"
                     }
                 } else if *mode.read() == "intro" || *mode.read() == "generation_failed" {
                     div { class: "wl-directive-card",

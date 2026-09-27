@@ -50,7 +50,16 @@ pub fn lock_conn(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     // uncommitted rows, and so `Transaction::new` (which requires
     // autocommit) does not fail closed on a poisoned-but-usable handle.
     if !guard.is_autocommit() {
-        let _ = guard.execute_batch("ROLLBACK");
+        if let Err(e) = guard.execute_batch("ROLLBACK") {
+            // The function's whole promise is that the guard it hands
+            // back is usable, and a swallowed ROLLBACK failure breaks
+            // that promise silently: the handle is still out of
+            // autocommit, and the next `conn.transaction()` fails with
+            // "cannot start a transaction within a transaction" — the
+            // exact state this exists to prevent. There is no recovery
+            // path from here, so say so instead of continuing.
+            tracing::error!("poison recovery: ROLLBACK failed: {e}");
+        }
     }
     guard
 }

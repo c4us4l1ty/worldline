@@ -7,23 +7,20 @@ use wl_core::crypto::identity::Identity;
 
 use crate::error::{ShellError, ShellResult};
 
-/// Performs the full handshake synchronously. Internals drive a nested
-/// current-thread runtime via block_on — therefore this MUST only run on
+/// Performs the full handshake synchronously. Internals drive the
+/// process-wide runtime via block_on — therefore this MUST only run on
 /// a thread with no Tokio runtime context (production callers wrap it in
 /// `tokio::task::spawn_blocking`; see `relay_authenticate`/`sync_now`).
 /// Calling it directly from async code panics by design (fail fast, not
-/// silent deadlock). The HTTP client is shared process-wide
-/// (connection reuse); callers pass `super::commands`-owned client.
+/// silent deadlock). The runtime and HTTP client are both shared
+/// process-wide, which is what makes the connection pool work; callers
+/// pass `super::commands`-owned values.
 pub fn handshake(
     base: &str,
     identity: &Identity,
     client: &reqwest::Client,
 ) -> ShellResult<wl_protocol::SessionToken> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ShellError::Relay(format!("runtime: {e}")))?;
-    rt.block_on(handshake_async(base, identity, client))
+    crate::commands::shared_runtime().block_on(handshake_async(base, identity, client))
 }
 
 async fn handshake_async(
@@ -123,7 +120,7 @@ mod tests {
     /// shell handshake against it over TCP (Item 1 regression test —
     /// proves wire compatibility, not just router logic). The handshake
     /// itself runs on a blocking thread, mirroring production's
-    /// spawn_blocking discipline (nested block_on panics on async threads).
+    /// spawn_blocking discipline (block_on panics on async threads).
     #[tokio::test]
     async fn handshake_against_live_relay() {
         let state = Arc::new(wl_relay::AppStateForTest {

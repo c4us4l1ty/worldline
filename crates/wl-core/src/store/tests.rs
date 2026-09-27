@@ -1,8 +1,10 @@
 //! Store integration tests.
 
 use super::repo::Repos;
+
 use crate::crypto::identity::Identity;
 use crate::domain::*;
+use crate::hlc::MAX_REMOTE_DRIFT_NANOS;
 use crate::store;
 
 fn setup() -> Repos {
@@ -677,14 +679,41 @@ fn observe_remote_hlc_advances_local_clock() {
     // Receive-event merge: after observing a fast peer's timestamp,
     // local ticks must exceed it (otherwise LWW inverts).
     let r = setup();
+    let ahead = r.hlc.now(r.device_id()).physical + MAX_REMOTE_DRIFT_NANOS / 2;
     let remote = crate::hlc::HlcTimestamp {
-        physical: 9_999_999_999_999_999_999,
+        physical: ahead,
         counter: 0,
         device: 7,
     };
     r.observe_remote_hlc(&remote);
     let local = r.hlc.now(r.device_id());
     assert!(local > remote);
+}
+
+#[test]
+fn observe_cannot_drag_the_persisted_head_out_of_range() {
+    // The persisted head (`hlc_clock`) is what `Repos::new` restores on
+    // the next boot, so a merge that ran away did not just upset one
+    // cycle — it changed what every future timestamp is measured from.
+    let r = setup();
+    r.observe_remote_hlc(&crate::hlc::HlcTimestamp {
+        physical: u64::MAX,
+        counter: 7,
+        device: 7,
+    });
+    let (wall, _) = r.hlc.head();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    assert!(
+        wall <= now + MAX_REMOTE_DRIFT_NANOS + 1_000_000_000,
+        "head {wall} escaped the horizon at {now}"
+    );
+    // The clock still issues usable, increasing stamps afterwards.
+    let a = r.hlc.now(r.device_id());
+    let b = r.hlc.now(r.device_id());
+    assert!(b > a);
 }
 
 #[test]
@@ -1126,7 +1155,12 @@ fn decoded_outbox(r: &Repos, identity: &Identity) -> Vec<(String, String, bool)>
         .unwrap()
         .into_iter()
         .map(|op| {
-            let aad = format!("{}:{}", op.table_name, op.record_id);
+            let aad = crate::crdt::routing_aad(
+                &op.table_name,
+                &op.record_id,
+                &op.operation_id,
+                &op.hlc_timestamp.to_string(),
+            );
             let sealed = crate::crypto::aead::Sealed::from_bytes(&op.encrypted_payload).unwrap();
             let plain = crate::crypto::aead::unseal(identity, &sealed, aad.as_bytes()).unwrap();
             let fields: serde_json::Value = serde_json::from_slice(&plain).unwrap();
@@ -1178,13 +1212,32 @@ fn delete_writers_emit_decryptable_tombstone_ops() {
 
     // The deletes must be replicable: sealed tombstone ops naming each
     // deleted record, decryptable with the identity's payload key under
-    // the `table:record` AAD.
+    // the full routing-header AAD.
     let after = decoded_outbox(&r, &identity);
     let tombs: Vec<_> = after.iter().filter(|(_, _, t)| *t).collect();
     assert_eq!(tombs.len(), 3, "two phases + the directive: {after:?}");
-    assert!(tombs
-        .iter()
-        .any(|(t, rec, _)| t == "directive_phases" && *rec == d.id));
+    // Each phase tombstone names ONE step, as `{directive_id}:{step}`.
+    //
+    // The old shape was the bare directive id for every step, which made
+    // all steps of a directive a single merge record: the peer's apply
+    // ran `DELETE FROM directive_phases WHERE directive_id = ?`, so
+    // deleting step 2 on one device erased BOTH phases on every other
+    // device. It also made the merge head coarse, so an op for step 1
+    // lost to an unrelated step-2 op that merely carried a newer HLC.
+    for step in [1i64, 2] {
+        assert!(
+            tombs.iter().any(|(t, rec, _)| {
+                t == "directive_phases" && *rec == crate::crdt::phase_record_id(&d.id, step)
+            }),
+            "missing a per-step tombstone for step {step}: {after:?}"
+        );
+        assert!(
+            !tombs
+                .iter()
+                .any(|(t, rec, _)| t == "directive_phases" && *rec == d.id),
+            "a whole-directive phase tombstone would erase every step on peers"
+        );
+    }
     assert!(tombs
         .iter()
         .any(|(t, rec, _)| t == "directives" && *rec == d.id));

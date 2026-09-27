@@ -738,9 +738,10 @@ an error message.
 9. **Before committing, diff the token list**: every `var(--x)` in the stylesheet must have a matching `--x:`. An undefined one is silent.
 
 ### Verifying a change
-`crates/wl-app/ui/preview.html` renders every screen's markup against the
-real `public/wl.css` with no wasm and no Tauri shell. Open it directly in a
-browser. It exists because the alternative was reviewing a design by reading
-a stylesheet — which is how thirteen rules came to reference a token that
+`scripts/dx.sh serve --port 1420` renders every screen against the real
+`public/wl.css` in a browser, backed by the mock shell in
+`public/invoke-shim.js` — no Tauri shell, no rebuild of the native crate.
+Use it because the alternative is reviewing a design by reading a
+stylesheet — which is how thirteen rules came to reference a token that
 was defined nowhere, and how a cascade ordering mistake shipped a
 non-full-height control panel. **Render it.**

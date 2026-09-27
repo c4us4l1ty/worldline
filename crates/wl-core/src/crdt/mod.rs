@@ -60,6 +60,65 @@ impl CrdtTable {
 /// colliding with any row field the pull side reads.
 pub const TOMBSTONE_MARKER: &str = "__tombstone";
 
+/// The AEAD associated data that binds a sealed op to its routing
+/// header — and to NOTHING ELSE, which is the point.
+///
+/// The relay sees `table`, `record_id`, `hlc` and `operation_id` in
+/// cleartext (it has to: they are its routing key and its pagination
+/// cursor) and it cannot read `sealed_b64`. That makes every one of
+/// them a header the relay is free to rewrite, and the older
+/// `table:record` label left `hlc` and `operation_id` unauthenticated.
+/// A relay could therefore re-stamp an op to the top of the key space
+/// to make it win every merge, relabel it to defeat the `(device,
+/// operation_id)` tie-break, or rewind it to make a real user's edit
+/// lose — none of which the AEAD could see, because none of it was in
+/// the associated data.
+///
+/// All four components are bound here so a rewritten header fails
+/// Poly1305 and the op is quarantined as poison. The relay keeps
+/// everything it needs: it still reads the cleartext columns for
+/// `ORDER BY hlc` and the pull cursor, and it still never sees a
+/// plaintext byte.
+///
+/// `v2` is the label version. `v1` was `table:record`; the change is a
+/// wire-format break, deliberately, rather than a compatibility shim —
+/// an outbox row sealed under `v1` cannot be authenticated under `v2`
+/// and is quarantined on the next pull, which is the correct fate for
+/// a pre-release format rather than silently accepting metadata that
+/// is not covered by the tag.
+pub fn routing_aad(table: &str, record_id: &str, operation_id: &str, hlc: &str) -> String {
+    format!("wl/v2:{table}:{record_id}:{operation_id}:{hlc}")
+}
+
+/// The CRDT record id for ONE phase of a progressive directive.
+///
+/// Phases used to be keyed by the DIRECTIVE id alone, with the step
+/// carried only in the payload. That made every step of a directive one
+/// merge record: a delete of step 3 planted delete memory for the whole
+/// set, and the peer's apply ran `DELETE FROM directive_phases WHERE
+/// directive_id = ?` — so removing one phase erased every phase of that
+/// directive on every other device. It also made the merge head
+/// coarse, so a legitimate op for step 1 lost to an unrelated op for
+/// step 2 that merely carried a newer HLC.
+///
+/// `CrdtOp`'s own doc reserves `:` for compound keys, and no directive
+/// id can contain one (they are `{prefix}-{uuid}`), so the split is
+/// unambiguous.
+pub fn phase_record_id(directive_id: &str, step: i64) -> String {
+    format!("{directive_id}:{step}")
+}
+
+/// Inverse of [`phase_record_id`]. `None` when the id is not a phase
+/// key, which is how the pull side tells a per-phase record from a
+/// whole-directive one.
+pub fn split_phase_record_id(record_id: &str) -> Option<(&str, i64)> {
+    let (dir, step) = record_id.rsplit_once(':')?;
+    if dir.is_empty() {
+        return None;
+    }
+    Some((dir, step.parse::<i64>().ok()?))
+}
+
 /// A single replicated mutation. `fields` carries the full row state
 /// for upserts (LWW register value); `tombstone` marks deletes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,17 +202,25 @@ impl TableState {
             self.tombstones.insert(op.record_id.clone(), ts);
             self.rows.remove(&op.record_id);
         } else {
-            // An upsert only resurrects a row if it postdates the tombstone.
-            let resurrect_ok = match self.tombstones.get(&op.record_id) {
-                Some(&t_ts) => ts > t_ts,
-                None => true,
-            };
-            if resurrect_ok {
-                self.tombstones.remove(&op.record_id);
-                // Validated non-`None` above.
-                let fields = op.fields.clone().unwrap_or_default();
-                self.rows.insert(op.record_id.clone(), fields);
-            }
+            // Reaching here means the op's FULL key — (ts, device,
+            // operation_id) — strictly beat the stored head. That is the
+            // only arbitration this CRDT has, so the op wins outright and
+            // a surviving tombstone is by definition the older one.
+            //
+            // The check this replaces compared `ts > tombstone_ts` and
+            // ignored the tie-break that had just decided the op was
+            // accepted. So an upsert that beat a tombstone *only* via
+            // (device, operation_id) — the exact shape two replicas
+            // forked from one clock produce — was dropped, and the two
+            // replicas diverged permanently: the one that saw the
+            // tombstone first kept the row deleted, the one that saw the
+            // upsert first kept the row. Stale upserts (which do NOT
+            // beat the head) still return above, before this block, so
+            // B-003's guarantee is unchanged.
+            self.tombstones.remove(&op.record_id);
+            // Validated non-`None` above.
+            let fields = op.fields.clone().unwrap_or_default();
+            self.rows.insert(op.record_id.clone(), fields);
         }
         true
     }

@@ -126,12 +126,25 @@ fn plural(n: usize) -> &'static str {
 /// Group entries under their goal, preserving the order goals first
 /// appear in (the shell returns newest-first, so the most recently active
 /// goal leads).
-pub fn group_by_goal(entries: &[EntropyView]) -> Vec<(String, Vec<EntropyView>)> {
-    let mut groups: Vec<(String, Vec<EntropyView>)> = Vec::new();
+///
+/// Borrows the entries rather than cloning them, and indexes the groups by
+/// goal name instead of scanning for a match. The ledger is append-only
+/// and nothing prunes it, so this used to be a linear `find` per entry
+/// against a `Vec` of up-to-now clones — quadratic in goals, and one full
+/// copy of every `EntropyView` (six `String`s each) on every render of the
+/// screen. At 200 bailouts over 20 goals that is ~4 000 string comparisons
+/// and 1 200 allocations per render, for a list that is only ever written
+/// once per visit.
+pub fn group_by_goal(entries: &[EntropyView]) -> Vec<(&str, Vec<&EntropyView>)> {
+    let mut groups: Vec<(&str, Vec<&EntropyView>)> = Vec::new();
+    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for e in entries {
-        match groups.iter_mut().find(|(g, _)| *g == e.goal_title) {
-            Some((_, items)) => items.push(e.clone()),
-            None => groups.push((e.goal_title.clone(), vec![e.clone()])),
+        match index.get(e.goal_title.as_str()) {
+            Some(&i) => groups[i].1.push(e),
+            None => {
+                index.insert(e.goal_title.as_str(), groups.len());
+                groups.push((e.goal_title.as_str(), vec![e]));
+            }
         }
     }
     groups
@@ -181,8 +194,16 @@ pub fn EntropyLogScreen() -> Element {
         });
     });
 
-    let summary = entries.read().as_ref().map(|v| summarize(v));
-    let groups = entries.read().as_ref().map(|v| group_by_goal(v));
+    // Recomputed per render — which is NOT the once-per-toast the audit
+    // assumed. `EntropyLogScreen` takes no props, so a parent re-render
+    // memoizes them and never re-renders this scope at all
+    // (`VNode::diff_vcomponent` returns early when `old_props.memoize`
+    // says the props are unchanged). This runs when `entries` or `error`
+    // changes, which is at most twice per visit. The cost that *did* scale
+    // with the ledger was the grouping itself — see `group_by_goal`.
+    let entries = entries.read();
+    let summary = entries.as_ref().map(|v| summarize(v));
+    let groups = entries.as_deref().map(group_by_goal);
 
     rsx! {
         div { class: "wl-page",
@@ -334,18 +355,54 @@ mod tests {
         assert_eq!(summary_line(&s), "");
     }
 
+    /// The grouping is what makes a single bailout legible: three bails
+    /// over three goals is noise, three on one goal is a pattern. So the
+    /// first-seen order and the per-goal collection are both load-bearing
+    /// — the shell returns newest-first, and the most recently active goal
+    /// has to lead.
     #[test]
     fn grouping_keeps_first_seen_goal_order_and_collects_its_entries() {
-        let g = group_by_goal(&[
+        let ledger = [
             entry("energy_depletion", false, "Ship"),
             entry("miscalculated_scope", false, "Fleet"),
             entry("external_dependency", false, "Ship"),
-        ]);
+        ];
+        let g = group_by_goal(&ledger);
         assert_eq!(g.len(), 2);
         assert_eq!(g[0].0, "Ship");
         assert_eq!(g[0].1.len(), 2);
         assert_eq!(g[1].0, "Fleet");
         assert_eq!(g[1].1.len(), 1);
+        // Borrowed, not copied: the rows are the ledger's own entries, so
+        // rendering this page costs no allocation per bailout. The ledger
+        // is append-only for the life of the install, so a per-render copy
+        // of every entry was a copy that grew forever.
+        let mut seen: Vec<&str> = g
+            .iter()
+            .flat_map(|(_, v)| v.iter())
+            .map(|e| e.id.as_str())
+            .collect();
+        seen.sort_unstable();
+        let mut expected: Vec<&str> = ledger.iter().map(|e| e.id.as_str()).collect();
+        expected.sort_unstable();
+        assert_eq!(seen, expected, "every entry appears exactly once");
+    }
+
+    /// A goal whose title is empty is still a group, and two of them are
+    /// the same group — the old linear scan compared the same way, so this
+    /// is a property the index must not change.
+    #[test]
+    fn entries_with_no_goal_title_still_group_together() {
+        let ledger = [
+            entry("energy_depletion", false, ""),
+            entry("external_dependency", false, ""),
+            entry("energy_depletion", false, "Ship"),
+        ];
+        let g = group_by_goal(&ledger);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].0, "");
+        assert_eq!(g[0].1.len(), 2);
+        assert_eq!(g[1].0, "Ship");
     }
 
     #[test]

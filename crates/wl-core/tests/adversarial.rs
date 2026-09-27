@@ -2,6 +2,7 @@
 //! names identify the original failures; assertions require corrected
 //! behavior rather than preserving those defects.
 
+use wl_core::crypto::identity::Identity;
 use wl_core::domain::*;
 use wl_core::engine::{Engine, EngineOutcome};
 use wl_core::hlc::HlcTimestamp;
@@ -274,4 +275,261 @@ fn defect_downsize_requeue_keeps_stale_phase_progress() {
         total, 15,
         "rescaled phase minutes must sum to the new estimate"
     );
+}
+
+// ===========================================================================
+// Battle-test campaign: one regression per fixed defect.
+// ===========================================================================
+
+/// The repair must not rewrite rows it was not asked to fix.
+///
+/// `ensure_phases` updated only `minutes` locally, but emitted a
+/// SYNTHESIZED row (`title = "Step N"`, `instruction = None`,
+/// `state = active|pending`) under a fresh, winning HLC. A peer that ran
+/// the repair therefore lost the real title, the instruction, and a
+/// `done` state — and the repair manufactured the divergence it exists
+/// to heal. It also ran on every canvas load, so one truncated pull was
+/// enough to trigger it.
+#[test]
+fn defect_phase_repair_does_not_erase_titles_or_state() {
+    let r = Repos::new(open_in_memory().unwrap(), 1);
+    let identity = Identity::from_phrase(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let g = r
+        .create_goal("Ship", None, None, Some(&identity))
+        .unwrap();
+    let m = r
+        .create_milestone(&g.id, "M1", None, 0, Some(&identity))
+        .unwrap();
+    let d = r
+        .create_directive(
+            &m.id,
+            "Progressive",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &[("Write the spec".into(), Some("be thorough".into()), 5),
+              ("Ship it".into(), None, 25)],
+            Some(&identity),
+        )
+        .unwrap();
+    // Mark step 1 done, as a real session would.
+    let phases = r.phases_for_directive(&d.id).unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE directive_phases SET state = 'done' WHERE directive_id = ?1 AND step = 1",
+            [&d.id],
+        )
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM directive_phases WHERE directive_id = ?1 AND step = 2",
+            [&d.id],
+        )
+        .unwrap();
+    r.conn.lock().unwrap().execute(
+        "DELETE FROM crdt_outbox",
+        [],
+    ).unwrap();
+    assert_eq!(r.phases_for_directive(&d.id).unwrap().len(), 1);
+
+    let rebuilt = r.ensure_phases(&d.id, Some(&identity)).unwrap();
+    assert_eq!(rebuilt.len(), 2, "the missing step is rebuilt");
+    let step1 = rebuilt.iter().find(|p| p.step == 1).unwrap();
+    assert_eq!(step1.title, "Write the spec", "a good row keeps its title");
+    assert_eq!(
+        step1.instruction.as_deref(),
+        Some("be thorough"),
+        "a good row keeps its instruction"
+    );
+    assert_eq!(
+        step1.state,
+        PhaseState::Done,
+        "the repair must not reset a completed phase to active"
+    );
+    // And nothing was replicated for the untouched step.
+    let emitted: Vec<String> = r
+        .pending_outbox(100)
+        .unwrap()
+        .into_iter()
+        .map(|o| o.record_id)
+        .collect();
+    assert_eq!(
+        emitted,
+        vec![wl_core::crdt::phase_record_id(&d.id, 2)],
+        "only the step that actually changed may be replicated: {emitted:?}"
+    );
+}
+
+/// `progressive_total` arrives from a replicated payload with no schema
+/// constraint, and `ensure_phases` sized a `Vec` and a loop from it on
+/// the path the engine runs on every canvas load. One op carrying
+/// `estimated_minutes = 10^18, progressive_total = 10^9` reached
+/// `Vec::with_capacity(count)` — a multi-gigabyte allocation from a
+/// single crafted row.
+#[test]
+fn defect_absurd_phase_count_is_rejected_before_allocating() {
+    let r = Repos::new(open_in_memory().unwrap(), 1);
+    let g = r.create_goal("Ship", None, None, None).unwrap();
+    let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
+    let d = r
+        .create_directive(
+            &m.id,
+            "Progressive",
+            None,
+            30,
+            2,
+            "2026-09-13",
+            &[("A".into(), None, 15), ("B".into(), None, 15)],
+            None,
+        )
+        .unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE directives SET progressive_total = 1000000000, estimated_minutes = 1000000000000000000 WHERE id = ?1",
+            [&d.id],
+        )
+        .unwrap();
+    let err = r
+        .ensure_phases(&d.id, None)
+        .expect_err("a billion phases must be refused, not allocated");
+    assert!(
+        format!("{err}").contains("corrupt"),
+        "the error must name the corruption, got: {err}"
+    );
+}
+
+/// `skipped` is outstanding work, not completion.
+///
+/// The outstanding set was `('queued','active','blocked')`, so a
+/// milestone with two directives — one bailed out for energy (→
+/// `skipped`) and one completed — was marked `completed` with the
+/// skipped directive unstarted and unreachable: `next_runnable_directive`
+/// only selects `queued`, and nothing requeues a skip.
+#[test]
+fn defect_milestone_is_not_completed_while_a_skipped_directive_remains() {
+    let r = Repos::new(open_in_memory().unwrap(), 1);
+    let e = Engine::new(&r, None);
+    let today = "2026-09-13";
+    let g = r.create_goal("Ship", None, None, None).unwrap();
+    let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
+    let d = r
+        .create_directive(&m.id, "A", None, 20, 1, today, &[], None)
+        .unwrap();
+    let _ = e.activate_next(today).unwrap();
+    // Energy bailout → skipped.
+    e.bail_out(today, BailoutReason::EnergyDepletion, None).unwrap();
+    assert!(r.directive(&d.id).unwrap().is_some());
+    let state: String = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT state FROM directives WHERE id = ?1", [&d.id], |x| {
+            x.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "skipped");
+    let mstate: String = r
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT status FROM milestones WHERE id = ?1", [&m.id], |x| {
+            x.get(0)
+        })
+        .unwrap();
+    assert_ne!(
+        mstate, "completed",
+        "a milestone with an unreachable skipped directive is not complete"
+    );
+}
+
+/// A `progressive_step` past `progressive_total` is a replicated-op
+/// artefact (the two columns have no cross-field constraint and the
+/// pull path writes both from the payload). It has no phase row, so
+/// every engine path that read the current phase errored, and nothing
+/// could requeue the directive.
+#[test]
+fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
+    let r = Repos::new(open_in_memory().unwrap(), 1);
+    let e = Engine::new(&r, None);
+    let today = "2026-09-13";
+    let g = r.create_goal("Ship", None, None, None).unwrap();
+    let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
+    let d = r
+        .create_directive(
+            &m.id,
+            "Progressive",
+            None,
+            30,
+            2,
+            today,
+            &[("A".into(), None, 5), ("B".into(), None, 25)],
+            None,
+        )
+        .unwrap();
+    let _ = e.activate_next(today).unwrap();
+    r.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE directives SET progressive_step = 9 WHERE id = ?1", [&d.id])
+        .unwrap();
+
+    // The canvas must still render, and ⌘+Enter must still work.
+    let out = e.current(today).unwrap();
+    assert!(
+        matches!(out, wl_core::engine::EngineOutcome::DirectiveActive { .. }),
+        "the canvas must render a directive whose step is past the total: {out:?}"
+    );
+    let done = e.complete(today).unwrap();
+    assert!(
+        matches!(done, wl_core::engine::EngineOutcome::DirectiveCompleted { .. }),
+        "and the user must still be able to finish it: {done:?}"
+    );
+}
+
+/// Every settings field commits on `change`, and the relay URL is
+/// validated on the way in AND on the way out. The metadata-hostname
+/// block was bypassable with a trailing root dot — the same name to the
+/// resolver, but neither equal to nor `.ends_with()` the blocked form.
+#[test]
+fn defect_metadata_hostname_cannot_be_reached_with_a_trailing_dot() {
+    for url in [
+        "http://metadata.google.internal./computeMetadata/v1/",
+        "http://METADATA.GOOGLE.INTERNAL./",
+        "http://foo.metadata.google.internal./",
+    ] {
+        assert!(
+            wl_core::net::validate_relay_url(url).is_err(),
+            "{url} must not be accepted as a relay"
+        );
+    }
+    // IPv4-compatible IPv6 (`::a9fe:a9fe` == 169.254.169.254) is still
+    // honoured by connect(2); the old check only unwrapped the
+    // IPv4-MAPPED form.
+    for url in [
+        "http://[::ffff:a9fe:a9fe]/",
+        "http://[::a9fe:a9fe]/",
+        "http://192.0.0.192/",
+    ] {
+        assert!(
+            wl_core::net::validate_relay_url(url).is_err(),
+            "{url} must not be accepted as a relay"
+        );
+    }
+    // The supported layouts still work.
+    for url in ["http://127.0.0.1:8080", "https://relay.example.com"] {
+        assert!(
+            wl_core::net::validate_relay_url(url).is_ok(),
+            "{url} must still be a valid relay"
+        );
+    }
 }

@@ -102,20 +102,21 @@ pub fn GoalCreateScreen() -> Element {
     // whole point of surfacing these errors is that they are READ.
     let mut error = use_signal(|| None::<String>);
 
-    // Autofocus + auto-grow. `autofocus` on the textarea handles the first
-    // paint; this effect re-asserts both on every intent change, and on
-    // mount, because the field is re-created when the busy state flips the
-    // button labels — which drops focus and collapses the height back to
-    // the `rows=1` box.
+    // Autofocus + auto-grow. `autofocus` on the textarea is unreliable
+    // under a client-rendered tree — WebKit honours it during parsing, not
+    // on an attribute set after insertion — so the field is focused
+    // explicitly once the node exists. The growth, though, is not an
+    // effect's job: the textarea node is stable across renders (Dioxus
+    // diffs it in place; the busy state only rewrites the button labels),
+    // so the height is re-measured from the event that can change it.
+    //
+    // The old version re-measured from an effect subscribed to `intent`,
+    // which also meant copying the whole intent — up to 4 000 characters —
+    // into a throwaway `String` on every character typed, and deferring
+    // two synchronous DOM reads by a task hop. Neither is needed to know
+    // how many lines the text wraps to; `scrollHeight` is.
     use_effect(move || {
-        // Read the signal so the effect re-runs per keystroke: the height
-        // has to follow the text, and `scrollHeight` is the only way to
-        // know how many lines that is.
-        let _text = intent.read().clone();
-        spawn(async move {
-            crate::app::autofocus_compose();
-            crate::app::autogrow_compose();
-        });
+        crate::app::autofocus_compose();
     });
 
     let mut create_ai = move || {
@@ -254,8 +255,11 @@ pub fn GoalCreateScreen() -> Element {
                     title: "Target date",
                     value: "{horizon.read()}",
                     onchange: move |e| horizon.set(e.value()),
+                    // Keyed like every other list in the app: the
+                    // options are stable, so Dioxus should diff them by
+                    // horizon rather than by position.
                     for (i, (label, _)) in HORIZONS.iter().enumerate() {
-                        option { value: "{i}", "{label}" }
+                        option { key: "{i}", value: "{i}", "{label}" }
                     }
                 }
             }
@@ -263,8 +267,9 @@ pub fn GoalCreateScreen() -> Element {
                 "State the Objective"
             }
 
-            // The field. `rows=1` plus the auto-grow effect is what makes
-            // it expand with the text instead of scrolling internally.
+            // The field. `rows=1` plus the auto-grow on every input is what
+            // makes it expand with the text instead of scrolling
+            // internally.
             textarea {
                 class: "wl-compose",
                 rows: 1,
@@ -281,6 +286,11 @@ pub fn GoalCreateScreen() -> Element {
                     intent.set(v);
                     // Editing the intent invalidates the last failure.
                     error.set(None);
+                    // The height is measured from the DOM, not computed:
+                    // wrapped line count cannot be derived from a
+                    // font-size and a column width, and guessing produces
+                    // a scrollbar on the second line.
+                    crate::app::autogrow_compose();
                 },
             }
 

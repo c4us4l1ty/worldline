@@ -37,8 +37,31 @@ pub struct Repos {
     device: u16,
 }
 
+/// Ceiling on how many phases one progressive directive may be split
+/// into. A guard, not a product rule: `progressive_total` is a column
+/// a replicated op writes with no schema constraint, and
+/// `ensure_phases` sizes a `Vec` and a loop from it on a path the
+/// engine hits on every canvas load. The planner emits 2-4.
+const MAX_PROGRESSIVE_PHASES: i64 = 64;
+
 fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// SQLite has no unsigned 64-bit integer, and the HLC physical
+/// component is nanoseconds since the UNIX epoch — a `u64` that can
+/// outrun `i64::MAX` by a factor of two.
+///
+/// `as i64` REINTERPRETS rather than converts, so a wall component past
+/// `i64::MAX` (the year ~2262, or any host clock set past it) is stored
+/// as a NEGATIVE number. That value is a landmine in a column every
+/// comparison reads: `> 0` is false, ordering inverts, and the round
+/// trip only survives by accident of two's complement. Saturating keeps
+/// the column a real timestamp. The clamp loses at most the difference
+/// between the two, and `now()` treats the wall clock as authoritative
+/// anyway (`wall > head` resets the counter), so nothing regresses.
+fn nanos_to_i64(nanos: u64) -> i64 {
+    i64::try_from(nanos).unwrap_or(i64::MAX)
 }
 
 impl Repos {
@@ -112,7 +135,7 @@ impl Repos {
         conn.execute(
             "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
-            params![wall as i64, ctr as i64, self.device as i64],
+            params![nanos_to_i64(wall), ctr as i64, self.device as i64],
         )?;
         Ok(())
     }
@@ -167,8 +190,22 @@ impl Repos {
                     Ok(IdentityConfig {
                         public_key: r.get(0)?,
                         bip39_mnemonic_verified: r.get(1)?,
-                        verify_indices: serde_json::from_str(&r.get::<_, String>(2)?)
-                            .unwrap_or_default(),
+                        // A corrupt `verify_indices` is a CORRUPTION, not
+                        // "no challenge". `unwrap_or_default` reported an
+                        // empty challenge list, so the shell treated every
+                        // backup challenge as invalid and silently
+                        // re-prompted onboarding, with the bad row
+                        // invisible. Every other mapper here surfaces its
+                        // parse failure; so does this one.
+                        verify_indices: serde_json::from_str(&r.get::<_, String>(2)?).map_err(
+                            |e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    2,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            },
+                        )?,
                         hlc_timestamp: parse_hlc(&r.get::<_, String>(3)?)?,
                     })
                 },
@@ -595,7 +632,7 @@ impl Repos {
                 &tx,
                 identity,
                 crate::crdt::CrdtTable::DirectivePhases,
-                &id,
+                &crate::crdt::phase_record_id(&id, p.step),
                 &Self::phase_json(&p),
                 ts,
             )?;
@@ -650,6 +687,21 @@ impl Repos {
         }
 
         let count = d.progressive_total;
+        // `progressive_total` arrives from a replicated row with no
+        // schema bound, and the only guard below was
+        // `estimated_minutes >= count`. One op carrying
+        // `estimated_minutes = 10^18, progressive_total = 10^9` cleared
+        // that and reached `Vec::with_capacity(count)` — a multi-gigabyte
+        // allocation on the path the engine runs on every canvas load.
+        // The real product caps a progressive directive at a handful of
+        // phases (`Directive::PROGRESSIVE_THRESHOLD_MINUTES` is a
+        // duration, not a count; the AI planner emits 2-4).
+        if !(1..=MAX_PROGRESSIVE_PHASES).contains(&count) {
+            return Err(StoreError::Invalid(format!(
+                "directive {directive_id} is corrupt: {count} phases is outside the \
+                 supported range 1..={MAX_PROGRESSIVE_PHASES} — reschedule it"
+            )));
+        }
         if d.estimated_minutes < count {
             // Cannot split `estimated_minutes` into `count` positive
             // phases. Repairing would mean inventing time the user never
@@ -663,53 +715,75 @@ impl Repos {
             )));
         }
         // Equal slices, remainder to the last step: sums exactly, and
-        // identical on every device that runs the repair.
+        // identical on every device that runs the repair. This is the
+        // recipe for a step that has to be INVENTED, not a rule to
+        // impose on one that already exists.
         let base = d.estimated_minutes / count;
         let remainder = d.estimated_minutes % count;
         let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let mut rebuilt = Vec::with_capacity(count as usize);
         for step in 1..=count {
-            let minutes = if step == count {
-                base + remainder
-            } else {
-                base
+            // A step that already exists keeps EVERYTHING, minutes
+            // included.
+            //
+            // The repair used to recompute equal slices for all of them,
+            // so a directive authored as 5 + 25 minutes came back as
+            // 15 + 15 the first time any phase row went missing — and
+            // because the local `ON CONFLICT` clause only touched
+            // `minutes`, the emitted op carried a SYNTHESIZED row
+            // (`title = "Step N"`, `instruction = None`, `state =
+            // active|pending`) under a fresh, winning HLC. The peer lost
+            // the real title, the instruction and any `done` state, and
+            // the repair manufactured the divergence it exists to heal.
+            // It ran on every canvas load, so one truncated pull was
+            // enough to trigger it.
+            let prior = existing.iter().find(|p| p.step == step);
+            let p = match prior {
+                Some(prev) => {
+                    rebuilt.push(prev.clone());
+                    continue;
+                }
+                None => DirectivePhase {
+                    directive_id: directive_id.to_string(),
+                    step,
+                    title: format!("Step {step}"),
+                    instruction: None,
+                    minutes: if step == count {
+                        base + remainder
+                    } else {
+                        base
+                    },
+                    state: if step == 1 {
+                        PhaseState::Active
+                    } else {
+                        PhaseState::Pending
+                    },
+                    hlc_timestamp: self.hlc.now(self.device),
+                },
             };
-            let ts = self.hlc.now(self.device);
-            let title = format!("Step {step}");
+            let ts = p.hlc_timestamp;
             tx.execute(
                 "INSERT INTO directive_phases (directive_id, step, title, instruction, minutes, state, hlc_timestamp)
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(directive_id, step) DO UPDATE SET
                     minutes = excluded.minutes, hlc_timestamp = excluded.hlc_timestamp",
                 params![
-                    directive_id,
-                    step,
-                    title,
-                    minutes,
-                    if step == 1 { "active" } else { "pending" },
+                    p.directive_id,
+                    p.step,
+                    p.title,
+                    p.instruction,
+                    p.minutes,
+                    p.state.as_str(),
                     ts.to_string()
                 ],
             )?;
-            let p = DirectivePhase {
-                directive_id: directive_id.to_string(),
-                step,
-                title,
-                instruction: None,
-                minutes,
-                state: if step == 1 {
-                    PhaseState::Active
-                } else {
-                    PhaseState::Pending
-                },
-                hlc_timestamp: ts,
-            };
             if identity.is_some() {
                 Self::emit_on(
                     &tx,
                     identity,
                     crate::crdt::CrdtTable::DirectivePhases,
-                    directive_id,
+                    &crate::crdt::phase_record_id(directive_id, p.step),
                     &Self::phase_json(&p),
                     ts,
                 )?;
@@ -823,7 +897,7 @@ impl Repos {
         tx.execute(
             "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
-            params![wall as i64, ctr as i64, self.device as i64],
+            params![nanos_to_i64(wall), ctr as i64, self.device as i64],
         )?;
         tx.commit()?;
         Ok(())
@@ -994,7 +1068,7 @@ impl Repos {
                 &tx,
                 identity,
                 crate::crdt::CrdtTable::DirectivePhases.as_str(),
-                directive_id,
+                &crate::crdt::phase_record_id(directive_id, step),
                 &payload,
                 ts,
             )?)
@@ -1006,7 +1080,7 @@ impl Repos {
             "INSERT INTO record_heads (table_name, record_id, hlc_timestamp, device, operation_id, tombstone)
              VALUES ('directive_phases', ?1, ?2, ?3, ?4, 1)
              ON CONFLICT(table_name, record_id) DO UPDATE SET hlc_timestamp=?2, device=?3, operation_id=?4, tombstone=1",
-            params![directive_id, ts_s, ts.device as i64, op_id.as_deref().unwrap_or(&ts_s)],
+            params![crate::crdt::phase_record_id(directive_id, step), ts_s, ts.device as i64, op_id.as_deref().unwrap_or(&ts_s)],
         )?;
         self.persist_head_on(&tx)?;
         tx.commit()?;
@@ -1063,7 +1137,7 @@ impl Repos {
         tx.execute(
             "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
-            params![wall as i64, ctr as i64, self.device as i64],
+            params![nanos_to_i64(wall), ctr as i64, self.device as i64],
         )?;
         tx.commit()?;
         Ok(parked)
@@ -1162,7 +1236,7 @@ impl Repos {
                     &tx,
                     identity,
                     crate::crdt::CrdtTable::DirectivePhases,
-                    id,
+                    &crate::crdt::phase_record_id(id, p.step),
                     &Self::phase_json(p),
                     ts,
                 )?;
@@ -1209,7 +1283,7 @@ impl Repos {
                 &tx,
                 identity,
                 crate::crdt::CrdtTable::DirectivePhases,
-                id,
+                &crate::crdt::phase_record_id(id, p.step),
                 &Self::phase_json(p),
                 p.hlc_timestamp,
             )?;
@@ -1233,6 +1307,49 @@ impl Repos {
         self.persist_head_on(&tx)?;
         tx.commit()?;
         Ok(advanced)
+    }
+
+    /// Clamps `progressive_step` back into `1..=progressive_total` and
+    /// writes it through.
+    ///
+    /// Needed because the two columns are separate integers with no
+    /// cross-field CHECK, and the pull path writes both straight from a
+    /// replicated payload. A `step` past the `total` has no phase row, so
+    /// every engine path that reads the current phase failed and nothing
+    /// could requeue the directive.
+    pub fn reset_progressive_step(
+        &self,
+        id: &str,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        let mut d = Self::directive_on(&tx, id)?
+            .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
+        if d.progressive_total < 1 {
+            return Err(StoreError::Invalid(format!("directive {id} has no phases")));
+        }
+        let clamped = d.progressive_step.clamp(1, d.progressive_total);
+        if clamped == d.progressive_step {
+            return Ok(());
+        }
+        d.progressive_step = clamped;
+        d.hlc_timestamp = self.hlc.now(self.device);
+        tx.execute(
+            "UPDATE directives SET progressive_step = ?2, hlc_timestamp = ?3 WHERE id = ?1",
+            params![id, d.progressive_step, d.hlc_timestamp.to_string()],
+        )?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::Directives,
+            id,
+            &Self::directive_json(&d),
+            d.hlc_timestamp,
+        )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn phases_for_directive(
@@ -1657,9 +1774,47 @@ impl Repos {
         payload: &serde_json::Value,
         ts: HlcTimestamp,
     ) -> Result<(), StoreError> {
-        if let Some(identity) = identity {
-            Self::enqueue_on(conn, identity, table.as_str(), record_id, payload, ts)?;
-        }
+        let op_id = match identity {
+            Some(identity) => Some(Self::enqueue_on(
+                conn,
+                identity,
+                table.as_str(),
+                record_id,
+                payload,
+                ts,
+            )?),
+            None => None,
+        };
+        // Every LOCAL upsert must advance the record's merge head.
+        //
+        // Only the delete writers did, so the head lagged behind the row
+        // on every ordinary write. The pull side prefers the head over
+        // the row's own HLC (the `row_hlc` fallback only applies when no
+        // head exists), which produced this: a peer op for `app_settings`
+        // at T_r lands and plants head=T_r; the user changes a setting at
+        // T_l > T_r, which updates the row but leaves head=T_r; a third
+        // device's op at T_m between the two then beats the head, wins
+        // arbitration, and blind-upserts the STALE value over the user's
+        // newer edit. The head exists to be the record's true merge
+        // position; a local write moves that position.
+        //
+        // Without an outbox op there is no operation id, so the tick
+        // itself stands in — it is unique and monotonic per repo, which
+        // is the same key the delete path uses.
+        let ts_s = ts.to_string();
+        conn.execute(
+            "INSERT INTO record_heads (table_name, record_id, hlc_timestamp, device, operation_id, tombstone)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)
+             ON CONFLICT(table_name, record_id) DO UPDATE SET
+                hlc_timestamp=?3, device=?4, operation_id=?5, tombstone=0",
+            params![
+                table.as_str(),
+                record_id,
+                ts_s,
+                ts.device as i64,
+                op_id.as_deref().unwrap_or(&ts_s)
+            ],
+        )?;
         Ok(())
     }
 
@@ -1672,7 +1827,7 @@ impl Repos {
         ts: HlcTimestamp,
     ) -> Result<String, StoreError> {
         let op_id = new_id("op");
-        let aad = format!("{table_name}:{record_id}");
+        let aad = crate::crdt::routing_aad(table_name, record_id, &op_id, &ts.to_string());
         let plaintext = zeroize::Zeroizing::new(
             serde_json::to_vec(payload_json).map_err(|e| StoreError::Invalid(e.to_string()))?,
         );
@@ -1710,7 +1865,7 @@ impl Repos {
         conn.execute(
             "INSERT INTO hlc_clock (id, last_wall_nanos, counter, device) VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET last_wall_nanos=?1, counter=?2, device=?3",
-            params![wall as i64, ctr as i64, self.device as i64],
+            params![nanos_to_i64(wall), ctr as i64, self.device as i64],
         )?;
         Ok(())
     }

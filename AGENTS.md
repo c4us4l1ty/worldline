@@ -46,14 +46,14 @@ unless `dx serve --port 1420` is already up.
 - Relay: `./target/debug/wl-relay` (already built; ~0 idle CPU).
 - No JS toolchain exists here (no node/bun) — UI is Rust/Dioxus→wasm; all
   commands are cargo/tauri/dx.
-- **Look at the UI before changing it: `crates/wl-app/ui/preview.html`.**
-  It renders every screen's markup against the real `public/wl.css` with
-  no wasm and no Tauri shell. Open it in a browser. A headless screenshot
-  of `dx serve` catches a blank frame (the wasm has not booted), so it is
-  not a substitute. Reviewing a design by reading the stylesheet is how a
-  dead `--wl-text-tertiary` inverted the control panel's hierarchy and how
-  a cascade-ordering bug shipped a non-full-height sheet — both invisible
-  in the source, both obvious rendered.
+- **Look at the UI before changing it: `scripts/dx.sh serve --port 1420`.**
+  It draws every screen against the real `public/wl.css` in a browser,
+  backed by the mock shell in `public/invoke-shim.js`. A headless
+  screenshot of `dx serve` catches a blank frame (the wasm has not booted),
+  so it is not a substitute. Reviewing a design by reading the stylesheet
+  is how a dead `--wl-text-tertiary` inverted the control panel's hierarchy
+  and how a cascade-ordering bug shipped a non-full-height sheet — both
+  invisible in the source, both obvious rendered.
 
 ## Shell conventions (hard-won — do not regress)
 

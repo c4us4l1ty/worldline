@@ -173,6 +173,22 @@ pub fn optional(value: String) -> Option<String> {
     }
 }
 
+/// Longest recovery phrase this page will hold, in characters.
+///
+/// Twelve BIP-39 words at the longest word in the list (8 letters) plus
+/// separators is 108, so 200 is generous without being a licence to paste
+/// a file. The cap is a `maxlength` AND a truncation in `oninput`: the
+/// attribute alone does not stop a programmatic paste in every engine.
+pub const MAX_PHRASE_CHARS: usize = 200;
+
+/// Longest API key this page will hold, in characters.
+///
+/// No BYOK provider issues anything close to this. The point is that an
+/// unbounded `String` in a signal is an unbounded allocation in the wasm
+/// heap for as long as the screen lives, and it is `serde_json`-encoded
+/// into an IPC argument on submit.
+pub const MAX_API_KEY_CHARS: usize = 512;
+
 pub fn SettingsScreen() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut local = use_signal(|| ctx.settings.read().clone());
@@ -186,6 +202,10 @@ pub fn SettingsScreen() -> Element {
     // Separate guard for the relay handshake probe, so a connection test
     // in flight cannot be re-entered by the sync button beside it.
     let mut probing = use_signal(|| false);
+    // The provider the `has_api_key` probe last acted on. Same reason as
+    // `last_catalog_trigger` below: the probe subscribes to the whole
+    // settings draft, and only the provider is a reason to re-probe.
+    let mut last_probe_trigger = use_signal(|| None::<String>);
     let mut phrase = use_signal(String::new);
     let mut identity_busy = use_signal(|| false);
     let mut identity_error = use_signal(String::new);
@@ -196,6 +216,13 @@ pub fn SettingsScreen() -> Element {
     let mut catalog = use_signal(|| None::<ModelListView>);
     let mut catalog_error = use_signal(|| None::<String>);
     let mut catalog_busy = use_signal(|| false);
+    // Which `list_models` request is allowed to write `catalog`. Monotonic,
+    // so "newest wins" survives two requests for the same provider.
+    let mut catalog_gen = use_signal(|| 0u32);
+    // The `(provider, key-present)` pair the load effect last acted on, so
+    // the effect can be woken by a keystroke in an unrelated field and
+    // still decline to refetch. See the effect below.
+    let mut last_catalog_trigger = use_signal(|| None::<(String, bool)>);
     let mut open_picker = use_signal(|| None::<ChoiceSheet>);
     let theme_controller = use_context::<crate::theme::Theme>();
 
@@ -222,8 +249,20 @@ pub fn SettingsScreen() -> Element {
     // Probe whether a key is already stored for the current provider.
     // Reads the draft inside the effect so provider switches re-probe;
     // the in-flight guard drops stale responses from rapid switches.
+    //
+    // The trigger guard is the same one the catalog load below needs, for
+    // the same reason: `local` is the whole draft, so subscribing to it
+    // re-runs this on every keystroke in the relay-URL field — the one
+    // field that never settles, because it commits on blur. Measured
+    // under `dx serve`: typing `http://10.0.0.5:9999` issued 20
+    // `has_api_key` vault reads, one per character, and 19 of them for a
+    // draft the probe was about to read and discard.
     use_effect(move || {
         let p = local.read().ai_provider.clone().unwrap_or_default();
+        if *last_probe_trigger.peek() == Some(p.clone()) {
+            return;
+        }
+        *last_probe_trigger.write() = Some(p.clone());
         let still_current = local;
         let mut saved = key_saved;
         spawn(async move {
@@ -247,32 +286,42 @@ pub fn SettingsScreen() -> Element {
     // `force` is what makes a newly released model reachable without
     // waiting out the shell's one-hour cache.
     let mut refresh_catalog = move |force: bool| {
-        let provider = local.read().ai_provider.clone().unwrap_or_default();
-        if provider.is_empty() || !*key_saved.read() {
+        let provider = local.peek().ai_provider.clone().unwrap_or_default();
+        if provider.is_empty() || !*key_saved.peek() {
             *catalog.write() = None;
             catalog_error.set(None);
             return;
         }
-        let still_current = local;
+        // Every call takes a new generation number, and only the newest
+        // request is allowed to write. The old guard compared the
+        // provider string, which cannot tell two requests for the SAME
+        // provider apart: whichever answered last won, so a slow stale
+        // response could overwrite a fresh catalog that had already
+        // arrived, and `catalog_busy` had been cleared by the newer one.
+        let generation = catalog_gen.peek().wrapping_add(1);
+        *catalog_gen.write() = generation;
         catalog_busy.set(true);
         catalog_error.set(None);
         spawn(async move {
-            match invoke::<ModelListView>(
+            let answer = invoke::<ModelListView>(
                 "list_models",
                 serde_json::json!({ "provider": provider.clone(), "force": force }),
             )
-            .await
-            {
+            .await;
+            // Superseded — by a newer request, or by a provider switch
+            // that has already started its own. Dropping the answer is
+            // what keeps two in-flight fetches from racing for the one
+            // `catalog` slot.
+            if *catalog_gen.peek() != generation {
+                return;
+            }
+            match answer {
                 Ok(list) => {
-                    if still_current.peek().ai_provider.clone().unwrap_or_default() == provider {
-                        *catalog.write() = Some(list);
-                    }
+                    *catalog.write() = Some(list);
                 }
                 Err(e) => {
-                    if still_current.peek().ai_provider.clone().unwrap_or_default() == provider {
-                        *catalog.write() = None;
-                        catalog_error.set(Some(e));
-                    }
+                    *catalog.write() = None;
+                    catalog_error.set(Some(e));
                 }
             }
             catalog_busy.set(false);
@@ -281,10 +330,21 @@ pub fn SettingsScreen() -> Element {
     {
         let mut refresh = refresh_catalog;
         use_effect(move || {
-            // Re-runs when the provider or the key-presence flips, which
-            // is exactly when a catalog becomes fetchable.
-            let _ = local.read().ai_provider.clone();
-            let _ = key_saved.read();
+            // Subscribes to the provider and to key-presence, then
+            // decides whether anything actually changed. The guard is the
+            // point: `local` is the whole settings draft, so a naive
+            // effect re-runs on EVERY keystroke in the relay-URL field —
+            // which is the one field that never settles, because it
+            // commits on blur — and each re-run fired a `has_api_key`
+            // vault read and a `list_models` HTTPS request. Typing
+            // `http://127.0.0.1:8080` cost twenty of each, and the
+            // stale-response guard then threw all but the last away.
+            let provider = local.read().ai_provider.clone().unwrap_or_default();
+            let has_key = *key_saved.read();
+            if *last_catalog_trigger.peek() == Some((provider.clone(), has_key)) {
+                return;
+            }
+            *last_catalog_trigger.write() = Some((provider, has_key));
             refresh(false);
         });
     }
@@ -317,26 +377,33 @@ pub fn SettingsScreen() -> Element {
     let dark = s.theme != "light";
     let sync_label = crate::app::sync_label(&ctx);
     let provider = s.ai_provider.clone().unwrap_or_default();
-    let known_models: Vec<crate::app::ModelInfoView> = catalog
-        .read()
-        .as_ref()
-        .map(|c| c.models.clone())
-        .unwrap_or_default();
     // The two tier rows, resolved before the rsx because Dioxus has no
     // `let` inside an element body. The meta line is the model's context
     // window, and only when the catalog can state it — absent rather than
     // a placeholder, because the row's third line is a fact or it is not
     // there.
-    let slots: Vec<(Tier, Option<String>, Option<String>)> = [
-        (Tier::Architect, &s.tier1_model),
-        (Tier::Dispatcher, &s.tier2_model),
-    ]
-    .into_iter()
-    .map(|(tier, id)| {
-        let meta = id.as_deref().and_then(|i| chosen_meta(&known_models, i));
-        (tier, id.clone(), meta)
-    })
-    .collect();
+    //
+    // Read through a borrow, scoped to the block. This used to
+    // `c.models.clone()` the whole catalog into a local `Vec` on every
+    // render — 443 models x 2 `String`s, ~886 heap allocations, thrown
+    // away on the next keystroke or toast. The only consumer that needs
+    // an owned copy is the model sheet's prop, and that clone now happens
+    // inside the arm that renders the sheet.
+    let slots: Vec<(Tier, Option<String>, Option<String>)> = {
+        let catalog = catalog.read();
+        let known: &[crate::app::ModelInfoView] =
+            catalog.as_ref().map(|c| c.models.as_slice()).unwrap_or(&[]);
+        [
+            (Tier::Architect, &s.tier1_model),
+            (Tier::Dispatcher, &s.tier2_model),
+        ]
+        .into_iter()
+        .map(|(tier, id)| {
+            let meta = id.as_deref().and_then(|i| chosen_meta(known, i));
+            (tier, id.clone(), meta)
+        })
+        .collect()
+    };
 
     rsx! {
         div { class: "wl-page",
@@ -388,8 +455,6 @@ pub fn SettingsScreen() -> Element {
                                         *sc.write() = Screen::SeedVault {
                                             phrase: Vec::new(),
                                             verify_indices: Vec::new(),
-                                            restore: false,
-                                            has_identity: false,
                                         };
                                     };
                                 },
@@ -425,15 +490,29 @@ pub fn SettingsScreen() -> Element {
                         }
                         // The phrase input is a flex row rather than a bare
                         // field so "Restore" sits beside the words it acts on.
+                        //
+                        // `maxlength` is the client-side mirror of what the
+                        // shell will accept, exactly as the compose field
+                        // mirrors `MAX_INTENT_CHARS`. Without it a pasted
+                        // multi-megabyte clipboard stayed resident in a
+                        // wasm-heap `String` for the screen's lifetime —
+                        // and was then serialised into the IPC payload —
+                        // while the 12-word check only rejected it on
+                        // submit, long after the buffer was already there.
+                        // 12 BIP-39 words are at most 108 characters.
                         div { class: "wl-restore-row", style: "margin-top: 10px;",
                             input {
                                 class: "wl-input wl-input--mono",
                                 r#type: "password",
                                 autocomplete: "off",
                                 spellcheck: "false",
+                                maxlength: MAX_PHRASE_CHARS,
                                 placeholder: "12 words, space-separated",
                                 value: "{phrase.read().clone()}",
-                                oninput: move |e| phrase.set(e.value()),
+                                oninput: move |e| {
+                                    let v: String = e.value().chars().take(MAX_PHRASE_CHARS).collect();
+                                    phrase.set(v);
+                                },
                             }
                             button {
                                 class: "wl-btn-ghost wl-btn-compact",
@@ -631,12 +710,20 @@ pub fn SettingsScreen() -> Element {
 
                 div { class: "wl-fieldset",
                     span { class: "wl-fieldset-label", "API key" }
+                    // Same reason as the mnemonic above: the value is
+                    // serialised straight into an IPC payload on submit,
+                    // so it must not be an unbounded `String` first. No
+                    // provider issues a key anywhere near this long.
                     input { class: "wl-input wl-input--mono", r#type: "password",
                         placeholder: "Sealed into this device's vault",
                         autocomplete: "off",
                         spellcheck: "false",
+                        maxlength: MAX_API_KEY_CHARS,
                         value: "{api_key.read().clone()}",
-                        oninput: move |e| api_key.set(e.value()) }
+                        oninput: move |e| {
+                            let v: String = e.value().chars().take(MAX_API_KEY_CHARS).collect();
+                            api_key.set(v);
+                        } }
                     div { class: "wl-inline-actions",
                         button {
                             class: "wl-btn-ghost",
@@ -855,17 +942,29 @@ pub fn SettingsScreen() -> Element {
                         },
                     }
                 },
-                ChoiceSheet::Tier(tier) => rsx! {
+                ChoiceSheet::Tier(tier) => {
+                    // The sheet's `models` prop is owned, so this is the
+                    // one render that genuinely needs a copy of the
+                    // catalog — and it is the render that has a sheet
+                    // open to feed. Every other render borrows it.
+                    let (sheet_models, sheet_recommended, sheet_cached) = {
+                        let catalog = catalog.read();
+                        match catalog.as_ref() {
+                            Some(c) => (
+                                c.models.clone(),
+                                c.recommended.clone(),
+                                c.cached,
+                            ),
+                            None => (Vec::new(), Vec::new(), false),
+                        }
+                    };
+                    rsx! {
                     ModelPicker {
                         tier,
                         provider: provider.clone(),
-                        models: known_models.clone(),
-                        recommended: catalog
-                            .read()
-                            .as_ref()
-                            .map(|c| c.recommended.clone())
-                            .unwrap_or_default(),
-                        cached: catalog.read().as_ref().is_some_and(|c| c.cached),
+                        models: sheet_models,
+                        recommended: sheet_recommended,
+                        cached: sheet_cached,
                         loading: *catalog_busy.read(),
                         error: catalog_error.read().clone(),
                         on_pick: move |id: String| {
@@ -883,7 +982,8 @@ pub fn SettingsScreen() -> Element {
                             *open_picker.write() = None;
                         },
                     }
-                },
+                    }
+                }
             }
         }
     }

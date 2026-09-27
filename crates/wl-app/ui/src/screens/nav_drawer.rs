@@ -285,11 +285,15 @@ mod tests {
     /// goal detail page to navigate to anyway.
     #[test]
     fn the_cap_leaves_room_for_the_groups_above_and_settings_below() {
-        assert!(WORLDLINE_CAP >= 2, "one row is not a readout");
-        assert!(
-            WORLDLINE_CAP <= 4,
-            "past four, the panel scrolls and Settings falls off the bottom"
-        );
+        // The cap is a constant, so its bounds are checked at compile
+        // time rather than by a test that can only fail after a build.
+        const {
+            assert!(WORLDLINE_CAP >= 2, "one row is not a readout");
+            assert!(
+                WORLDLINE_CAP <= 4,
+                "past four, the panel scrolls and Settings falls off the bottom"
+            );
+        }
     }
 
     #[test]

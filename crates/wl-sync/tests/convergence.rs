@@ -346,7 +346,7 @@ async fn delete_replicates_and_stays_deleted() {
     // zombie: LWW arbitration drops the upsert.
     let fields = serde_json::json!({"title": "Zombie goal", "description": null,
         "target_date": null, "status": "active"});
-    let aad = format!("goals:{}", g.id);
+    let aad = wl_core::crdt::routing_aad("goals", &g.id, "op-zombie-upsert", &goal_hlc);
     let sealed = wl_core::crypto::aead::seal(
         &identity,
         &serde_json::to_vec(&fields).unwrap(),
@@ -402,7 +402,7 @@ async fn equal_hlc_ops_converge_regardless_of_delivery_order() {
     let craft = |op_id: &str, title: &str| {
         let fields = serde_json::json!({"title": title, "description": null,
             "target_date": null, "status": "active"});
-        let aad = format!("goals:{}", g.id);
+        let aad = wl_core::crdt::routing_aad("goals", &g.id, op_id, &hlc);
         let sealed = wl_core::crypto::aead::seal(
             &identity,
             &serde_json::to_vec(&fields).unwrap(),
@@ -745,7 +745,8 @@ async fn poison_constraint_op_quarantines_without_wedging_sync() {
     let ts = a.hlc.now(a.device_id());
     assert!(ts > c1.hlc_timestamp);
     let fields = serde_json::json!({"date": c2.date, "outcome": "done", "note": null});
-    let aad = format!("check_ins:{}", c1.id);
+    let aad =
+        wl_core::crdt::routing_aad("check_ins", &c1.id, "op-poison-row-move", &ts.to_string());
     let sealed = wl_core::crypto::aead::seal(
         &identity,
         &serde_json::to_vec(&fields).unwrap(),

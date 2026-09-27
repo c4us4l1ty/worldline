@@ -1,7 +1,7 @@
 use std::fmt;
 
 use bip39::Mnemonic;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use zeroize::Zeroizing;
 
 use crate::crypto::{HKDF_INFO_CHACHA20, HKDF_INFO_ED25519};
@@ -168,7 +168,14 @@ pub fn verify_signature(
         .map_err(|_| hex::FromHexError::InvalidStringLength)?;
     let vk = VerifyingKey::from_bytes(&arr)?;
     let sig = Signature::from_bytes(sig);
-    Ok(vk.verify(msg, &sig).is_ok())
+    // `verify_strict`, not `verify`: the lax form skips the small-order
+    // and non-canonical-key rejection, so a small-order point verifies an
+    // arbitrary signature over an arbitrary message. Nothing here is
+    // exploitable today (an account id is a self-chosen public key, so
+    // an attacker who can pick one gains nothing), but this is the
+    // verifier the relay's whole authentication story runs through, and
+    // `verify_strict` is the correct one at zero cost.
+    Ok(vk.verify_strict(msg, &sig).is_ok())
 }
 
 #[cfg(test)]

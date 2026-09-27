@@ -38,26 +38,37 @@ pub const MAX_CHALLENGES_PER_ACCOUNT: usize = 4;
 /// Global in-flight challenge ceiling (memory-DoS bound). Reaching it
 /// means the relay is under flood; new challenges are refused until
 /// TTLs expire.
-pub const MAX_CHALLENGES_GLOBAL: usize = 100_000;
+///
+/// Sized for the HOT PATH, not for headroom. Every `/auth/challenge`
+/// walks this table twice (an amortised expiry sweep and a per-account
+/// count) on an unauthenticated request while holding the mutex, and
+/// `ACCOUNT_CAP` is 10 000 — so 4 challenges per account can never
+/// exceed 40 000 live rows in practice. A ceiling far above that buys
+/// nothing and turns table growth directly into per-request CPU: at
+/// 100 000 each challenge cost ~1 ms of convoyed work that a caller who
+/// had authenticated nothing could demand forever.
+pub const MAX_CHALLENGES_GLOBAL: usize = 4_000;
 
 pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 pub const MAX_SESSIONS_GLOBAL: usize = 100_000;
 
 pub const MAX_TOKEN_LEN: usize = 512;
 
-/// GC every N `validate` calls: keeps the token hot path cheap while
-/// preventing unbounded session accumulation under pull-only traffic
-/// (expired rows would otherwise linger until the next challenge
-/// anywhere on the relay).
+/// GC every N calls of the hot path that can grow these maps. Keeps the
+/// token path cheap while preventing unbounded accumulation under
+/// pull-only traffic (expired rows would otherwise linger until the next
+/// challenge anywhere on the relay).
 const VALIDATE_GC_INTERVAL: u64 = 128;
+/// Same, for the challenge table — which is the one an UNAUTHENTICATED
+/// caller can grow, so its sweep is the one that most needs amortising.
+const CHALLENGE_GC_INTERVAL: u64 = 64;
 
 /// In-flight challenges: nonce → (public_key, expires_at).
 /// Sessions: token → (public_key, expires_at).
 pub struct AuthState {
     challenges: Mutex<HashMap<String, (String, i64)>>,
     sessions: Mutex<HashMap<String, (String, i64)>>,
-    /// Monotonic counter for session token uniqueness.
-    counter: AtomicU64,
+    challenge_calls: AtomicU64,
     validate_calls: AtomicU64,
 }
 
@@ -66,7 +77,7 @@ impl AuthState {
         Self {
             challenges: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            counter: AtomicU64::new(0),
+            challenge_calls: AtomicU64::new(0),
             validate_calls: AtomicU64::new(0),
         }
     }
@@ -89,9 +100,26 @@ impl AuthState {
         let expires_at = now_secs() + CHALLENGE_TTL.as_secs() as i64;
         {
             let mut challenges = self.challenges.lock_recover();
-            // GC first so expired slots don't count against the caps.
-            let now = now_secs();
-            challenges.retain(|_, (_, e)| *e > now);
+            // Full expiry sweep is THROTTLED, not per-request.
+            //
+            // `/auth/challenge` is unauthenticated, and the sweep walks
+            // every live challenge under the mutex. At the old global cap
+            // that was 100 000 entries — so filling the table once turned
+            // every later challenge request into ~1 ms of convoyed work
+            // from a caller who has authenticated nothing. Sweeping every
+            // CHALLENGE_GC_INTERVAL-th request amortises the cost over the
+            // window that filled the table; between sweeps an expired
+            // entry keeps occupying its slot, which makes the caps read
+            // slightly conservative. That is the right direction to be
+            // wrong in.
+            if self
+                .challenge_calls
+                .fetch_add(1, Ordering::Relaxed)
+                .is_multiple_of(CHALLENGE_GC_INTERVAL)
+            {
+                let now = now_secs();
+                challenges.retain(|_, (_, e)| *e > now);
+            }
             let per_account = challenges
                 .values()
                 .filter(|(pk, _)| *pk == public_key)
@@ -104,7 +132,10 @@ impl AuthState {
             }
             challenges.insert(nonce.clone(), (public_key.to_string(), expires_at));
         }
-        self.gc_sessions();
+        // No `gc_sessions()` here. It swept the entire session map on an
+        // unauthenticated request for no benefit: `validate` already runs
+        // the same sweep on a throttle, and it is the only caller whose
+        // growth an unauthenticated peer can actually drive.
         Ok((nonce, expires_at))
     }
 
@@ -129,6 +160,25 @@ impl AuthState {
             return Err(AuthError::BadChallenge);
         }
 
+        // Consume the challenge BEFORE the expensive part, not after.
+        //
+        // The claim used to run only once `verify_strict` had already
+        // succeeded, so a FAILED signature left the nonce in the map and
+        // the four nonces `MAX_CHALLENGES_PER_ACCOUNT` allows served an
+        // unbounded number of retries. Each retry pays point
+        // decompression plus a double-scalar multiply — `verify_strict`
+        // is the deliberately slow variant, ~50-100x a null request — on
+        // an UNAUTHENTICATED route, and nonces renew every
+        // CHALLENGE_TTL. One keypair could therefore hold the relay's
+        // CPU indefinitely. A nonce is a 256-bit secret the client
+        // holds, so burning it on a bad signature costs a real client
+        // nothing: it asks for another.
+        let claimed = self.challenges.lock_recover().remove(nonce);
+        let claimed = claimed.ok_or(AuthError::BadChallenge)?;
+        if claimed.0 != public_key || claimed.1 != expires_at || expires_at <= now_secs() {
+            return Err(AuthError::BadChallenge);
+        }
+
         // Ed25519 verify over nonce ‖ expiry (matches client signing).
         let payload = wl_protocol::checked_challenge_signing_payload(nonce, expires_at)
             .ok_or(AuthError::BadChallenge)?;
@@ -140,19 +190,15 @@ impl AuthState {
         vk.verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&sig))
             .map_err(|_| AuthError::BadSignature)?;
 
-        // Claim the verified challenge atomically. Concurrent verification
-        // may both pass the signature check, but only one can mint a token.
-        if self.challenges.lock_recover().remove(nonce).is_none() || expires_at <= now_secs() {
-            return Err(AuthError::BadChallenge);
-        }
-
         // Tokens are opaque, random bearer credentials retained server-side.
+        // Purely random: the old `"{counter}-{uuid}"` shape prefixed a
+        // per-process, `fetch_add`-from-zero sequence, which handed every
+        // token holder a session counter and an instance fingerprint, and
+        // grew monotonically for the life of the process.
         let sess_expires = now_secs() + SESSION_TTL.as_secs() as i64;
-        let token_id = format!(
-            "{}-{}",
-            self.counter.fetch_add(1, Ordering::Relaxed),
-            uuid::Uuid::new_v4()
-        );
+        let mut token_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut token_bytes);
+        let token_id = hex::encode(token_bytes);
         let mut sessions = self.sessions.lock_recover();
         let now = now_secs();
         sessions.retain(|_, (_, e)| *e > now);

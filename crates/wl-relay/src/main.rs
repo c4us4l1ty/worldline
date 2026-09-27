@@ -30,18 +30,28 @@ use wl_relay::store::sqlite_backend::SqliteStore;
 use wl_relay::store::BlobStore;
 use wl_relay::AppState;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    #[cfg(feature = "sqlite")]
-    let db_path = std::env::var("WL_RELAY_DB").unwrap_or_else(|_| "wl-relay.sqlite".into());
     let addr: SocketAddr = std::env::var("WL_RELAY_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())
         .parse()?;
 
+    // The store is built BEFORE any runtime exists.
+    //
+    // `PostgresStore::open` is synchronous and drives sqlx through
+    // `Runtime::block_on`, which tokio refuses to call from a thread
+    // already inside a runtime ("Cannot start a runtime from within a
+    // runtime"). Under `#[tokio::main]` this thread IS one, so the
+    // production build — the one the `compile_error!` above points
+    // operators at — panicked before it ever bound a socket. Constructing
+    // the store first and only then entering a runtime for `serve` fixes
+    // it without changing the store's sync API, which its per-request
+    // `spawn_blocking` callers rely on.
+    #[cfg(feature = "sqlite")]
+    let db_path = std::env::var("WL_RELAY_DB").unwrap_or_else(|_| "wl-relay.sqlite".into());
     #[cfg(feature = "sqlite")]
     let blobs: Box<dyn BlobStore> = if db_path == ":memory:" {
         Box::new(SqliteStore::open_in_memory()?)
@@ -67,10 +77,13 @@ async fn main() -> anyhow::Result<()> {
         auth: AuthState::new(),
         blobs,
     });
-
     let app = router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Worldline relay listening on {addr} (blind blob drop box)");
-    axum::serve(listener, app).await?;
-    Ok(())
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!("Worldline relay listening on {addr} (blind blob drop box)");
+        axum::serve(listener, app).await?;
+        Ok::<_, anyhow::Error>(())
+    })
 }

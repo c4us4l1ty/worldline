@@ -128,12 +128,23 @@
       // Mirror the shell's B-002 auto-seed: a manual goal arrives with
       // one starter directive so the MVP path (create → active
       // directive on canvas) works with no API key.
+      //
+      // `phase: [1, 3]`, not `null`. A directive with no phase is
+      // indistinguishable from a finished one as far as
+      // `complete_directive` is concerned — it advances `phase[0]` only
+      // when there are phases left, so every seeded directive jumped
+      // straight to the "All clear for today" stub on the first
+      // completion, and the phase badge and progress bar could never be
+      // seen under `dx serve`. Three phases means two completions are
+      // visible before the queue drains, which is what the canvas is for.
+      // The stub keeps `phase: null` — that is a correct "no active
+      // phase", not a bug.
       mockDb.directive = {
         directive_id: 'dir-seeded-1',
         milestone_id: 'ms-seeded-1',
         title: args.title,
         instruction: 'First step: open your tools and start.',
-        phase: null,
+        phase: [1, 3],
         estimated_minutes: 25,
         state: 'active',
         milestone_title: 'First steps',
@@ -204,7 +215,9 @@
         milestone_id: 'ms-plan-1',
         title: 'Scope the first sitting',
         instruction: 'Momentum only — do not plan the whole thing.',
-        phase: null,
+        // Same reasoning as `create_goal`: a null phase made the first
+        // completion skip straight to the idle stub.
+        phase: [1, 3],
         estimated_minutes: 25,
         state: 'active',
         milestone_title: 'First steps',

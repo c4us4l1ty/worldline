@@ -85,41 +85,78 @@ impl Tier {
     }
 }
 
-/// How many rows the sheet will render at once.
+/// How many rows the sheet will render at once — *every* row, recommended
+/// block included.
 ///
 /// OpenRouter serves 443 chat models; rendering every one of them into the
 /// DOM on each keystroke is the thing that makes a searchable list feel
 /// slower than a native select. Results are ranked, so the cap drops the
 /// least relevant rather than an arbitrary slice, and the count line says
 /// when it did.
+///
+/// The budget is shared, not doubled: the recommended block is drawn from
+/// the same allowance. It used to be 6 + 60, which is why the count line
+/// under-reported the rows on screen by exactly the size of that block.
 pub const MAX_ROWS: usize = 60;
+
+/// How many rows the "Recommended" section may hoist above the list.
+pub const MAX_RECOMMENDED: usize = 6;
+
+/// `hay` starts with `needle_lower`, ASCII case-insensitively, allocating
+/// nothing.
+///
+/// `str::to_ascii_lowercase` allocates, and running it over the id AND the
+/// display name of all 443 models on every keystroke is 886 heap
+/// allocations per character typed, on the same thread that runs the
+/// Dioxus scheduler. The fold only ever maps `A-Z`, so it never changes a
+/// byte's width or a string's length — comparing byte prefixes against the
+/// query is the same test with no copy of either side.
+fn starts_with_ignore_ascii_case(hay: &str, needle_lower: &str) -> bool {
+    let (hay, needle) = (hay.as_bytes(), needle_lower.as_bytes());
+    hay.len() >= needle.len() && hay[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
+/// `hay` contains `needle_lower`, ASCII case-insensitively, allocating
+/// nothing. See [`starts_with_ignore_ascii_case`] for why this does not
+/// lower-case the haystack.
+fn contains_ignore_ascii_case(hay: &str, needle_lower: &str) -> bool {
+    let (hay, needle) = (hay.as_bytes(), needle_lower.as_bytes());
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > hay.len() {
+        return false;
+    }
+    hay.windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
 
 /// Filters and ranks the catalog against a query.
 ///
 /// Ranking is what makes a short list useful: an id you paste exactly
 /// lands first, a prefix second, a mid-string match third, and a
 /// display-name match last. Case-insensitive throughout, because model
-/// ids are conventionally lower-case and nobody types the case.
+/// ids are conventionally lower-case and nobody types the case — and
+/// case-insensitive *without* lower-casing the catalog, which is what made
+/// this the most allocation-heavy thing on the keystroke path.
 pub fn filter_models<'a>(query: &str, models: &'a [ModelInfoView]) -> Vec<&'a ModelInfoView> {
-    let q = query.trim().to_ascii_lowercase();
+    let q = query.trim();
     let mut scored: Vec<(u8, &ModelInfoView)> = Vec::new();
     for m in models {
-        let rank: Option<u8> = if q.is_empty() {
+        let rank: Option<u8> = if q.is_empty() || m.id.eq_ignore_ascii_case(q) {
+            // An empty query matches everything at the top rank; the
+            // explicit test short-circuits the comparison for it rather
+            // than relying on `eq_ignore_ascii_case("")` being true only
+            // for an empty id.
             Some(0)
+        } else if starts_with_ignore_ascii_case(&m.id, q) {
+            Some(1)
+        } else if contains_ignore_ascii_case(&m.id, q) {
+            Some(2)
+        } else if contains_ignore_ascii_case(&m.name, q) {
+            Some(3)
         } else {
-            let id = m.id.to_ascii_lowercase();
-            let name = m.name.to_ascii_lowercase();
-            if id == q {
-                Some(0)
-            } else if id.starts_with(&q) {
-                Some(1)
-            } else if id.contains(&q) {
-                Some(2)
-            } else if name.contains(&q) {
-                Some(3)
-            } else {
-                None
-            }
+            None
         };
         if let Some(rank) = rank {
             scored.push((rank, m));
@@ -129,6 +166,57 @@ pub fn filter_models<'a>(query: &str, models: &'a [ModelInfoView]) -> Vec<&'a Mo
     // order (recommended first, then alphabetical) rather than shuffling.
     scored.sort_by_key(|(rank, _)| *rank);
     scored.into_iter().map(|(_, m)| m).collect()
+}
+
+/// Splits the ranked results into the two sections the sheet draws:
+/// the "Recommended" block that goes above the list, and the "All models"
+/// list underneath it.
+///
+/// The split removes the recommended ids from the list. They used to be
+/// drawn twice — once under their own header and again at the top of
+/// "All models" — which is also why the count line under the list was
+/// wrong: it counted the list loop alone while the screen showed
+/// `MAX_RECOMMENDED + MAX_ROWS` rows.
+///
+/// A search clears the block: during a search the recommended ids are a
+/// wall of noise above the results the user is actually reading, and they
+/// are not in `results` under a matching rank anyway.
+pub fn partition_recommended<'a>(
+    results: Vec<&'a ModelInfoView>,
+    recommended: &[String],
+    searching: bool,
+) -> (Vec<&'a ModelInfoView>, Vec<&'a ModelInfoView>) {
+    if searching {
+        return (Vec::new(), results);
+    }
+    let mut rec: Vec<&ModelInfoView> = Vec::new();
+    for id in recommended.iter().take(MAX_RECOMMENDED) {
+        // Looked up in the *results*, not the raw catalog: a recommended
+        // id the provider has since withdrawn must not conjure a row the
+        // search could never have found.
+        if let Some(m) = results.iter().copied().find(|m| &m.id == id) {
+            rec.push(m);
+        }
+    }
+    if rec.is_empty() {
+        return (rec, results);
+    }
+    let hoisted: std::collections::HashSet<&str> = rec.iter().map(|m| m.id.as_str()).collect();
+    let rest = results
+        .into_iter()
+        .filter(|m| !hoisted.contains(m.id.as_str()))
+        .collect();
+    (rec, rest)
+}
+
+/// How many rows are left for the list once the recommended block has
+/// taken its share of [`MAX_ROWS`].
+///
+/// One budget, not two. The cap exists to bound the DOM, and a cap the
+/// recommended block sits outside of bounds the DOM by exactly the size of
+/// that block.
+pub fn row_budget(recommended_rows: usize) -> usize {
+    MAX_ROWS.saturating_sub(recommended_rows)
 }
 
 /// `128000` → `128k`, `1048576` → `1.0M`. Context windows span four
@@ -188,20 +276,9 @@ pub fn ModelPicker(
     let mut manual = use_signal(String::new);
 
     let results = filter_models(&query.read(), &models);
-    let shown = results.len().min(MAX_ROWS);
-    // Recommended is a *section*, and only when it has entries: an empty
-    // "Recommended" header is worse than no header. It also steps aside
-    // during a search, where it would be a wall of noise above the
-    // results the user is actually reading.
     let searching = !query.read().trim().is_empty();
-    let rec: Vec<&ModelInfoView> = if searching {
-        Vec::new()
-    } else {
-        recommended
-            .iter()
-            .filter_map(|id| models.iter().find(|m| &m.id == id))
-            .collect()
-    };
+    let (rec, rest) = partition_recommended(results, &recommended, searching);
+    let shown = rest.len().min(row_budget(rec.len()));
 
     rsx! {
         div {
@@ -274,30 +351,37 @@ pub fn ModelPicker(
                                 }
                             }
                         }
-                    } else if results.is_empty() {
+                    } else if rest.is_empty() && rec.is_empty() {
                         p { class: "wl-picker-empty",
                             "No model matches that. Use the manual field below."
                         }
                     } else {
                         if !rec.is_empty() {
                             div { class: "wl-picker-group", "Recommended" }
-                            for m in rec.iter().take(6) {
+                            for m in rec.iter() {
                                 ModelRow {
+                                    key: "{m.id}",
                                     model: (*m).clone(),
                                     on_pick: move |id: String| on_pick.call(id),
                                 }
                             }
                             div { class: "wl-picker-group", "All models" }
                         }
-                        for m in results.iter().take(MAX_ROWS) {
+                        for m in rest.iter().take(shown) {
                             ModelRow {
+                                key: "{m.id}",
                                 model: (*m).clone(),
                                 on_pick: move |id: String| on_pick.call(id),
                             }
                         }
-                        if results.len() > shown {
+                        if rest.len() > shown {
+                            // Counts the rows under "All models", which is
+                            // the list this line is about. It used to read
+                            // `results.len()` while `shown` was taken from a
+                            // cap the recommended block did not share, so it
+                            // under-reported by the size of that block.
                             p { class: "wl-picker-more",
-                                "{shown} of {results.len()} — keep typing to narrow"
+                                "{shown} of {rest.len()} — keep typing to narrow"
                             }
                         }
                     }
@@ -410,9 +494,20 @@ pub fn ProviderPicker(
     }
 }
 
+/// One row.
+///
+/// Takes the entry by value because a Dioxus component prop cannot
+/// borrow — `#[component]` rejects lifetime parameters outright — so this
+/// is the one per-row copy that could not be removed. It is the reason
+/// the sheet caps rows at all: at `MAX_ROWS` it is ~180 short-lived
+/// strings per render, against the ~1 800 the same keystroke used to
+/// spend lower-casing the whole catalog and cloning it into this
+/// component's props.
 #[component]
 fn ModelRow(model: ModelInfoView, on_pick: EventHandler<String>) -> Element {
     let ctx_size = format_context(model.context_length);
+    // The click handler has to own the id: a listener is `'static`, so it
+    // cannot borrow out of the row.
     let id = model.id.clone();
     rsx! {
         button {
@@ -520,6 +615,92 @@ mod tests {
         // The component slices to MAX_ROWS; the cap is the contract.
         assert_eq!(MAX_ROWS, 60);
         assert!(MAX_ROWS < many.len());
+    }
+
+    /// A recommended model is drawn ONCE. The block goes above the list,
+    /// so leaving its ids in the list rendered the same model id twice on
+    /// an unfiltered sheet — and that is a row the user can pick twice,
+    /// from two different-looking places.
+    #[test]
+    fn a_recommended_model_is_not_also_listed_under_all_models() {
+        let c = catalog();
+        let rec_ids: Vec<String> = vec![
+            "anthropic/claude-sonnet-5".into(),
+            "openai/gpt-5.4".into(),
+            "vendor/not-in-catalog".into(),
+        ];
+        let results = filter_models("", &c);
+        let (rec, rest) = partition_recommended(results, &rec_ids, false);
+
+        // In catalog order, and only ids the catalog actually has.
+        assert_eq!(rec.len(), 2, "a withdrawn id must not conjure a row");
+        assert_eq!(rec[0].id, "anthropic/claude-sonnet-5");
+        assert_eq!(rec[1].id, "openai/gpt-5.4");
+
+        // The invariant: nothing is drawn twice, and nothing is lost.
+        let mut drawn: Vec<&str> = rec
+            .iter()
+            .chain(rest.iter())
+            .map(|m| m.id.as_str())
+            .collect();
+        drawn.sort_unstable();
+        drawn.dedup();
+        assert_eq!(drawn.len(), c.len(), "every model is drawn exactly once");
+        for m in &rec {
+            assert!(
+                !rest.iter().any(|r| r.id == m.id),
+                "{} appears in both sections",
+                m.id
+            );
+        }
+    }
+
+    /// A search clears the block, so nothing is hoisted and nothing is
+    /// removed from the results.
+    #[test]
+    fn searching_drops_the_recommended_block_entirely() {
+        let c = catalog();
+        let rec_ids: Vec<String> = vec!["anthropic/claude-sonnet-5".into()];
+        let results = filter_models("openai", &c);
+        let (rec, rest) = partition_recommended(results, &rec_ids, true);
+        assert!(rec.is_empty());
+        assert_eq!(rest.len(), 2);
+    }
+
+    /// The cap exists to bound the DOM. If the recommended block sits
+    /// outside the budget, the sheet draws `MAX_ROWS + n` rows and the
+    /// "N of M" line under the list — the sheet's only honesty signal —
+    /// under-reports by exactly `n`.
+    #[test]
+    fn the_row_budget_is_shared_with_the_recommended_block() {
+        assert_eq!(row_budget(0), MAX_ROWS);
+        assert_eq!(row_budget(3), MAX_ROWS - 3);
+        // A pathological recommendation list cannot push the budget
+        // into an underflow.
+        assert_eq!(row_budget(MAX_ROWS), 0);
+        assert_eq!(row_budget(MAX_ROWS + 10), 0);
+        for n in 0..=MAX_RECOMMENDED {
+            assert!(
+                n + row_budget(n) <= MAX_ROWS,
+                "{n} recommended rows push the sheet past its cap"
+            );
+        }
+    }
+
+    /// A recommended list longer than the block's own cap still renders a
+    /// bounded block, and the overflow is drawn in the list rather than
+    /// dropped — the user is never shown fewer models than exist.
+    #[test]
+    fn an_over_long_recommended_list_is_capped_not_truncated_silently() {
+        let many: Vec<ModelInfoView> = (0..40)
+            .map(|i| m(&format!("vendor/model-{i:02}"), "Big", Some(1000)))
+            .collect();
+        let rec_ids: Vec<String> = (0..40).map(|i| format!("vendor/model-{i:02}")).collect();
+        let results = filter_models("", &many);
+        let (rec, rest) = partition_recommended(results, &rec_ids, false);
+        assert_eq!(rec.len(), MAX_RECOMMENDED);
+        // The 34 the block did not take are all still listed.
+        assert_eq!(rec.len() + rest.len(), many.len());
     }
 
     #[test]

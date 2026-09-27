@@ -72,7 +72,6 @@ fn fresh_state(scratch: &Scratch) -> Arc<AppState> {
         identity: std::sync::Mutex::new(None),
         vault: Vault::open(scratch.path()).expect("vault"),
         relay_token: std::sync::Mutex::new(None),
-        relay_url: std::sync::Mutex::new(None),
         catalog: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }

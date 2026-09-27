@@ -23,6 +23,8 @@
 //! nothing that already worked. `src/ipc_tests.rs` drives the real
 //! `generate_handler!` over a mock runtime to keep it that way.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use tauri::State;
 use zeroize::Zeroizing;
@@ -160,7 +162,7 @@ pub(crate) async fn identity_restore(
 
 fn persist_identity(
     state: &AppState,
-    current: &mut Option<Identity>,
+    current: &mut Option<Arc<Identity>>,
     identity: Identity,
     verified: bool,
     verify_indices: &[usize],
@@ -174,7 +176,7 @@ fn persist_identity(
     state
         .repos
         .insert_identity(&identity, verified, verify_indices)?;
-    *current = Some(identity);
+    *current = Some(Arc::new(identity));
     Ok(())
 }
 
@@ -229,7 +231,7 @@ pub(crate) async fn identity_unlock(
         None => (false, Vec::new()),
     };
     state.repos.insert_identity(&identity, verified, &indices)?;
-    *current = Some(identity);
+    *current = Some(Arc::new(identity));
     Ok(account_id)
 }
 
@@ -302,25 +304,44 @@ pub(crate) async fn create_goal(
     // Identity is optional here: logged-out goal drafts still work, but
     // only an unlocked vault write-throughs to the outbox.
     let g = state.with_identity_opt(|identity| {
-        let g = state
-            .repos
-            .create_goal(
-                &title,
-                description.as_deref(),
-                target_date.as_deref(),
-                identity,
-            )
-            .map_err(ShellError::from)?;
-        // B-002 (option b): a manual goal must never be a dead end. Seed
-        // one milestone + one directive from the goal title so the canvas
-        // has a runnable directive with NO API key (the AI restructures
-        // the plan once a key exists). Authoring UI for further
-        // milestones/directives is Phase-2 MVP-1; the manual shell
-        // commands already exist for it.
-        seed_first_steps(&state.repos, &g, identity).map_err(ShellError::from)?;
-        Ok(g)
+        create_seeded_goal(
+            &state.repos,
+            &title,
+            description.as_deref(),
+            target_date.as_deref(),
+            identity,
+        )
+        .map_err(ShellError::from)
     })?;
     Ok(goal_json(&g, &state.repos))
+}
+
+/// Creates a goal and leaves it runnable, superseding any goal it
+/// replaces.
+///
+/// The `archive_other_active_goals` call is the same one
+/// `wl_core::ai::dispatch::persist_plan` makes. Without it a second
+/// manual goal left two rows `active`, and `Repos::active_goal()` —
+/// `ORDER BY hlc_timestamp LIMIT 1` — bound velocity and recovery to
+/// the OLDER, superseded goal. Runs after the new goal exists so
+/// `keep` can never archive the goal that was just created.
+fn create_seeded_goal(
+    repos: &Repos,
+    title: &str,
+    description: Option<&str>,
+    target_date: Option<&str>,
+    identity: Option<&Identity>,
+) -> Result<Goal, wl_core::store::StoreError> {
+    let goal = repos.create_goal(title, description, target_date, identity)?;
+    repos.archive_other_active_goals(&goal.id, identity)?;
+    // B-002 (option b): a manual goal must never be a dead end. Seed
+    // one milestone + one directive from the goal title so the canvas
+    // has a runnable directive with NO API key (the AI restructures
+    // the plan once a key exists). Authoring UI for further
+    // milestones/directives is Phase-2 MVP-1; the manual shell
+    // commands already exist for it.
+    seed_first_steps(repos, &goal, identity)?;
+    Ok(goal)
 }
 
 /// Seeds the manual-goal starter set: milestone "First steps" + one
@@ -720,6 +741,7 @@ pub(crate) async fn settings_save(
             wl_core::net::validate_relay_url(url).map_err(ShellError::Invalid)?;
         }
     }
+    let previous_relay_url = state.repos.settings()?.relay_url;
     state.with_identity_opt(|identity| {
         state
             .repos
@@ -728,9 +750,9 @@ pub(crate) async fn settings_save(
     })?;
     // Keep the live session coherent: a changed relay URL invalidates
     // any cached token (it belongs to a different server/account view).
-    let mut url = state.relay_url.lock_recover();
-    if *url != settings.relay_url {
-        *url = settings.relay_url.clone();
+    // `RelaySession::token_for` already refuses a token from another
+    // base, so this only drops the dead bearer secret early.
+    if previous_relay_url != settings.relay_url {
         *state.relay_token.lock_recover() = None;
     }
     Ok(())
@@ -755,22 +777,47 @@ fn http_client() -> Result<reqwest::Client, String> {
 }
 
 /// Process-wide HTTP client: connection pools (TCP/TLS sessions) are
-/// reused across sync/AI calls instead of rebuilt per request. The
-/// per-call nested runtimes stay (block_on discipline), only the
-/// client is shared — `Client` is an `Arc` internally, so clones are
-/// free and `&'static` access is race-free.
+/// reused across sync/AI calls instead of rebuilt per request. `Client`
+/// is an `Arc` internally, so `&'static` access is race-free.
 pub(crate) fn shared_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| http_client().expect("shared HTTP client builds from fixed valid config"))
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(|| http_client().expect("client builds from fixed valid config"));
+    &CLIENT
+}
+
+/// Process-wide Tokio runtime for the blocking HTTP layer.
+///
+/// The sync transport and the AI execute closures are synchronous, so
+/// each of them drives a future to completion with `block_on` from a
+/// `spawn_blocking` thread. That future has to be driven by ONE runtime
+/// for the life of the process, not one per request: hyper spawns every
+/// connection's driver task onto whichever runtime is current when the
+/// request is made (`hyper-util` `TokioExecutor` → `tokio::spawn`),
+/// and dropping that runtime kills the task — which kills the pooled
+/// connection the next request was going to reuse. A per-call runtime
+/// therefore paid a fresh TCP+TLS handshake for every relay POST and
+/// every AI call (a 200-batch `sync_now` meant 200 handshakes) and left
+/// the pool's idle sweeper dead for the life of the process.
+///
+/// Sharing the runtime does not weaken the discipline: `block_on` still
+/// panics when called from inside a runtime, so every caller must stay
+/// on `spawn_blocking` (see AGENTS.md). Concurrent callers are fine —
+/// the current-thread scheduler hands the driver to one of them and
+/// polls the others' futures itself — which is what keeps two
+/// concurrent commands from serialising on the network.
+pub(crate) fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds from fixed valid config")
+    });
+    &RUNTIME
 }
 
 impl wl_sync::sync::Transport for ReqwestTransport {
     fn post(&self, path: &str, body: &serde_json::Value) -> Result<String, String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())?;
-        rt.block_on(async {
+        shared_runtime().block_on(async {
             let resp = shared_client()
                 .post(format!("{}{path}", self.base))
                 .header("authorization", format!("Bearer {}", self.token))
@@ -803,32 +850,29 @@ pub struct RelayAuthView {
 /// Called automatically by `sync_now`; exposed for explicit re-auth and
 /// the settings screen's connection test.
 ///
-/// Body runs on a `spawn_blocking` thread: the sync stack drives nested
-/// runtimes via block_on, which panics on async-runtime threads.
+/// Body runs on a `spawn_blocking` thread: the sync stack drives the
+/// shared runtime via block_on, which panics on async-runtime threads.
 #[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn relay_authenticate(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<RelayAuthView> {
     let shared: std::sync::Arc<AppState> = (*state).clone();
     tokio::task::spawn_blocking(move || {
-        let base = shared
-            .relay_url
-            .lock_recover()
-            .clone()
-            .ok_or(ShellError::NoRelay)?;
-        let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
-        shared.with_identity(|identity| {
-            let session = relay::handshake(&base, identity, shared_client())?;
-            let account_id = identity.account_id_hex();
-            *shared.relay_token.lock_recover() = Some(crate::app_state::RelaySession {
-                base,
-                account_id: account_id.clone(),
-                token: session.token,
-            });
-            Ok(RelayAuthView {
-                account_id,
-                expires_at: session.expires_at,
-            })
+        let base = shared.relay_base()?;
+        // Taken as a handle, not a guard: the handshake can take 120 s
+        // and every other identity-gated command has to keep running
+        // while it does.
+        let identity = shared.identity_handle().ok_or(ShellError::Locked)?;
+        let session = relay::handshake(&base, &identity, shared_client())?;
+        let account_id = identity.account_id_hex();
+        *shared.relay_token.lock_recover() = Some(crate::app_state::RelaySession {
+            base,
+            account_id: account_id.clone(),
+            token: session.token,
+        });
+        Ok(RelayAuthView {
+            account_id,
+            expires_at: session.expires_at,
         })
     })
     .await
@@ -873,26 +917,21 @@ pub(crate) async fn sync_now(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<SyncStatsView> {
     // Same spawn_blocking discipline as relay_authenticate: sync I/O
-    // below drives nested runtimes via block_on.
+    // below drives the shared runtime via block_on.
     let shared: std::sync::Arc<AppState> = (*state).clone();
     tokio::task::spawn_blocking(move || {
-        let base = shared
-            .relay_url
-            .lock_recover()
-            .clone()
-            .ok_or(ShellError::NoRelay)?;
-        let base = wl_core::net::validate_relay_url(&base).map_err(ShellError::Invalid)?;
-        let stats = shared.with_identity(|identity| {
-            let token = ensure_token(&shared, &base, identity)?;
-            match run_cycle(&shared, identity, &base, &token) {
-                Err(wl_sync::sync::SyncError::Transport(msg)) if msg.starts_with("HTTP 401") => {
-                    *shared.relay_token.lock_recover() = None;
-                    let fresh = ensure_token(&shared, &base, identity)?;
-                    run_cycle(&shared, identity, &base, &fresh).map_err(ShellError::from)
-                }
-                other => other.map_err(ShellError::from),
+        let base = shared.relay_base()?;
+        // A handle, not a guard: one cycle is up to 200 HTTP posts.
+        let identity = shared.identity_handle().ok_or(ShellError::Locked)?;
+        let token = ensure_token(&shared, &base, &identity)?;
+        let stats = match run_cycle(&shared, &identity, &base, &token) {
+            Err(wl_sync::sync::SyncError::Transport(msg)) if msg.starts_with("HTTP 401") => {
+                *shared.relay_token.lock_recover() = None;
+                let fresh = ensure_token(&shared, &base, &identity)?;
+                run_cycle(&shared, &identity, &base, &fresh).map_err(ShellError::from)
             }
-        })?;
+            other => other.map_err(ShellError::from),
+        }?;
         // NOTE: the UI drives its HUD pill from this return value
         // (no event bridge needed while sync is on-demand only; revisit
         // if background auto-sync ever lands).
@@ -1008,17 +1047,19 @@ pub(crate) async fn master_plan(
         let execute = move |url: &str, h: &[(String, String)], b: &serde_json::Value| {
             http_execute(&err_provider, url, h, b)
         };
-        let (goal_id, _plan) = shared.with_identity_opt(|identity| {
-            AiDispatcher::master_plan(
-                &adapter,
-                &intent,
-                target_date.as_deref(),
-                execute,
-                &shared.repos,
-                identity,
-            )
-            .map_err(ShellError::from)
-        })?;
+        // A handle, not a guard: the provider call below has a 120 s
+        // timeout, and holding the identity lock across it blocked
+        // every other identity-gated command in the app.
+        let identity = shared.identity_handle();
+        let (goal_id, _plan) = AiDispatcher::master_plan(
+            &adapter,
+            &intent,
+            target_date.as_deref(),
+            execute,
+            &shared.repos,
+            identity.as_deref(),
+        )
+        .map_err(ShellError::from)?;
         Ok(goal_id)
     })
     .await
@@ -1051,11 +1092,7 @@ fn http_execute(
     headers: &[(String, String)],
     body: &serde_json::Value,
 ) -> Result<String, String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    rt.block_on(async {
+    shared_runtime().block_on(async {
         let mut req = shared_client().post(url).json(body);
         for (k, v) in headers {
             req = req.header(k, v);
@@ -1079,11 +1116,7 @@ fn http_execute(
 /// GETs a provider's model catalog. `auth` is the raw key, sent as a
 /// bearer; two of the three providers 401 without one.
 fn http_get_catalog(provider: &str, url: &str, auth: &str) -> Result<String, String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    rt.block_on(async {
+    shared_runtime().block_on(async {
         let resp = shared_client()
             .get(url)
             .header("Authorization", format!("Bearer {auth}"))
@@ -1155,17 +1188,11 @@ pub(crate) async fn list_models(
     let force = force.unwrap_or(false);
     let shared: std::sync::Arc<AppState> = (*state).clone();
     if !force {
-        if let Some(models) = shared.catalog_fresh(&provider) {
-            return Ok(ModelListView {
-                recommended: recommended_ids(&provider, &models),
-                provider,
-                models,
-                cached: true,
-                truncated_from: None,
-            });
+        if let Some((models, truncated_from)) = shared.catalog_fresh(&provider) {
+            return Ok(model_list_view(provider, models, truncated_from, true));
         }
     }
-    // Sync I/O drives a nested runtime: spawn_blocking or it panics.
+    // Sync I/O drives the shared runtime: spawn_blocking or it panics.
     tokio::task::spawn_blocking(move || {
         let key = vault_api_key(&shared, &provider)?;
         let ep = wl_core::ai::catalog::models_endpoint(&provider)
@@ -1179,19 +1206,34 @@ pub(crate) async fn list_models(
                 "provider returned no models — check the key for this provider".into(),
             ));
         }
-        let view = ModelListView {
-            recommended: recommended_ids(&provider, &models),
-            provider: provider.clone(),
-            models: models.clone(),
-            cached: false,
-            truncated_from: (models.len() >= wl_core::ai::catalog::MAX_MODELS)
-                .then_some(models.len()),
-        };
-        shared.store_catalog(&provider, models);
+        let truncated_from =
+            (models.len() >= wl_core::ai::catalog::MAX_MODELS).then_some(models.len());
+        let view = model_list_view(provider.clone(), models.clone(), truncated_from, false);
+        shared.store_catalog(&provider, models, truncated_from);
         Ok(view)
     })
     .await
     .map_err(|e| ShellError::Io(format!("list models task: {e}")))?
+}
+
+/// The one place a `ModelListView` is assembled, so the cached and the
+/// freshly-fetched path cannot disagree. The truncation flag used to be
+/// hardcoded to `None` on the cached path, so a provider with at least
+/// `MAX_MODELS` models told the UI its list was complete on every visit
+/// after the first.
+fn model_list_view(
+    provider: String,
+    models: Vec<ModelInfo>,
+    truncated_from: Option<usize>,
+    cached: bool,
+) -> ModelListView {
+    ModelListView {
+        recommended: recommended_ids(&provider, &models),
+        provider,
+        models,
+        cached,
+        truncated_from,
+    }
 }
 
 /// Ids from the curated "Recommended" list that this catalog actually
@@ -1209,8 +1251,6 @@ fn recommended_ids(provider: &str, models: &[ModelInfo]) -> Vec<String> {
 // `app_settings.always_on_top` column remains in SQLite and is simply
 // never written or read — see the note in `wl-core`'s `save_settings`.
 //
-// `use tauri::Manager` is still required below: the identity commands call
-// `get_webview_window` to emit window-scoped events.
 
 #[cfg(test)]
 mod tests {
@@ -1226,7 +1266,6 @@ mod tests {
             identity: std::sync::Mutex::new(None),
             vault: crate::vault::Vault::open(&dir).unwrap(),
             relay_token: std::sync::Mutex::new(None),
-            relay_url: std::sync::Mutex::new(None),
             catalog: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let mut current = None;
@@ -1300,7 +1339,6 @@ mod tests {
             identity: std::sync::Mutex::new(None),
             vault: crate::vault::Vault::open(&dir).unwrap(),
             relay_token: std::sync::Mutex::new(None),
-            relay_url: std::sync::Mutex::new(None),
             catalog: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // A plan that NAMES the goal, since that is the normal case: the
@@ -1386,8 +1424,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn manual_goal_supersedes_the_previous_active_goal() {
+        // CORE-3: `create_goal` never archived the goals it replaced, so
+        // a second manual goal left two rows `active` — and
+        // `Repos::active_goal()` is `ORDER BY hlc_timestamp LIMIT 1`, so
+        // velocity and recovery bound to the OLDER, superseded goal.
+        let repos = Repos::new(wl_core::store::open_in_memory().unwrap(), 1);
+        let first = create_seeded_goal(&repos, "First", None, None, None).unwrap();
+        let second = create_seeded_goal(&repos, "Second", None, None, None).unwrap();
+        let active = repos.active_goals_with_progress().unwrap();
+        assert_eq!(
+            active.len(),
+            1,
+            "a superseded goal stayed active: {active:?}"
+        );
+        assert_eq!(active[0].id, second.id);
+        assert_eq!(repos.active_goal().unwrap().unwrap().id, second.id);
+        // The archived goal keeps its history — only its status moves.
+        assert_eq!(
+            repos.goal(&first.id).unwrap().unwrap().status,
+            GoalStatus::Archived
+        );
+    }
+
     #[tokio::test]
-    async fn transport_works_across_successive_runtime_lifetimes() {
+    async fn transport_posts_through_the_shared_runtime() {
         let app = axum::Router::new().route(
             "/sync/pull",
             axum::routing::post(|| async { axum::Json(serde_json::json!({"ok": true})) }),

@@ -22,6 +22,9 @@ use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine;
 use serde_json::json;
+use std::time::Duration;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 
 use auth::{AuthError, AuthState};
 use store::{BlobStore, StoredOp};
@@ -37,6 +40,27 @@ const MAX_SEALED_B64: usize = wl_protocol::MAX_SEALED_B64;
 /// Routing-header length bound (ids are UUID-shaped; generous ceiling).
 const MAX_HEADER_LEN: usize = wl_protocol::MAX_HEADER_LEN;
 
+/// Wall-clock ceiling on a single request, body included.
+///
+/// Without it the relay has no bound on how long a connection can stay
+/// open: a client that dribbles a 2 MiB body one byte at a time holds a
+/// tokio task and its read buffer for as long as it likes, and every
+/// such connection costs memory whether or not it ever does any work.
+/// That is unbounded RAM growth on an UNAUTHENTICATED socket, against a
+/// product whose whole point is a near-zero idle footprint.
+///
+/// Generous on purpose: the slowest legitimate route is a 500-op push
+/// that may touch several hundred thousand rows, and a legitimate client
+/// behind a slow uplink must not be cut off mid-write. This bounds the
+/// abusive case, not the slow one.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Requests served at once. Bounds task count, per-request buffers, and
+/// the blast radius of a burst; excess requests queue at the layer
+/// instead of each allocating a task. Above the real concurrency of any
+/// honest deployment, below what a connection flood can open.
+const MAX_INFLIGHT_REQUESTS: usize = 256;
+
 pub struct AppState {
     pub auth: AuthState,
     pub blobs: Box<dyn BlobStore>,
@@ -51,6 +75,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/sync/push", post(push))
         .route("/sync/pull", post(pull))
         .layer(DefaultBodyLimit::max(wl_protocol::MAX_REQUEST_BYTES))
+        .layer(ConcurrencyLimitLayer::new(MAX_INFLIGHT_REQUESTS))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            REQUEST_DEADLINE,
+        ))
         .with_state(state)
 }
 
@@ -163,7 +192,21 @@ async fn verify(
         }
         Err(AuthError::BadSignature) => err(StatusCode::UNAUTHORIZED, "signature rejected"),
         Err(AuthError::RateLimited) => err(StatusCode::TOO_MANY_REQUESTS, "too many sessions"),
-        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "auth failure"),
+        // A 64-char hex public key that is not a curve point is CLIENT
+        // input, not a relay fault. `issue_challenge` accepts any such
+        // string (the account id IS the public key, and the challenge
+        // route is unauthenticated), so this was reachable by anyone and
+        // answered 500 — polluting 5xx budgets and tripping client retry
+        // logic, with no log line, because the only `tracing::warn!` in
+        // this file is on the challenge path.
+        Err(e @ AuthError::BadPublicKey) => {
+            tracing::debug!("relay verify: bad public key: {e}");
+            err(StatusCode::BAD_REQUEST, "invalid public key")
+        }
+        Err(e) => {
+            tracing::warn!("relay verify failure: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "auth failure")
+        }
     }
 }
 
@@ -301,31 +344,36 @@ async fn pull(
             let mut used = 0usize;
             let mut last_included: Option<&StoredOp> = None;
             for o in &stored {
-                // Account for the ENCODED op, not the raw ciphertext:
-                // base64 inflates by 4/3, so measuring `sealed.len()`
-                // under-counts by a third and lets the response blow
-                // straight through the budget. The routing headers are
-                // counted too, and `MAX_OP_ENVELOPE_BYTES` covers JSON
-                // punctuation plus worst-case string escaping.
+                // Measure the op AS SERIALIZED, not as a sum of raw
+                // field lengths. serde_json escapes a control character
+                // as six bytes (``), so a header of 128 such
+                // characters is 128 bytes of `str::len()` and 768 bytes
+                // on the wire — and `operation_id`/`record_id` are
+                // attacker-chosen up to `MAX_HEADER_LEN` each. The old
+                // estimate therefore under-counted by up to 5x, the
+                // response sailed past `MAX_PULL_BYTES`, and the client
+                // — which reads with exactly that ceiling — rejected
+                // the page. The cursor is only saved from a decoded
+                // response, so it never advanced and the account could
+                // never sync again. `MAX_OP_ENVELOPE_BYTES` is kept as
+                // the punctuation/comma allowance on top of the exact
+                // field costs.
                 let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&o.sealed);
-                let cost = sealed_b64.len()
-                    + o.operation_id.len()
-                    + o.hlc.len()
-                    + o.table.len()
-                    + o.record_id.len()
+                let op = wl_protocol::PushOp {
+                    operation_id: o.operation_id.clone(),
+                    hlc: o.hlc.clone(),
+                    table: o.table.clone(),
+                    record_id: o.record_id.clone(),
+                    sealed_b64,
+                };
+                let cost = serde_json::to_string(&op).map(|j| j.len()).unwrap_or(0)
                     + wl_protocol::MAX_OP_ENVELOPE_BYTES;
                 if used + cost > wl_protocol::MAX_PULL_BYTES {
                     break;
                 }
                 used += cost;
                 last_included = Some(o);
-                ops.push(wl_protocol::PushOp {
-                    operation_id: o.operation_id.clone(),
-                    hlc: o.hlc.clone(),
-                    table: o.table.clone(),
-                    record_id: o.record_id.clone(),
-                    sealed_b64,
-                });
+                ops.push(op);
             }
             // `exhausted` means "nothing remains after this batch", so the
             // client can stop pulling. It is true only when we included
