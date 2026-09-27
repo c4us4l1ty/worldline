@@ -10,6 +10,11 @@
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-serif: 'Doppio One', Georgia, 'Times New Roman', serif;
 
+  /* `--text-directive` is the canvas HEADLINE scale (28px) and currently
+     has no consumer — `.wl-directive-title` sets its own 24px. It is kept
+     because the one time it *was* consumed, the compose field inherited
+     it and rendered ~20 characters per line in a 384px column. Do not
+     reach for it as a default; reach for `--text-body`. */
   --text-directive: 1.75rem;      /* 28px */
   --text-directive-lead: 1.125rem; /* 18px */
   --text-body: 0.9375rem;         /* 15px */
@@ -311,6 +316,13 @@ body {
   color: var(--wl-text-primary);
   margin: 0;
 }
+/* The compose screen's title. This used to be an inline `style` on the
+   `<h1>` in goal_create.rs, which meant the page's vertical rhythm could
+   not be tuned from the stylesheet where the rest of it lives. */
+.wl-page-title--compose {
+  text-align: center;
+  padding: 22px 40px 0;
+}
 /* `.wl-page-sub` was removed with the page sub-headings it styled
    (2026-09-27). Both page titles are now a single line with nothing
    beneath them; a deck under a two-word heading was restating the
@@ -351,9 +363,12 @@ body {
   appearance: none;
   -webkit-appearance: none;
   font-family: var(--font-mono);
-  font-size: 11px;
+  /* 12px, up from 11px, and `--wl-text-secondary` rather than muted: at
+     11px muted next to the 18px back chevron the pill read as a disabled
+     control rather than an active choice. */
+  font-size: 12px;
   letter-spacing: 0.05em;
-  color: var(--wl-text-muted);
+  color: var(--wl-text-secondary);
   background-color: var(--wl-surface-elevated);
   border: 1px solid var(--wl-border-subtle);
   border-radius: var(--wl-radius-pill);
@@ -386,11 +401,17 @@ body {
   border-radius: 0;
   color: var(--wl-text-primary);
   font-family: var(--font-directive);
-  font-size: var(--text-directive);
-  font-weight: 500;
-  line-height: 1.35;
-  letter-spacing: -0.03em;
-  padding: 4px 0 10px;
+  /* 18px/400, NOT `var(--text-directive)`. That token is 28px and is
+     sized for a directive HEADLINE on the 420px canvas; the compose field
+     inherited it and rendered ~20 characters per line in a 384px column,
+     which made a one-sentence intent feel like a wall. 18px sits between
+     `--text-body` (15px) and the directive title (24px): still
+     unmistakably the page's main content, without shouting. */
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  padding: 10px 0 14px;
   margin: 0;
   outline: none;
   resize: none;
@@ -403,19 +424,62 @@ body {
   font-weight: 400;
   opacity: 0.55;
 }
-.wl-compose:focus { border-bottom-color: var(--wl-accent-coral); }
+/* Half-opacity coral: the hairline spans the full 384px column, and at
+   full strength it was the loudest thing on a page whose whole idea is a
+   quiet matte field. It still reads as the only accent when focused. */
+.wl-compose:focus { border-bottom-color: rgba(226, 109, 82, 0.5); }
 
-/* Side-by-side commit row. `flex: 1.35` on the primary gives the AI path
-   the larger target without letting the longer manual label wrap. */
+/* Commit row: two EQUAL ways to commit the same text, so they get one
+   geometry. Before this they differed three ways at once — 52px vs 46px
+   tall, 1.35fr vs 1fr wide, and 15px vs 14px type — which read as "one
+   real button and one leftover".
+
+   The equalizing is scoped to this row on purpose: `.wl-btn-primary` is
+   52px because the canvas's commit is a thumb target, and
+   `.wl-btn-ghost` is 46px everywhere else in the app. Overriding both
+   here is the only way to make the pair symmetric without restyling
+   every other ghost button in the product.
+
+   `margin-top: auto` pins the row to the bottom of the page (the field is
+   `flex: 1`, so this is belt-and-braces today) — matching the canvas,
+   whose actions are also bottom-anchored, and keeping both commits in the
+   same thumb zone the user already learned. */
 .wl-actions-row {
   display: flex;
   flex-direction: row;
   gap: 8px;
   flex-shrink: 0;
+  margin-top: auto;
   padding-top: 12px;
 }
-.wl-actions-row .wl-btn-primary { flex: 1.35 1 0; }
-.wl-actions-row .wl-btn-ghost { flex: 1 1 0; min-width: 0; }
+.wl-actions-row .wl-btn-primary,
+.wl-actions-row .wl-btn-ghost {
+  flex: 1 1 0;
+  /* `width: 100%` on both classes is inert inside a row flex container
+     once `flex-basis: 0` is set, but stating it keeps the box model
+     honest if either class is ever used in a grid. */
+  width: auto;
+  min-width: 0;
+  height: 50px;
+  font-size: 15px;
+  font-weight: 600;
+}
+/* The secondary is a solid quiet surface rather than an outline. At
+   `--wl-surface-card` (#20201F) with an 8%-white hairline on a #131312
+   canvas it very nearly disappeared, which left the pair reading as one
+   button and one smudge. Elevated + the stronger border gives it the same
+   physical presence as the cream primary, minus the emphasis. */
+.wl-actions-row .wl-btn-ghost {
+  background-color: var(--wl-surface-elevated);
+  border-color: var(--wl-border-strong);
+}
+/* Without this the row's ghost rests on `--wl-surface-elevated`, which is
+   exactly what the global `.wl-btn-ghost:hover` sets — so hovering the
+   secondary would have produced no visible change at all. Step up to
+   `--wl-surface-high` instead. */
+.wl-actions-row .wl-btn-ghost:hover {
+  background-color: var(--wl-surface-high);
+}
 
 /* A group of related fields. Replaces the flat, undifferentiated column
    of inputs these pages used to be. */
@@ -1222,10 +1286,17 @@ body {
    Icon sizing
    ========================================================================== */
 /* Icons carry no width/height attributes (see `icons.rs`): one rule sizes
-   all of them, so a new icon cannot arrive at an arbitrary size. */
+   all of them, so a new icon cannot arrive at an arbitrary size.
+
+   The menu and the settings gear were both enlarged on 2026-09-27 because
+   each was losing an optical comparison on the canvas and in the nav
+   drawer: an 18px hamburger in a 34px circle read as a smudge, and a 20px
+   gear drew only 14.3px of ink (its path stopped at r=8.6 of the 24-unit
+   grid) next to a bold 20px `✚`. The chevron stays at 18px — it is a
+   different control in a different position, not part of either pair. */
 .wl-icon { display: block; flex-shrink: 0; }
-.wl-icon-menu { width: 18px; height: 18px; }
-.wl-icon-settings { width: 20px; height: 20px; }
+.wl-icon-menu { width: 20px; height: 20px; }
+.wl-icon-settings { width: 22px; height: 22px; }
 .wl-icon-back { width: 18px; height: 18px; }
 /* Sized to sit inside the 20px switch knob with clearance on every side.
    These are on a 24-unit grid, so the crescent's terminator survives the

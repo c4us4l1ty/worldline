@@ -1145,3 +1145,105 @@ design had no way to distinguish them, so all three are closed.
     commands are exercised through the real `generate_handler!` in
     `ipc_tests.rs`, and the same UI bundle was driven screen-by-screen
     in a browser.
+
+## Icon weight and compose symmetry pass (2026-09-27, user-directed)
+
+Four things a person looking at the running app objected to, all
+presentational. No command, payload, test or store changed.
+
+130. **The settings gear read as a lumpy washer, not a cog.** The
+    mark was already `fill: currentColor` — the complaint that it
+    "should be filled" was really about *shape*, and the shape was
+    wrong in a way that survived every earlier tuning pass because it
+    was tuned in isolation. Eight teeth spanned 44° of a 45° pitch, so
+    the notches between them were 1° slivers: 0.1px at the rendered
+    size, i.e. invisible. A gear whose notches cannot be seen is a
+    ring. Compounding it, the path stopped at r=8.6 of its 24-unit
+    grid, so it drew 14.3px of actual mark inside a 20px box and lost
+    the optical comparison against the bold coral `✚` beside it.
+
+    Rebuilt as a six-tooth cog at 22px: ±13° tips, ±22° roots, tip
+    r=10.5, root r=7.6, hub r=3.0. Six teeth is the load-bearing
+    choice, not six being rounder — 8 teeth leave ~2.5px each at this
+    size and mush, 6 leave ~3.3px, and the gaps come out at 1.95px,
+    which is the threshold where the silhouette survives the downscale.
+    Real ink is now 19.25px across.
+
+131. **The canvas hamburger was enlarged; the back chevron was not.**
+    `.wl-icon-menu` 18px → 20px. The stroke is unchanged at 1.6 on an
+    18-unit grid, so the mark also gained weight for free — it now
+    lands at ~1.8 physical pixels inside the same 34px circle.
+    `.wl-icon-back` stays at 18px: it is a different control in a
+    different position, and pairing them would imply they are the same
+    affordance.
+
+132. **The empty-state "Open menu" button is gone.** It sat 14px under
+    a copy line that already said "Open the menu…", directly below the
+    floating hamburger that opens that menu — so the canvas presented
+    its one piece of chrome as two, and skill §4 (exactly one floating
+    canvas control) was being satisfied only in spirit. The copy line
+    now carries the instruction alone. Nothing became unreachable: the
+    hamburger is on screen in every canvas state.
+
+133. **The compose field was rendering at 28px because it inherited a
+    headline-scale token.** `.wl-compose` used `var(--text-directive)`,
+    which is 1.75rem — sized for a directive title on the 420px canvas,
+    and the *only* rule in the file that used it (`.wl-directive-title`
+    sets its own 24px). In a 384px column that is ~20 characters per
+    line, which made a one-sentence intent feel like a wall. Now
+    18px/400/-0.01em, line-height 1.5, which sits between
+    `--text-body` (15px) and the directive title (24px). The token is
+    left in place and documented as a headline scale so the same
+    substitution is not made again.
+
+134. **The two commit buttons were asymmetric three ways at once** —
+    52px vs 46px tall, 1.35fr vs 1fr wide, and 15px vs 14px type —
+    which read as one real button and one leftover. `.wl-actions-row`
+    now carries a single rule for both children (`flex: 1 1 0`,
+    `height: 50px`, `font-size: 15px`, `font-weight: 600`).
+
+    The equalisation is scoped to that row deliberately.
+    `.wl-btn-primary` is 52px because the canvas's commit is a thumb
+    target and `.wl-btn-ghost` is 46px everywhere else in the app;
+    restyling either class globally would have moved four other screens
+    to fix a two-button page.
+
+135. **The secondary commit button stopped nearly disappearing.** At
+    `--wl-surface-card` (#20201F) with an 8%-white hairline on a #131312
+    canvas, the ghost had almost no contrast against its own page, so
+    the pair read as "one button and one smudge" regardless of size.
+    Inside this row only, it is now `--wl-surface-elevated` with
+    `--wl-border-strong`: the same physical presence as the cream
+    primary, without the emphasis. Coral is untouched (skill §1: beacon,
+    never a surface).
+
+136. **Three smaller corrections, all to the compose screen.** The
+    horizon pill was 11px `--wl-text-muted` and read as *disabled* next
+    to the 18px back chevron; it is 12px `--wl-text-secondary`. The
+    focus hairline was full-strength coral across the full 384px column,
+    which made it the loudest thing on a page built to be quiet; it is
+    now `rgba(226,109,82,.5)`. And the title's `text-align`/padding
+    were an inline `style` in the rsx, so the page's vertical rhythm
+    could not be tuned from the stylesheet where the rest of it lives —
+    that is now `.wl-page-title--compose`.
+
+137. **The compose row's secondary needed its own hover state.** Resting
+    it on `--wl-surface-elevated` (item 135) put it on exactly the colour
+    the global `.wl-btn-ghost:hover` already targets, so hovering the
+    secondary would have looked broken. It steps up to
+    `--wl-surface-high` inside this row only.
+
+**Test counts.** Unchanged: workspace 192, shell 20, UI 19 (231 total).
+This pass adds none, and none should be expected: every change is
+presentational, and the shell's `ipc_tests.rs` gate does not apply
+because no command or payload changed. What *is* verifiable was checked
+directly — the new gear path was rasterised and inspected as a
+silhouette before being committed, and the previous pass's screenshot
+of the nav drawer is what showed the ink-diameter gap.
+
+**Not verified visually.** No rendered before/after was captured in
+this pass: no desktop browser was attached to the session, so the
+420×747 result is argued from the geometry and the stylesheet rather
+than observed. Re-run `dx serve` (or the release build) and check the
+three touched surfaces — the canvas hamburger, the nav drawer's gear
+next to the `✚`, and the compose page's field and commit row.

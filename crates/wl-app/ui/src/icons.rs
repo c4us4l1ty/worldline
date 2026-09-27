@@ -48,6 +48,11 @@ fn frame(class: &'static str, view_box: &'static str, children: Element) -> Elem
 /// mark that does not read as a menu is a usability regression, and the
 /// real defect was never the shape — it was that `☰` was a font glyph
 /// whose stroke weight and spacing we could not set. This one we can.
+///
+/// Rendered at 20px (was 18px) so the canvas's one floating control has
+/// presence at a glance. The 18-unit grid and its 1.6 stroke are
+/// unchanged, so the mark also gained weight for free — the stroke now
+/// lands at ~1.8 physical pixels.
 #[component]
 pub fn IconMenu() -> Element {
     frame(
@@ -66,17 +71,23 @@ pub fn IconMenu() -> Element {
 /// "preferences".
 ///
 /// One filled path with `fill-rule="evenodd"`: the outer sub-path is the
-/// notched rim, and the trailing circle sub-path is the hub hole, which
-/// evenodd knocks out. That is why this icon is `fill: currentColor`
-/// rather than the stroked `frame()` the other icons use — a gear drawn
-/// with strokes reads as a sun or a ship's wheel, both of which were
-/// tried and rendered before settling on the filled outline.
+/// cog, and the trailing circle sub-path is the hub hole, which evenodd
+/// knocks out. That is why this icon is `fill: currentColor` rather than
+/// the stroked `frame()` the other icons use — a gear drawn with strokes
+/// reads as a sun or a ship's wheel, both of which were tried and
+/// rendered before settling on the filled outline.
 ///
-/// Proportions were measured off the reference mark rather than guessed:
-/// outer r = 8.6 on a 24-unit grid, hub hole r = 3.4 (≈0.40 of the outer
-/// radius, matching the reference), root r = 7.0 for the notches, and 8
-/// teeth of ±15°. Shallower notches and a wider notch gap both turned
-/// the mark into a ring or a skeleton, so those are the tuned values.
+/// **Six teeth, and the gaps have to be visible.** The previous mark was
+/// 8 teeth spanning 44° of a 45° pitch: the notches were 1° slivers,
+/// which is 0.1px at render size, so they vanished and the mark read as
+/// a lumpy washer rather than a cog. At 22px, six teeth of ±13°/±22°
+/// leave a 1.95px gap between teeth and 3.3px per tooth — enough for the
+/// silhouette to survive the downscale, which is the whole test here.
+///
+/// Geometry on a 24-unit grid: tip r = 10.5 (the old mark used only
+/// 8.6, so it drew a 14.3px-diameter mark inside a 20px box and lost the
+/// optical comparison against the bold coral `✚` beside it), root
+/// r = 7.6, hub r = 3.0. Real ink is now 19.25px across.
 #[component]
 pub fn IconSettings() -> Element {
     rsx! {
@@ -87,7 +98,7 @@ pub fn IconSettings() -> Element {
             fill_rule: "evenodd",
             stroke: "none",
             "aria-hidden": "true",
-            path { d: "M20.31 9.77A8.6 8.6 0 0 1 20.31 14.23L18.76 13.81A7 7 0 0 1 18.06 15.5L19.45 16.3M19.45 16.3A8.6 8.6 0 0 1 16.3 19.45L15.5 18.06A7 7 0 0 1 13.81 18.76L14.23 20.31M14.23 20.31A8.6 8.6 0 0 1 9.77 20.31L10.19 18.76A7 7 0 0 1 8.5 18.06L7.7 19.45M7.7 19.45A8.6 8.6 0 0 1 4.55 16.3L5.94 15.5A7 7 0 0 1 5.24 13.81L3.69 14.23M3.69 14.23A8.6 8.6 0 0 1 3.69 9.77L5.24 10.19A7 7 0 0 1 5.94 8.5L4.55 7.7M4.55 7.7A8.6 8.6 0 0 1 7.7 4.55L8.5 5.94A7 7 0 0 1 10.19 5.24L9.77 3.69M9.77 3.69A8.6 8.6 0 0 1 14.23 3.69L13.81 5.24A7 7 0 0 1 15.5 5.94L16.3 4.55M16.3 4.55A8.6 8.6 0 0 1 19.45 7.7L18.06 8.5A7 7 0 0 1 18.76 10.19L20.31 9.77ZM15.4 12A3.4 3.4 0 1 0 8.6 12A3.4 3.4 0 1 0 15.4 12Z" }
+            path { d: "M19.05 9.15 L22.23 9.64 A10.5 10.5 0 0 1 22.23 14.36 L19.05 14.85 A7.6 7.6 0 0 1 17.99 16.68 M17.99 16.68 L19.16 19.68 A10.5 10.5 0 0 1 15.07 22.04 L13.06 19.53 A7.6 7.6 0 0 1 10.94 19.53 M10.94 19.53 L8.93 22.04 A10.5 10.5 0 0 1 4.84 19.68 L6.01 16.68 A7.6 7.6 0 0 1 4.95 14.85 M4.95 14.85 L1.77 14.36 A10.5 10.5 0 0 1 1.77 9.64 L4.95 9.15 A7.6 7.6 0 0 1 6.01 7.32 M6.01 7.32 L4.84 4.32 A10.5 10.5 0 0 1 8.93 1.96 L10.94 4.47 A7.6 7.6 0 0 1 13.06 4.47 M13.06 4.47 L15.07 1.96 A10.5 10.5 0 0 1 19.16 4.32 L17.99 7.32 A7.6 7.6 0 0 1 19.05 9.15 M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0Z" }
         }
     }
 }

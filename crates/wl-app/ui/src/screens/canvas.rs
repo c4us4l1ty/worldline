@@ -101,13 +101,16 @@ pub fn CanvasScreen() -> Element {
             if let Some(d) = d {
                 DirectiveCard { d: d }
             } else {
+                // No CTA here. The empty state used to carry a ghost
+                // "Open menu" button under this copy, which duplicated
+                // the floating hamburger sitting 14px above it and made
+                // the canvas's one piece of chrome look like two. The
+                // line below names the affordance instead, and the
+                // hamburger is always on screen to press.
                 div { class: "wl-directive-card",
                     h1 { class: "wl-serif-title", "No active directive." }
                     p { class: "wl-body-muted",
                         "Open the menu to create a goal or review settings."
-                    }
-                    div { style: "display: flex; gap: 8px; margin-top: 18px;",
-                        button { class: "wl-btn-ghost", onclick: move |_| { { let mut s = ctx.nav_open; *s.write() = true; } }, "Open menu" }
                     }
                 }
             }

@@ -238,7 +238,7 @@ pub fn GoalCreateScreen() -> Element {
                     }
                 }
             }
-            h1 { class: "wl-page-title", style: "text-align: center; padding: 14px 40px 0;",
+            h1 { class: "wl-page-title wl-page-title--compose",
                 "State the Objective"
             }
 
