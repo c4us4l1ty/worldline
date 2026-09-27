@@ -99,7 +99,7 @@ impl Vault {
     // -- BYOK provider keys (Item 2) -----------------------------------
 
     /// Stores (or replaces) the API key for a provider id such as
-    /// `openrouter`, `google`, `qwen`, or `bytez.com`.
+    /// `openrouter`, `google`, or `bytez.com`.
     pub fn save_api_key(&self, provider: &str, key: &str) -> Result<(), VaultError> {
         let record = api_key_record(provider)?;
         self.put(&record, key.as_bytes())?;
@@ -421,7 +421,7 @@ mod tests {
         let dir = tmpdir();
         {
             let vault = Vault::open(&dir).unwrap();
-            vault.save_api_key("qwen", "test-key").unwrap();
+            vault.save_api_key("openrouter", "test-key").unwrap();
         }
         let snapshot = std::fs::read(dir.join("vault.hold")).unwrap();
         std::fs::remove_file(dir.join(".vault-key")).unwrap();

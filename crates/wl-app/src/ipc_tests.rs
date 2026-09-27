@@ -71,6 +71,7 @@ fn fresh_state(scratch: &Scratch) -> Arc<AppState> {
         vault: Vault::open(scratch.path()).expect("vault"),
         relay_token: std::sync::Mutex::new(None),
         relay_url: std::sync::Mutex::new(None),
+        catalog: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 
@@ -224,7 +225,7 @@ fn master_plan_binds_its_payload_before_touching_the_vault() {
         "master_plan",
         serde_json::json!({
             "provider": "openrouter",
-            "model": "flagship",
+            "model": "anthropic/claude-sonnet-5",
             "intent": "in n out burger",
             "target_date": serde_json::Value::Null,
         }),
@@ -234,6 +235,129 @@ fn master_plan_binds_its_payload_before_touching_the_vault() {
     assert!(
         err.contains("no API key stored for provider openrouter"),
         "master_plan bound its arguments but did not reach the vault: {err}"
+    );
+}
+
+/// The blank-model refusal must fire BEFORE the vault and before any
+/// network call, and it must name the setting to fix rather than
+/// reporting "offline".
+///
+/// This is the regression for the placeholders the compose screen used
+/// to send when nothing was configured: `"flagship"` and
+/// `"haiku-class"`, which are not model ids on any provider, so every
+/// AI request 400'd and the UI blamed the network.
+#[test]
+fn a_blank_model_is_refused_with_a_pointer_to_settings() {
+    let (app, _scratch) = mock_app();
+
+    for cmd in ["master_plan", "morning_briefing"] {
+        let result = call(
+            &app,
+            cmd,
+            serde_json::json!({
+                "provider": "openrouter",
+                "model": "",
+                "intent": "in n out burger",
+                "constraints": "",
+                "target_date": serde_json::Value::Null,
+            }),
+        );
+        assert_bound(&result, cmd);
+        let err = result.expect_err("a blank model must be refused");
+        assert!(
+            err.contains("no model selected") && err.contains("Settings"),
+            "{cmd} must refuse a blank model and point at Settings, got: {err}"
+        );
+    }
+}
+
+/// `list_models` is the one command whose argument is entirely optional
+/// (`force`), so its `provider` binding is the only thing that can fail
+/// — and a mismatch would surface as "unknown AI provider" rather than
+/// "missing required key", which is easy to mistake for a real
+/// rejection. Pin the binding, and pin that a missing key is reported as
+/// a missing key rather than a network failure.
+#[test]
+fn list_models_binds_its_provider_argument() {
+    let (app, _scratch) = mock_app();
+
+    let result = call(
+        &app,
+        "list_models",
+        serde_json::json!({ "provider": "openrouter", "force": false }),
+    );
+    assert_bound(&result, "list_models");
+    let err = result.expect_err("no API key is configured in this install");
+    assert!(
+        err.contains("no API key stored for provider openrouter"),
+        "list_models bound its argument and reached the vault: {err}"
+    );
+
+    // `force` omitted entirely: `Option<bool>` must default, not fail.
+    let omitted = call(
+        &app,
+        "list_models",
+        serde_json::json!({ "provider": "openrouter" }),
+    )
+    .expect_err("still no key");
+    assert!(
+        omitted.contains("no API key stored"),
+        "omitting an Option parameter must not break binding: {omitted}"
+    );
+
+    // A provider outside the allow-list is refused outright. The error
+    // crosses IPC as a JSON string (ShellError serialises with
+    // `serialize_str`), hence the quotes in the comparison.
+    let rejected = call(
+        &app,
+        "list_models",
+        serde_json::json!({ "provider": "qwen" }),
+    )
+    .expect_err("qwen was removed");
+    assert!(
+        rejected.contains("unknown AI provider"),
+        "a removed provider must be refused: {rejected}"
+    );
+}
+
+/// Removing a provider from the allow-list must not brick the settings
+/// page.
+///
+/// `save_settings` rejects an unknown provider, and `settings_save`
+/// writes the whole struct — so an install whose `app_settings` still
+/// names a since-removed provider would fail *every* save, including a
+/// theme toggle, until the user changed the one field causing it. The
+/// read path sanitizes instead, which is what this pins.
+#[test]
+fn a_removed_provider_does_not_wedge_settings() {
+    let (app, _scratch) = mock_app();
+
+    // Write the legacy value straight into the store, bypassing the
+    // command boundary (which is what an upgrade looks like).
+    let state = app.state::<std::sync::Arc<AppState>>();
+    let stale = wl_core::domain::AppSettings {
+        ai_provider: Some("qwen".into()),
+        ..wl_core::domain::AppSettings::default()
+    };
+    state
+        .repos
+        .save_settings(&stale, None)
+        .expect_err("the write boundary must still reject it");
+
+    // …but a read reports it as unset, and the page keeps working.
+    let got = call(&app, "settings_get", serde_json::json!({})).expect("settings_get");
+    assert!(
+        got["ai_provider"].is_null(),
+        "a removed provider must read back as unset: {got}"
+    );
+    let save = call(
+        &app,
+        "settings_save",
+        serde_json::json!({ "settings": got }),
+    );
+    assert!(
+        save.is_ok(),
+        "saving after a provider removal must work: {save:?}"
     );
 }
 

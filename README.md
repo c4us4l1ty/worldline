@@ -7,7 +7,7 @@ NOT use, modify, sub-license, or redistribute this code for any purpose without 
 
 <div align="center">
 <pre>
- ██╗    ██╗ ██████╗ ██████╗ ██╗     ██████╗ ██╗     ██╗███╗   ██╗███████╗
+██╗    ██╗ ██████╗ ██████╗ ██╗     ██████╗ ██╗     ██╗███╗   ██╗███████╗
 ██║    ██║██╔═══██╗██╔══██╗██║     ██╔══██╗██║     ██║████╗  ██║██╔════╝
 ██║ █╗ ██║██║   ██║██████╔╝██║     ██║  ██║██║     ██║██╔██╗ ██║█████╗  
 ██║███╗██║██║   ██║██╔══██╗██║     ██║  ██║██║     ██║██║╚██╗██║██╔══╝  
@@ -49,14 +49,16 @@ device-id tie-break + tombstones). Convergence is property-tested.
 then milestones), Tier-2
 Tactical Dispatcher (daily 1–3 directives, 48h context window), Tier-3 local
 Rust engine (offline, timers, phases, escape-hatch reactions, velocity EWMA).
-OpenAI-compatible adapters (OpenRouter, Google, Qwen, bytez.com); model ids are user settings. Manual
-goal creation works with no API key at all.
+OpenAI-compatible adapters (OpenRouter, Google, bytez.com). The model list for
+each tier is discovered live from the provider — a model released upstream is
+selectable without a Worldline release. Manual goal creation works with no API
+key at all.
 
 ## Build & run
 
 ### Core, relay, sync (any machine)
 ```bash
-cargo test --workspace        # 192 tests: crypto vectors, HLC, CRDT convergence,
+cargo test --workspace        # 209 tests: crypto vectors, HLC, CRDT convergence,
                               # engine invariants, relay auth/pull, two-device sync
 cargo run -p wl-relay         # blind relay on 127.0.0.1:8080 (SQLite backend)
 ```
@@ -143,9 +145,9 @@ and needs no API key.
 
 | Scope              | Command                                            | Status |
 |--------------------|----------------------------------------------------|--------|
-| Core/relay/sync    | `cargo test --workspace`                            | 192 pass |
+| Core/relay/sync    | `cargo test --workspace`                            | 209 pass |
 | Lints              | `cargo clippy --workspace --all-targets`           | clean  |
 | Formatting         | `cargo fmt --all -- --check`                        | clean  |
-| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 19 pass, clean |
-| Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 20 pass, clean (live-relay handshake, vault round-trip, real-IPC arg-binding tests) |
+| UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 26 pass, clean |
+| Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 23 pass, clean (live-relay handshake, vault round-trip, real-IPC arg-binding tests) |
 | Desktop bundle     | `cd crates/wl-app && cargo tauri build` (after setup script) | by user |

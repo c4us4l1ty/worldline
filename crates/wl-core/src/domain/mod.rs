@@ -307,7 +307,7 @@ pub struct AppSettings {
     pub theme: String,
     /// `true` = window floats above other apps.
     pub always_on_top: bool,
-    /// AI provider: `openrouter` | `google` | `qwen` | `bytez.com` (BYOK).
+    /// AI provider: `openrouter` | `google` | `bytez.com` (BYOK).
     pub ai_provider: Option<String>,
     /// User-configurable model ids per tier (Tier 1 architect).
     pub tier1_model: Option<String>,
@@ -363,9 +363,18 @@ pub const MAX_BAILOUT_NOTE_CHARS: usize = 140;
 /// A single directive longer than a day is a planning error, not a
 /// directive; the bound also keeps phase-rescale arithmetic tame.
 pub const MAX_MINUTES: i64 = 1440;
-/// AI providers the shell knows how to call (BYOK): exactly the four
-/// approved OpenAI-compatible endpoints (PRD-DELTAS #73).
-pub const KNOWN_PROVIDERS: &[&str] = &["openrouter", "google", "qwen", "bytez.com"];
+/// AI providers the shell knows how to call (BYOK): exactly the three
+/// approved OpenAI-compatible endpoints (PRD-DELTAS #73, amended
+/// 2026-09-27 to drop Qwen).
+///
+/// This is the single allow-list: `vault_api_key` gates on it,
+/// `save_settings` rejects a value outside it, and
+/// `ai::catalog::base_for` returns `None` for anything else. A provider
+/// removed from here therefore fails closed — which is why a persisted
+/// value naming a *removed* provider has to be sanitized on read, or
+/// every subsequent `settings_save` would fail with "unknown AI
+/// provider".
+pub const KNOWN_PROVIDERS: &[&str] = &["openrouter", "google", "bytez.com"];
 
 /// Rejects blank or over-budget text at write boundaries.
 pub fn check_text(field: &'static str, value: &str, max_chars: usize) -> Result<(), String> {

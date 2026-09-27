@@ -14,6 +14,13 @@ pub enum ShellError {
     Sync(#[from] wl_sync::sync::SyncError),
     #[error("ai: {0}")]
     Ai(#[from] wl_core::ai::DispatchError),
+    /// A provider call that failed for a reason `DispatchError` does not
+    /// model — an HTTP status, a catalog read, an unusable body. The
+    /// inner string is already human-readable
+    /// (`ai::catalog::provider_error_message`), which is the point: it
+    /// reaches the user instead of collapsing to "OFFLINE".
+    #[error("{0}")]
+    Provider(String),
     #[error("io: {0}")]
     Io(String),
     #[error("invalid argument: {0}")]

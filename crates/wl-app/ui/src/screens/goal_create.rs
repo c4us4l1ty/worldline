@@ -96,6 +96,11 @@ pub fn GoalCreateScreen() -> Element {
     let mut intent = use_signal(String::new);
     let mut horizon = use_signal(|| "0usize".to_string());
     let mut busy = use_signal(|| false);
+    // Provider failures render here, not in the toast. The toast is an
+    // uppercase mono pill capped at 90% width, so a real diagnosis
+    // ("key rejected: …") wrapped into a three-line lozenge — and the
+    // whole point of surfacing these errors is that they are READ.
+    let mut error = use_signal(|| None::<String>);
 
     // Autofocus + auto-grow. `autofocus` on the textarea handles the first
     // paint; this effect re-asserts both on every intent change, and on
@@ -122,8 +127,16 @@ pub fn GoalCreateScreen() -> Element {
             flash(&ctx, "DESCRIBE THE OBJECTIVE FIRST");
             return;
         }
-        let ctx = ctx;
         let settings = ctx.settings.read().clone();
+        // No model, no call. This used to send the placeholder
+        // `"flagship"`, which is not a model on any provider: the
+        // request 400'd, the error was discarded, and the screen said
+        // "OFFLINE". Refusing locally is both honest and free.
+        let model = settings.tier1_model.clone().unwrap_or_default();
+        if model.trim().is_empty() {
+            flash(&ctx, "CHOOSE AN ARCHITECT MODEL IN SETTINGS");
+            return;
+        }
         let date = horizon_date(
             HORIZONS
                 .get(horizon.peek().parse::<usize>().unwrap_or(0))
@@ -144,10 +157,7 @@ pub fn GoalCreateScreen() -> Element {
                     .ai_provider
                     .clone()
                     .unwrap_or_else(|| "openrouter".into()),
-                model: settings
-                    .tier1_model
-                    .clone()
-                    .unwrap_or_else(|| "flagship".into()),
+                model,
                 intent: text,
                 target_date: date,
             };
@@ -159,7 +169,11 @@ pub fn GoalCreateScreen() -> Element {
                         *s.write() = Screen::Canvas;
                     }
                 }
-                Err(_) => flash(&ctx, "OFFLINE — USE MANUAL MODE"),
+                // Surface the provider's own words. A bad key, a bad
+                // model id, an oversized request and a genuine network
+                // failure are four different problems, and "OFFLINE"
+                // told the user none of them.
+                Err(e) => *error.write() = Some(e),
             }
             busy.set(false);
         });
@@ -258,7 +272,13 @@ pub fn GoalCreateScreen() -> Element {
                     // cannot be typed past what `master_plan` accepts.
                     let v: String = e.value().chars().take(MAX_INTENT_CHARS).collect();
                     intent.set(v);
+                    // Editing the intent invalidates the last failure.
+                    error.set(None);
                 },
+            }
+
+            if let Some(msg) = error.read().clone() {
+                p { class: "wl-form-error", "{msg}" }
             }
 
             div { class: "wl-actions-row",

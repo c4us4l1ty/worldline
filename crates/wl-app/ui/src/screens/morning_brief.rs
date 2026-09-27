@@ -19,12 +19,26 @@ pub fn MorningBriefScreen() -> Element {
     let mut constraints = use_signal(String::new);
     let mut briefing = use_signal::<Option<BriefingView>>(|| None);
     let mut busy = use_signal(|| false);
+    // Provider failures render inline (see the note in `goal_create.rs`):
+    // a real diagnosis must be readable, and the toast is a pill.
+    let mut error = use_signal(|| None::<String>);
 
     let mut fetch_brief = move || {
         let ctx = ctx;
         let constraints = constraints.read().clone();
         let provider = ctx.settings.read().ai_provider.clone();
         let tier2 = ctx.settings.read().tier2_model.clone();
+        // No model, no call — same contract as the compose screen. This
+        // used to send the placeholder `"haiku-class"`, which is not a
+        // model on any provider, so the request 400'd and the screen
+        // reported "OFFLINE — MANUAL MODE".
+        let Some(model) = tier2.filter(|m| !m.trim().is_empty()) else {
+            error.set(Some(
+                "No dispatcher model selected — choose one in Settings.".to_string(),
+            ));
+            return;
+        };
+        error.set(None);
         busy.set(true);
         spawn(async move {
             // BYOK dispatch (keys injected from the vault by the shell;
@@ -37,7 +51,7 @@ pub fn MorningBriefScreen() -> Element {
             }
             let req = B {
                 provider: provider.clone().unwrap_or_else(|| "openrouter".into()),
-                model: tier2.unwrap_or_else(|| "haiku-class".into()),
+                model,
                 constraints,
             };
             match invoke::<BriefingView>("morning_briefing", req).await {
@@ -80,12 +94,17 @@ pub fn MorningBriefScreen() -> Element {
                     briefing.set(Some(brief));
                 }
                 Err(e) => {
-                    // Missing BYOK key is a configuration state, not a
-                    // network failure — say so instead of crying offline.
+                    // A missing key is a configuration state and a bad
+                    // model is a typo; both now say which. Everything
+                    // else arrives already phrased by the shell from the
+                    // provider's own response body.
                     if e.contains("no API key") {
-                        flash(&ctx, "NO API KEY — ADD ONE IN SETTINGS OR PLAN MANUALLY");
+                        *error.write() = Some(format!(
+                            "No API key stored for {}. Add one in Settings, or plan manually.",
+                            provider.unwrap_or_default()
+                        ));
                     } else {
-                        flash(&ctx, "OFFLINE — MANUAL MODE");
+                        *error.write() = Some(e);
                     }
                 }
             }
@@ -126,6 +145,9 @@ pub fn MorningBriefScreen() -> Element {
                 button { class: "wl-btn-primary", disabled: *busy.read(),
                     onclick: move |_| fetch_brief(),
                     if *busy.read() { "Dispatching…" } else { "Generate briefing" }
+                }
+                if let Some(msg) = error.read().clone() {
+                    p { class: "wl-form-error", "{msg}" }
                 }
                 button {
                     class: "wl-btn-escape",

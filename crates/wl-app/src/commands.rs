@@ -27,6 +27,7 @@ use serde::Serialize;
 use tauri::State;
 use zeroize::Zeroizing;
 
+use wl_core::ai::catalog::ModelInfo;
 use wl_core::ai::dispatch::{AiDispatcher, ProviderAdapter};
 use wl_core::crypto::identity::Identity;
 use wl_core::domain::*;
@@ -668,7 +669,30 @@ pub(crate) async fn velocity(
 pub(crate) async fn settings_get(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> ShellResult<AppSettings> {
-    Ok(state.repos.settings()?)
+    Ok(sanitize_settings(state.repos.settings()?))
+}
+
+/// Drops an `ai_provider` this build does not support.
+///
+/// `save_settings` rejects any provider outside `KNOWN_PROVIDERS`, and
+/// that check is the reason this has to exist. A provider removed from
+/// the allow-list stays in `app_settings` on every install that had it
+/// selected — and since `app_settings` is a replicated CRDT table, a
+/// peer can reintroduce one at any time — and because `settings_save`
+/// writes the whole struct, such an install could then not save *any*
+/// setting, including a theme toggle, failing with "unknown AI
+/// provider". Sanitizing on read makes the removal a non-event.
+///
+/// Tier model ids are left alone: they are only ever sent back to a
+/// provider, and clearing them here would silently discard a choice the
+/// user can still make sense of once they re-pick a provider.
+fn sanitize_settings(mut s: AppSettings) -> AppSettings {
+    if let Some(p) = s.ai_provider.as_deref() {
+        if !KNOWN_PROVIDERS.contains(&p) {
+            s.ai_provider = None;
+        }
+    }
+    s
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -912,6 +936,23 @@ fn vault_api_key(state: &AppState, provider: &str) -> ShellResult<Zeroizing<Stri
         .ok_or_else(|| ShellError::NoApiKey(provider.to_string()))
 }
 
+/// Rejects a blank model id before any request is made.
+///
+/// There used to be a fallback here — the compose screen sent
+/// `"flagship"` and the briefing sent `"haiku-class"` when nothing was
+/// configured. Neither string is a real model on any provider, so the
+/// request 400'd, the error was discarded, and the UI reported
+/// "OFFLINE". A blank id is now a refusal with a pointer to Settings,
+/// which is both honest and free.
+fn require_model(provider: &str, model: &str) -> ShellResult<()> {
+    if model.trim().is_empty() {
+        return Err(ShellError::Invalid(format!(
+            "no model selected — choose an architect model for {provider} in Settings"
+        )));
+    }
+    Ok(())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 /// Tier-1 planning from the compose screen's single free-text field.
 ///
@@ -927,6 +968,7 @@ pub(crate) async fn master_plan(
     intent: String,
     target_date: Option<String>,
 ) -> ShellResult<String> {
+    require_model(&provider, &model)?;
     let shared: std::sync::Arc<AppState> = (*state).clone();
     tokio::task::spawn_blocking(move || {
         let api_key = vault_api_key(&shared, &provider)?;
@@ -937,17 +979,29 @@ pub(crate) async fn master_plan(
         // completions; only the base URL varies (B-001).
         let base_url =
             base_for(&provider).ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        // `response_format` goes out only for models the catalog says
+        // accept it. Unknown (no catalog entry) keeps the old behaviour,
+        // so this can never make a working call fail — it only stops
+        // sending a field that some models reject outright.
+        let json_mode = wl_core::ai::catalog::json_mode_for(
+            shared.cached_model(&provider, model.trim()).as_ref(),
+        );
         let adapter = ProviderAdapter::OpenAiCompat {
             base_url,
             api_key,
-            model,
+            model: model.trim().to_string(),
+            json_mode,
+        };
+        let err_provider = provider.clone();
+        let execute = move |url: &str, h: &[(String, String)], b: &serde_json::Value| {
+            http_execute(&err_provider, url, h, b)
         };
         let (goal_id, _plan) = shared.with_identity_opt(|identity| {
             AiDispatcher::master_plan(
                 &adapter,
                 &intent,
                 target_date.as_deref(),
-                http_execute,
+                execute,
                 &shared.repos,
                 identity,
             )
@@ -959,21 +1013,28 @@ pub(crate) async fn master_plan(
     .map_err(|e| ShellError::Io(format!("master plan task: {e}")))?
 }
 
-/// OpenAI-compatible base URL per approved provider id
-/// (`openrouter | google | qwen | bytez.com`). `None` for anything else —
-/// callers already rejected unknown ids in `vault_api_key`, so `None` is
-/// a defence-in-depth path, never a silent OpenAI fallback (B-001).
+/// OpenAI-compatible base URL per approved provider id.
+///
+/// Now a thin delegation to [`wl_core::ai::catalog::base_for`], which is
+/// where the table lives. It moved because the model catalog needs the
+/// same base URL to build its `/models` endpoint, and a provider table
+/// that exists in two places is a provider table that will drift.
 fn base_for(provider: &str) -> Option<String> {
-    match provider {
-        "openrouter" => Some("https://openrouter.ai/api/v1".into()),
-        "google" => Some("https://generativelanguage.googleapis.com/v1beta/openai".into()),
-        "qwen" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
-        "bytez.com" => Some("https://api.bytez.com/models/v2/openai/v1".into()),
-        _ => None,
-    }
+    wl_core::ai::catalog::base_for(provider)
 }
 
+/// Largest AI response we will read. A completion is a few KB; the
+/// catalog is ~750 KB for OpenRouter's 458 models, so this has to clear
+/// that with room to spare while still refusing a hostile multi-GB body.
+/// Error *messages* are bounded separately, inside
+/// `ai::catalog::provider_error_message`.
+const MAX_AI_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// POSTs a chat completion. `provider` is carried only so a failure can
+/// be phrased for the provider that produced it (Google's 403 means
+/// something specific and actionable; OpenRouter's does not).
 fn http_execute(
+    provider: &str,
     url: &str,
     headers: &[(String, String)],
     body: &serde_json::Value,
@@ -987,26 +1048,147 @@ fn http_execute(
         for (k, v) in headers {
             req = req.header(k, v);
         }
-        let mut resp = req.send().await.map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let text = read_ai_body(resp, MAX_AI_RESPONSE_BYTES).await?;
+        if !(200..300).contains(&status) {
+            // The body IS the diagnosis. A provider usually says exactly
+            // what is wrong ("No endpoints found matching model
+            // 'flagship'"); discarding it is why every failure used to
+            // reach the UI as a bare "HTTP 400" and then as "OFFLINE".
+            return Err(wl_core::ai::catalog::provider_error_message(
+                provider, status, &text,
+            ));
         }
-        const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-        if resp
-            .content_length()
-            .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
-        {
+        Ok(text)
+    })
+}
+
+/// GETs a provider's model catalog. `auth` is the raw key, sent as a
+/// bearer; two of the three providers 401 without one.
+fn http_get_catalog(provider: &str, url: &str, auth: &str) -> Result<String, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let resp = shared_client()
+            .get(url)
+            .header("Authorization", format!("Bearer {auth}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let text = read_ai_body(resp, MAX_AI_RESPONSE_BYTES).await?;
+        if !(200..300).contains(&status) {
+            return Err(wl_core::ai::catalog::provider_error_message(
+                provider, status, &text,
+            ));
+        }
+        Ok(text)
+    })
+}
+
+/// Reads a response body under a hard ceiling, enforced per chunk as
+/// well as by `content_length` so a chunked body cannot slip past.
+async fn read_ai_body(mut resp: reqwest::Response, max: usize) -> Result<String, String> {
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return Err("AI response body too large".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if chunk.len() > max - bytes.len() {
             return Err("AI response body too large".into());
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-            if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
-                return Err("AI response body too large".into());
-            }
-            bytes.extend_from_slice(&chunk);
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct ModelListView {
+    pub provider: String,
+    pub models: Vec<ModelInfo>,
+    /// Display names for the picker's "Recommended" group, resolved
+    /// against this catalog. Empty means the group is omitted — it is
+    /// never rendered as an empty section, and nothing is auto-selected
+    /// from it.
+    pub recommended: Vec<String>,
+    /// `true` when this response came from the in-memory cache rather
+    /// than the provider.
+    pub cached: bool,
+    /// The provider's own total, when it reports one and the cap bit.
+    /// `None` means the list is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_from: Option<usize>,
+}
+
+/// Lists the models a provider currently serves, so the UI can offer real
+/// ids instead of a text field where a typo costs an API call to find.
+///
+/// Key-gated for all three providers (OpenRouter's list happens to be
+/// public, but one rule beats three, and a keyless install should not
+/// pull a catalog it cannot use). Cached in memory for an hour;
+/// `force` bypasses it, which is how a newly released model is picked up
+/// without waiting for the TTL.
+#[tauri::command(rename_all = "snake_case")]
+pub(crate) async fn list_models(
+    state: State<'_, std::sync::Arc<AppState>>,
+    provider: String,
+    force: Option<bool>,
+) -> ShellResult<ModelListView> {
+    if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+        return Err(ShellError::Invalid("unknown AI provider".into()));
+    }
+    let force = force.unwrap_or(false);
+    let shared: std::sync::Arc<AppState> = (*state).clone();
+    if !force {
+        if let Some(models) = shared.catalog_fresh(&provider) {
+            return Ok(ModelListView {
+                recommended: recommended_ids(&provider, &models),
+                provider,
+                models,
+                cached: true,
+                truncated_from: None,
+            });
         }
-        String::from_utf8(bytes).map_err(|e| e.to_string())
+    }
+    // Sync I/O drives a nested runtime: spawn_blocking or it panics.
+    tokio::task::spawn_blocking(move || {
+        let key = vault_api_key(&shared, &provider)?;
+        let ep = wl_core::ai::catalog::models_endpoint(&provider)
+            .ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        let body =
+            http_get_catalog(&provider, &ep.url, key.as_str()).map_err(ShellError::Provider)?;
+        let models = wl_core::ai::catalog::parse_for(&provider, &body)
+            .map_err(|e| ShellError::Provider(e.to_string()))?;
+        if models.is_empty() {
+            return Err(ShellError::Provider(
+                "provider returned no models — check the key for this provider".into(),
+            ));
+        }
+        let view = ModelListView {
+            recommended: recommended_ids(&provider, &models),
+            provider: provider.clone(),
+            models: models.clone(),
+            cached: false,
+            truncated_from: (models.len() >= wl_core::ai::catalog::MAX_MODELS)
+                .then_some(models.len()),
+        };
+        shared.store_catalog(&provider, models);
+        Ok(view)
     })
+    .await
+    .map_err(|e| ShellError::Io(format!("list models task: {e}")))?
+}
+
+/// Ids from the curated "Recommended" list that this catalog actually
+/// contains. Pure ordering aid — it never gates a model.
+fn recommended_ids(provider: &str, models: &[ModelInfo]) -> Vec<String> {
+    wl_core::ai::catalog::recommended(provider, models)
+        .into_iter()
+        .map(|m| m.id.clone())
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -1027,27 +1209,36 @@ pub(crate) async fn morning_briefing(
     model: String,
     constraints: String,
 ) -> ShellResult<BriefingView> {
+    require_model(&provider, &model)?;
     let shared: std::sync::Arc<AppState> = (*state).clone();
     tokio::task::spawn_blocking(move || {
         let api_key = vault_api_key(&shared, &provider)?;
         // Same move-not-clone discipline as master_plan (see there).
         let base_url =
             base_for(&provider).ok_or_else(|| ShellError::Invalid("unknown AI provider".into()))?;
+        let json_mode = wl_core::ai::catalog::json_mode_for(
+            shared.cached_model(&provider, model.trim()).as_ref(),
+        );
         let adapter = ProviderAdapter::OpenAiCompat {
             base_url,
             api_key,
-            model,
+            model: model.trim().to_string(),
+            json_mode,
         };
         let today = today_local();
         let velocity_json =
             serde_json::to_string(&velocity_inner(&shared.repos)?).unwrap_or_default();
+        let err_provider = provider.clone();
+        let execute = move |url: &str, h: &[(String, String)], b: &serde_json::Value| {
+            http_execute(&err_provider, url, h, b)
+        };
         let brief = shared.with_identity_opt(|identity| {
             AiDispatcher::morning_briefing(
                 &adapter,
                 &today,
                 &constraints,
                 &velocity_json,
-                http_execute,
+                execute,
                 &shared.repos,
                 identity,
             )
@@ -1103,6 +1294,7 @@ mod tests {
             vault: crate::vault::Vault::open(&dir).unwrap(),
             relay_token: std::sync::Mutex::new(None),
             relay_url: std::sync::Mutex::new(None),
+            catalog: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let mut current = None;
         let original = Identity::generate().unwrap();
@@ -1151,13 +1343,22 @@ mod tests {
     }
 
     #[test]
-    fn provider_matrix_key_save_to_master_plan_for_all_four() {
-        // B-001 regression: the shell allow-list is exactly the core
-        // 4-provider set, every id maps to an endpoint, and vault key
-        // save → adapter → master_plan (mocked HTTP) succeeds for each.
-        assert_eq!(
-            KNOWN_PROVIDERS,
-            &["openrouter", "google", "qwen", "bytez.com"]
+    fn provider_matrix_key_save_to_master_plan_for_every_provider() {
+        // B-001 regression, restated for a single source of truth: the
+        // shell no longer keeps its own provider table (`base_for`
+        // delegates to `wl_core::ai::catalog`), so what is worth pinning
+        // is that every allow-listed id resolves to an endpoint, that a
+        // vault key round-trips for it, and that master_plan succeeds
+        // with mocked HTTP.
+        assert!(
+            KNOWN_PROVIDERS.contains(&"openrouter")
+                && KNOWN_PROVIDERS.contains(&"google")
+                && KNOWN_PROVIDERS.contains(&"bytez.com"),
+            "the approved set changed: {KNOWN_PROVIDERS:?}"
+        );
+        assert!(
+            !KNOWN_PROVIDERS.contains(&"qwen"),
+            "qwen was removed on 2026-09-27 and must not return via this list"
         );
         let dir = std::env::temp_dir().join(format!("wl-provider-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
@@ -1167,6 +1368,7 @@ mod tests {
             vault: crate::vault::Vault::open(&dir).unwrap(),
             relay_token: std::sync::Mutex::new(None),
             relay_url: std::sync::Mutex::new(None),
+            catalog: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // A plan that NAMES the goal, since that is the normal case: the
         // compose screen sends raw intent and the architect names it.
@@ -1175,6 +1377,12 @@ mod tests {
         for provider in KNOWN_PROVIDERS {
             let base = base_for(provider);
             assert!(base.is_some(), "no endpoint mapping for {provider}");
+            // Every provider the picker offers must also be listable, or
+            // the UI would offer a provider it cannot enumerate.
+            assert!(
+                wl_core::ai::catalog::models_endpoint(provider).is_some(),
+                "{provider} has no model-catalog endpoint"
+            );
             state
                 .vault
                 .save_api_key(provider, "sk-test")
@@ -1184,6 +1392,7 @@ mod tests {
                 base_url: base.unwrap(),
                 api_key,
                 model: "m".into(),
+                json_mode: true,
             };
             let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
                 Ok::<String, String>(
@@ -1204,7 +1413,13 @@ mod tests {
             assert_eq!(g.title, "Named by the architect");
         }
         // Removed providers stay rejected at both layers (no silent fallback).
-        for dead in ["anthropic", "openai", "openai-compat", "gemini-compat"] {
+        for dead in [
+            "anthropic",
+            "openai",
+            "openai-compat",
+            "gemini-compat",
+            "qwen",
+        ] {
             assert!(base_for(dead).is_none(), "{dead} still has an endpoint");
             assert!(
                 vault_api_key(&state, dead).is_err(),

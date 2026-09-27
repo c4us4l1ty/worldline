@@ -182,6 +182,57 @@
     },
     set_always_on_top: function (args) { return Promise.resolve(null); },
     identity_restore: function (args) { return Promise.resolve('restored-' + (args.phrase || '').length); },
+
+    // Provider model catalog. Enough rows to exercise the search ranking
+    // and the row cap (MAX_ROWS is 60, so this list is deliberately
+    // larger), and two of the ids are in the curated "Recommended" set so
+    // that section renders in the browser harness too.
+    list_models: function (args) {
+      var families = [
+        ['anthropic', 'claude-sonnet-5', 'Anthropic: Claude Sonnet 5', 1000000],
+        ['anthropic', 'claude-sonnet-4.6', 'Anthropic: Claude Sonnet 4.6', 1000000],
+        ['anthropic', 'claude-opus-4.1', 'Anthropic: Claude Opus 4.1', 200000],
+        ['openai', 'gpt-5.4', 'OpenAI: GPT-5.4', 1050000],
+        ['openai', 'gpt-5.4-mini', 'OpenAI: GPT-5.4 Mini', 400000],
+        ['openai', 'gpt-5-mini', 'OpenAI: GPT-5 Mini', 400000],
+        ['google', 'gemini-3.1-pro-preview', 'Google: Gemini 3.1 Pro Preview', 1048576],
+        ['google', 'gemini-3.1-flash-lite', 'Google: Gemini 3.1 Flash Lite', 1048576],
+        ['mistralai', 'mistral-large-2512', 'Mistral: Large', 131000],
+        ['meta-llama', 'llama-4-maverick', 'Meta: Llama 4 Maverick', 1048576],
+        ['qwen', 'qwen3.5-plus-20260420', 'Qwen: Qwen3.5 Plus', 1000000],
+        ['deepseek', 'deepseek-v3.2', 'DeepSeek: V3.2', 163840],
+      ];
+      var models = [];
+      for (var i = 0; i < families.length; i++) {
+        var f = families[i];
+        models.push({
+          id: f[0] + '/' + f[1],
+          name: f[2],
+          context_length: f[3],
+          supports_response_format: true,
+        });
+      }
+      // Pad past the 60-row render cap so the "showing N of M" line and
+      // the ranking behaviour are visible in the harness.
+      for (var j = 0; j < 80; j++) {
+        models.push({
+          id: 'mockvendor/mock-model-' + String(j).padStart(3, '0'),
+          name: 'Mock Vendor: Model ' + j,
+          context_length: 128000,
+          supports_response_format: j % 7 === 0 ? false : true,
+        });
+      }
+      return Promise.resolve({
+        provider: (args && args.provider) || 'openrouter',
+        models: models,
+        recommended: [
+          'anthropic/claude-sonnet-5',
+          'openai/gpt-5.4',
+          'google/gemini-3.1-pro-preview',
+        ],
+        cached: false,
+      });
+    },
   };
 
   window.wlInvoke = function (cmd, args) {

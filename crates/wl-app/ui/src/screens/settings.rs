@@ -21,9 +21,11 @@
 use dioxus::prelude::*;
 
 use crate::app::{
-    flash, invoke, record_sync, AppCtx, AppSettingsView, IdentityStatus, Screen, SyncStats,
+    flash, invoke, record_sync, AppCtx, AppSettingsView, IdentityStatus, ModelListView, Screen,
+    SyncStats,
 };
 use crate::icons::{IconBack, IconMoon, IconSun};
+use crate::screens::model_picker::{ModelPicker, Tier};
 
 /// Builds the payload an appearance switch persists.
 ///
@@ -83,6 +85,14 @@ pub fn SettingsScreen() -> Element {
     let mut phrase = use_signal(String::new);
     let mut identity_busy = use_signal(|| false);
     let mut identity_error = use_signal(String::new);
+    // Model catalog for the selected provider, fetched from the
+    // provider itself and never from a bundled list. `None` means "not
+    // loaded yet" as distinct from "loaded and empty" — the picker says
+    // something different for each.
+    let mut catalog = use_signal(|| None::<ModelListView>);
+    let mut catalog_error = use_signal(|| None::<String>);
+    let mut catalog_busy = use_signal(|| false);
+    let mut open_picker = use_signal(|| None::<Tier>);
     let theme_controller = use_context::<crate::theme::Theme>();
 
     // The draft is seeded from context at mount and re-seeded from the
@@ -124,6 +134,56 @@ pub fn SettingsScreen() -> Element {
             }
         });
     });
+
+    // Load the provider's model list once a key exists. Same
+    // stale-response discipline as the probe above: switching provider
+    // mid-flight must not leave the previous provider's models on
+    // screen.
+    //
+    // `force` is what makes a newly released model reachable without
+    // waiting out the shell's one-hour cache.
+    let mut refresh_catalog = move |force: bool| {
+        let provider = local.read().ai_provider.clone().unwrap_or_default();
+        if provider.is_empty() || !*key_saved.read() {
+            *catalog.write() = None;
+            catalog_error.set(None);
+            return;
+        }
+        let still_current = local;
+        catalog_busy.set(true);
+        catalog_error.set(None);
+        spawn(async move {
+            match invoke::<ModelListView>(
+                "list_models",
+                serde_json::json!({ "provider": provider.clone(), "force": force }),
+            )
+            .await
+            {
+                Ok(list) => {
+                    if still_current.peek().ai_provider.clone().unwrap_or_default() == provider {
+                        *catalog.write() = Some(list);
+                    }
+                }
+                Err(e) => {
+                    if still_current.peek().ai_provider.clone().unwrap_or_default() == provider {
+                        *catalog.write() = None;
+                        catalog_error.set(Some(e));
+                    }
+                }
+            }
+            catalog_busy.set(false);
+        });
+    };
+    {
+        let mut refresh = refresh_catalog;
+        use_effect(move || {
+            // Re-runs when the provider or the key-presence flips, which
+            // is exactly when a catalog becomes fetchable.
+            let _ = local.read().ai_provider.clone();
+            let _ = key_saved.read();
+            refresh(false);
+        });
+    }
 
     let save = move || {
         let mut ctx = ctx;
@@ -423,37 +483,100 @@ pub fn SettingsScreen() -> Element {
                         onchange: move |e| {
                             let mut v = local.read().clone();
                             v.ai_provider = if e.value().is_empty() { None } else { Some(e.value()) };
+                            // Model ids are provider-specific, so a
+                            // provider switch invalidates both slots.
+                            // Leaving them would send an OpenRouter id
+                            // to Google — a 404 the user could not
+                            // explain. Both start unset, by design:
+                            // nothing is ever chosen for you.
+                            v.tier1_model = None;
+                            v.tier2_model = None;
                             local.set(v);
+                            // A provider change invalidates the catalog
+                            // we were holding, so drop it and let the
+                            // effect below fetch the new one.
+                            *catalog.write() = None;
+                            catalog_error.set(None);
                         },
                         option { value: "", "None (manual mode)" }
                         option { value: "openrouter", "OpenRouter" }
                         option { value: "google", "Google" }
-                        option { value: "qwen", "Qwen" }
                         option { value: "bytez.com", "bytez.com" }
                     }
                 }
-                div { class: "wl-field",
-                    label { class: "wl-label", "Tier-1 model (architect)" }
-                    input { class: "wl-input", r#type: "text",
-                        placeholder: "e.g. gpt-4o / claude-sonnet (your choice)",
-                        value: "{s.tier1_model.clone().unwrap_or_default()}",
-                        oninput: move |e| {
-                            let mut v = local.read().clone();
-                            v.tier1_model = if e.value().is_empty() { None } else { Some(e.value()) };
-                            local.set(v);
-                        } }
+
+                // Tier slots. Not text fields any more: a model id has
+                // to match the provider's exact string, and a typo in a
+                // free-text field was only discoverable by spending an
+                // API call and reading "OFFLINE". Each row opens the
+                // picker, which is populated from the provider's LIVE
+                // catalog — so a model released upstream is selectable
+                // without a Worldline release. The manual field behind
+                // the picker stays as the way out for a provider with
+                // no readable catalog.
+                for (tier, chosen) in [
+                    (Tier::Architect, s.tier1_model.clone()),
+                    (Tier::Dispatcher, s.tier2_model.clone()),
+                ] {
+                    div { class: "wl-field",
+                        label { class: "wl-label", "{tier.label()} (Tier {tier.number()})" }
+                        button {
+                            class: "wl-model-slot",
+                            onclick: {
+                                let t = tier;
+                                move |_| {
+                                    // Drop any list we were holding so
+                                    // the sheet shows a loading state
+                                    // rather than a stale provider's
+                                    // models for one frame.
+                                    *catalog.write() = None;
+                                    catalog_error.set(None);
+                                    *open_picker.write() = Some(t);
+                                }
+                            },
+                            if let Some(id) = chosen {
+                                span { class: "wl-model-slot-id wl-mono", "{id}" }
+                            } else {
+                                span { class: "wl-model-slot-empty", "not selected — choose a model" }
+                            }
+                            span { class: "wl-model-slot-go", "›" }
+                        }
+                    }
                 }
-                div { class: "wl-field",
-                    label { class: "wl-label", "Tier-2 model (dispatcher)" }
-                    input { class: "wl-input", r#type: "text",
-                        placeholder: "e.g. claude-haiku / gemini-flash",
-                        value: "{s.tier2_model.clone().unwrap_or_default()}",
-                        oninput: move |e| {
-                            let mut v = local.read().clone();
-                            v.tier2_model = if e.value().is_empty() { None } else { Some(e.value()) };
-                            local.set(v);
-                        } }
+
+                // Catalog status. The list always comes from the
+                // provider, never from this build — so the refresh is how
+                // a model released upstream is picked up without
+                // waiting out the shell's cache.
+                div { class: "wl-catalog-status",
+                    if *catalog_busy.read() {
+                        span { class: "wl-mono", "loading models…" }
+                    } else if let Some(err) = catalog_error.read().clone() {
+                        // Rendered inline, and in full: this is the
+                        // message that used to be discarded.
+                        span { class: "wl-form-error", "{err}" }
+                    } else if let Some(list) = catalog.read().clone() {
+                        span { class: "wl-mono",
+                            "{list.models.len()} models"
+                            if list.cached { " · cached" }
+                        }
+                        if let Some(total) = list.truncated_from {
+                            span { class: "wl-section-note",
+                                " showing the first {total} — refine with search" }
+                        }
+                    } else if s.ai_provider.is_some() && *key_saved.read() {
+                        span { class: "wl-section-note", "no models loaded" }
+                    }
+                    if s.ai_provider.is_some() && *key_saved.read() {
+                        button {
+                            class: "wl-btn-ghost wl-btn-compact",
+                            disabled: *catalog_busy.read(),
+                            onclick: move |_| refresh_catalog(true),
+                            "Refresh models"
+                        }
+                    }
                 }
+
                 div { class: "wl-field",
                     label { class: "wl-label", "API key" }
                     input { class: "wl-input", r#type: "password",
@@ -488,6 +611,12 @@ pub fn SettingsScreen() -> Element {
                                             key_saved.set(true);
                                             api_key.set(String::new());
                                             flash(&ctx, "KEY SEALED IN VAULT");
+                                            // A new key may unlock a
+                                            // catalog that was refused
+                                            // before, so refetch rather
+                                            // than leaving the picker
+                                            // stuck on an auth error.
+                                            *catalog.write() = None;
                                         }
                                         _ => flash(&ctx, "KEY REJECTED"),
                                     }
@@ -516,6 +645,7 @@ pub fn SettingsScreen() -> Element {
                                             Ok(true) => {
                                                 key_saved.set(false);
                                                 flash(&ctx, "VAULT KEY REMOVED");
+                                                *catalog.write() = None;
                                             }
                                             _ => flash(&ctx, "KEY NOT FOUND"),
                                         }
@@ -633,6 +763,42 @@ pub fn SettingsScreen() -> Element {
             }
             }
         }
+
+        // The model picker, rendered over this page rather than as a
+        // global overlay like the nav and telemetry drawers: it is only
+        // ever opened from here, so it can own local signals instead of
+        // growing `AppCtx` for a transient concern.
+        if let Some(tier) = *open_picker.read() {
+            ModelPicker {
+                tier,
+                provider: s.ai_provider.clone().unwrap_or_default(),
+                models: catalog
+                    .read()
+                    .as_ref()
+                    .map(|c| c.models.clone())
+                    .unwrap_or_default(),
+                recommended: catalog
+                    .read()
+                    .as_ref()
+                    .map(|c| c.recommended.clone())
+                    .unwrap_or_default(),
+                cached: catalog.read().as_ref().is_some_and(|c| c.cached),
+                on_pick: move |id: String| {
+                    // Writes the draft only; Save settings persists it,
+                    // exactly like every other field on this page.
+                    let mut v = local.read().clone();
+                    match tier {
+                        Tier::Architect => v.tier1_model = Some(id),
+                        Tier::Dispatcher => v.tier2_model = Some(id),
+                    }
+                    local.set(v);
+                    *open_picker.write() = None;
+                },
+                on_close: move |_| {
+                    *open_picker.write() = None;
+                },
+            }
+        }
     }
 }
 
@@ -662,7 +828,7 @@ mod tests {
         let draft = AppSettingsView {
             theme: "dark".into(),
             always_on_top: false,
-            ai_provider: Some("qwen".into()),
+            ai_provider: Some("openrouter".into()),
             tier1_model: Some("half-typed-ar".into()),
             tier2_model: None,
             relay_url: Some("http://192.168.1.5:9999".into()),

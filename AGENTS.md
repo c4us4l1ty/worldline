@@ -3,7 +3,7 @@
 ## Commands
 
 ```bash
-cargo test --workspace        # THE verification gate (192 tests; 231 total with shell+UI)
+cargo test --workspace        # THE verification gate (209 tests; 258 total with shell+UI)
 cargo clippy --workspace      # must be warning-free
 cargo fmt --all               # run before committing
 ```

@@ -807,6 +807,214 @@ body {
 }
 
 /* ==========================================================================
+   Model picker (Settings → Intelligence)
+   ========================================================================== */
+/* A bottom sheet, not a native `<select>`: OpenRouter serves 443
+   text-output models and a 420px WebKit popup with that many options is
+   unusable. The sheet also has room for a search field and a
+   "Recommended" group, neither of which a `<select>` can express. */
+.wl-picker-backdrop { align-items: flex-end; z-index: 60; }
+.wl-picker-sheet {
+  width: 100%;
+  max-height: 84%;
+  display: flex;
+  flex-direction: column;
+  background: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-strong);
+  border-bottom: none;
+  /* A sheet is a rounded rect, not a pill: the list is tall. The pill
+     radius reserved for toasts reads as a mistake at this height. */
+  border-radius: var(--wl-radius-card) var(--wl-radius-card) 0 0;
+  padding: 16px 18px 18px;
+  animation: wl-sheet-rise 200ms var(--ease-tactile);
+}
+@keyframes wl-sheet-rise {
+  from { transform: translateY(16px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+.wl-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.wl-picker-title {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  color: var(--wl-text-primary);
+}
+/* The ✕ is a text glyph, like the nav drawer's ✚: the two are the only
+   two marks in the app that are not inline SVG, and keeping them as
+   glyphs is what stopped the SVG set from growing a "close" icon that
+   has to agree with a 1.6px stroke everywhere else. */
+.wl-picker-close {
+  background: none;
+  border: none;
+  color: var(--wl-text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 6px;
+}
+.wl-picker-close:hover { color: var(--wl-text-primary); }
+.wl-picker-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--wl-text-muted);
+  margin: 2px 0 12px;
+  flex-shrink: 0;
+}
+.wl-picker-cached { opacity: 0.7; }
+.wl-picker-search { flex-shrink: 0; margin-bottom: 10px; }
+.wl-picker-input { font-family: var(--font-mono); font-size: 13px; }
+.wl-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -6px;
+  padding: 0 6px;
+}
+.wl-picker-group {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--wl-text-muted);
+  padding: 10px 8px 4px;
+}
+/* One model per row: the id in mono (it is the value that gets sent),
+   the display name beneath it, and the context window as a quiet
+   right-aligned badge. The id is the important part and has to be
+   readable at a glance, so it leads. */
+.wl-picker-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "id ctx" "name ctx";
+  gap: 1px 10px;
+  align-items: center;
+  text-align: left;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: var(--wl-radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-picker-row:hover { background: var(--wl-surface-elevated); }
+.wl-picker-row-id {
+  grid-area: id;
+  font-size: 12px;
+  color: var(--wl-text-primary);
+  word-break: break-all;
+}
+.wl-picker-row-name {
+  grid-area: name;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--wl-text-muted);
+}
+.wl-picker-row-ctx {
+  grid-area: ctx;
+  font-size: 10px;
+  color: var(--wl-text-muted);
+  white-space: nowrap;
+}
+.wl-picker-empty,
+.wl-picker-more {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--wl-text-muted);
+  padding: 14px 8px;
+  text-align: center;
+}
+.wl-picker-manual {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--wl-border-subtle);
+}
+.wl-picker-manual-toggle {
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--wl-text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.wl-picker-manual-toggle:hover { color: var(--wl-text-secondary); }
+.wl-picker-manual .wl-btn-compact { height: 38px; font-size: 13px; }
+
+/* The two tier slots on the Settings page. A row that reads as a value
+   with a chevron, not an input: the point is that these are chosen from
+   a list, not typed. */
+.wl-model-slot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 14px;
+  background-color: var(--wl-surface-elevated);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-btn);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--duration-instant) var(--ease-tactile);
+}
+.wl-model-slot:hover { border-color: var(--wl-border-strong); }
+.wl-model-slot-id {
+  font-size: 12px;
+  color: var(--wl-text-primary);
+  word-break: break-all;
+}
+.wl-model-slot-empty { font-size: 13px; color: var(--wl-text-muted); }
+.wl-model-slot-go { color: var(--wl-text-muted); font-size: 15px; }
+
+/* Catalog status line: count, or the provider's own error, plus refresh. */
+.wl-catalog-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--wl-text-muted);
+  margin: -4px 0 14px;
+}
+.wl-catalog-status .wl-btn-compact { height: 32px; font-size: 12px; }
+
+/* An error a person can act on, shown in full.
+   NOT a toast: the toast is an uppercase mono pill capped at 90% width,
+   so a real diagnosis wrapped into a three-line lozenge. And not red —
+   skill §5 has no red failure states; this is `--wl-text-secondary`
+   because a wrong API key is a configuration state, not an emergency. */
+.wl-form-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  letter-spacing: 0.02em;
+  color: var(--wl-text-secondary);
+  word-break: break-word;
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  background-color: var(--wl-surface-card);
+  border: 1px solid var(--wl-border-subtle);
+  border-radius: var(--wl-radius-sm);
+}
+
+/* ==========================================================================
    C. Action Controls & Escape Hatch (skill §4.C)
    ========================================================================== */
 .wl-actions {

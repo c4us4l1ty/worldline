@@ -90,18 +90,18 @@ fn parse_briefing_valid_and_bounded() {
 
 #[test]
 fn provider_request_shapes() {
-    // One OpenAI-compatible shape serves all four approved providers
-    // (openrouter | google | qwen | bytez.com) — only the base URL varies.
+    // One OpenAI-compatible shape serves all three approved providers
+    // (openrouter | google | bytez.com) — only the base URL varies.
     for base in [
         "https://openrouter.ai/api/v1",
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "https://api.bytez.com/models/v2/openai/v1",
     ] {
         let oa = ProviderAdapter::OpenAiCompat {
             base_url: base.into(),
             api_key: Zeroizing::new("sk-test".into()),
             model: "user-model-x".into(),
+            json_mode: true,
         };
         let (url, headers, body) = oa.request("sys", "usr");
         assert_eq!(url, format!("{base}/chat/completions"));
@@ -115,21 +115,45 @@ fn provider_request_shapes() {
     }
 }
 
+/// `response_format` is per-model. Sending it to a model that does not
+/// advertise it is a 400, and the catalog is the only thing that knows
+/// which models those are — so the flag has to actually reach the body.
+#[test]
+fn json_mode_off_omits_response_format() {
+    let mk = |json_mode| ProviderAdapter::OpenAiCompat {
+        base_url: "https://openrouter.ai/api/v1".into(),
+        api_key: Zeroizing::new("k".into()),
+        model: "anthropic/claude-sonnet-4".into(),
+        json_mode,
+    };
+    let (_, _, on) = mk(true).request("sys", "usr");
+    assert_eq!(on["response_format"]["type"], "json_object");
+    let (_, _, off) = mk(false).request("sys", "usr");
+    assert!(
+        off.get("response_format").is_none(),
+        "an unsupported field must be absent, not null: {off}"
+    );
+    // Everything else about the request is unchanged.
+    assert_eq!(off["model"], "anthropic/claude-sonnet-4");
+    assert_eq!(off["messages"][0]["role"], "system");
+    assert_eq!(off["temperature"], 0.4);
+}
+
 #[test]
 fn master_plan_end_to_end_with_injected_http() {
     let r = repos();
     // B-001 regression: master_plan with mocked `execute` succeeds for
-    // each of the 4 approved providers (base URL is the only variance).
+    // each approved provider (base URL is the only variance).
     for base in [
         "https://openrouter.ai/api/v1",
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "https://api.bytez.com/models/v2/openai/v1",
     ] {
         let provider = ProviderAdapter::OpenAiCompat {
             base_url: base.into(),
             api_key: Zeroizing::new("k".into()),
             model: "m".into(),
+            json_mode: true,
         };
         let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
             Ok::<String, String>(
@@ -152,14 +176,14 @@ fn master_plan_end_to_end_with_injected_http() {
         let ms = r.milestones_for_goal(&goal_id).unwrap();
         assert_eq!(ms.len(), 2);
     }
-    // 3 directives per plan x 4 providers.
+    // 3 directives per plan x 3 providers.
     let count: i64 = r
         .conn
         .lock()
         .unwrap()
         .query_row("SELECT COUNT(*) FROM directives", [], |x| x.get(0))
         .unwrap();
-    assert_eq!(count, 12);
+    assert_eq!(count, 9);
     // The 50-min directive became progressive with 2 phases and
     // minutes summed from phases.
     let prog = r
@@ -185,6 +209,7 @@ fn master_plan_prefers_the_architect_title_over_the_intent() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Ok::<String, String>(
@@ -220,6 +245,7 @@ fn master_plan_falls_back_to_the_intent_when_no_title_is_offered() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Ok::<String, String>(
@@ -250,6 +276,7 @@ fn a_blank_architect_title_falls_back_rather_than_naming_the_goal_blank() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let execute = move |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Ok::<String, String>(
@@ -271,6 +298,7 @@ fn a_long_single_line_intent_still_produces_a_valid_title() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Ok::<String, String>(
@@ -324,6 +352,7 @@ fn morning_briefing_persists_into_next_milestone() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let brief_json = r#"{"directives":[{"title":"Write 300 words on Section 2.1","estimated_minutes":45,"phases":[
         {"title":"Signature","minutes":5},{"title":"Core loop","minutes":25}]}]}"#;
@@ -356,6 +385,7 @@ fn http_failure_maps_to_error() {
         base_url: "http://x".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Err::<String, String>("network down".to_string())
@@ -444,6 +474,7 @@ fn response_size_checked_before_parsing_and_persistence() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("test".into()),
         model: "test".into(),
+        json_mode: true,
     };
     let result =
         AiDispatcher::master_plan(&provider, "Goal", None, |_, _, _| Ok(raw.clone()), &r, None);
@@ -464,6 +495,7 @@ fn provider_debug_redacts_api_key() {
         base_url: "https://x".into(),
         api_key: Zeroizing::new("sk-live-secret".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let dbg = format!("{oa:?}");
     assert!(!dbg.contains("sk-live-secret"), "key leaked: {dbg}");
@@ -477,6 +509,7 @@ fn facades_reject_bad_input_before_any_http_call() {
         base_url: "http://localhost".into(),
         api_key: Zeroizing::new("k".into()),
         model: "m".into(),
+        json_mode: true,
     };
     let no_http = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         panic!("HTTP must not be attempted for invalid input")

@@ -1,16 +1,33 @@
 //! Shared shell state: DB handle, identity (unlocked at runtime),
-//! device id, relay session.
+//! device id, relay session, provider model catalog cache.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::Manager;
+use wl_core::ai::catalog::ModelInfo;
 use wl_core::crypto::identity::Identity;
 use wl_core::poison::LockRecover;
 use wl_core::store::repo::Repos;
 
 use crate::vault::Vault;
 use crate::ShellError;
+
+/// How long a fetched model list is served from memory before a refetch.
+///
+/// Long enough that reopening Settings does not re-pull OpenRouter's
+/// ~750 KB catalog every time, short enough that a model released
+/// upstream appears on its own within the hour. `list_models` also takes
+/// `force`, so waiting is never the only way to see a new model.
+const CATALOG_TTL: Duration = Duration::from_secs(3600);
+
+/// A cached catalog plus the moment it was fetched.
+pub struct CatalogEntry {
+    pub fetched_at: Instant,
+    pub models: Vec<ModelInfo>,
+}
 
 pub struct RelaySession {
     pub base: String,
@@ -30,6 +47,15 @@ pub struct AppState {
     pub vault: Vault,
     pub relay_token: Mutex<Option<RelaySession>>,
     pub relay_url: Mutex<Option<String>>,
+    /// Provider model lists, keyed by provider id.
+    ///
+    /// **Deliberately not in SQLite.** `app_settings` is a replicated
+    /// CRDT table, so a catalog cached there would sync to every peer on
+    /// the account and two devices would fight over one device-local
+    /// cache. A catalog is a property of the provider at a point in
+    /// time, not shared state, so it stays in process memory and is
+    /// simply refetched.
+    pub catalog: Mutex<HashMap<String, CatalogEntry>>,
 }
 
 impl AppState {
@@ -57,7 +83,39 @@ impl AppState {
             vault,
             relay_token: Mutex::new(None),
             relay_url: Mutex::new(relay_url),
+            catalog: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Cached catalog for a provider, if still inside the TTL.
+    pub fn catalog_fresh(&self, provider: &str) -> Option<Vec<ModelInfo>> {
+        let guard = self.catalog.lock_recover();
+        let entry = guard.get(provider)?;
+        (entry.fetched_at.elapsed() < CATALOG_TTL).then(|| entry.models.clone())
+    }
+
+    /// One model from the fresh cache, used to decide whether a request
+    /// may send `response_format` (see
+    /// [`wl_core::ai::catalog::json_mode_for`]). A miss is `None`, which
+    /// keeps the historical behaviour rather than guessing.
+    pub fn cached_model(&self, provider: &str, model: &str) -> Option<ModelInfo> {
+        let guard = self.catalog.lock_recover();
+        let entry = guard.get(provider)?;
+        if entry.fetched_at.elapsed() >= CATALOG_TTL {
+            return None;
+        }
+        entry.models.iter().find(|m| m.id == model).cloned()
+    }
+
+    pub fn store_catalog(&self, provider: &str, models: Vec<ModelInfo>) {
+        let mut guard = self.catalog.lock_recover();
+        guard.insert(
+            provider.to_string(),
+            CatalogEntry {
+                fetched_at: Instant::now(),
+                models,
+            },
+        );
     }
 
     /// Unlocked identity or error.

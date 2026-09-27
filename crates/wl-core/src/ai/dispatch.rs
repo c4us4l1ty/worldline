@@ -30,10 +30,11 @@ pub enum DispatchError {
 
 /// BYOK provider endpoints. Model ids are user settings, never baked in.
 ///
-/// The supported provider set is exactly `openrouter | google | qwen |
-/// bytez.com` (PRD-DELTAS #73) — every one speaks OpenAI-compatible chat
-/// completions, so a single variant plus a per-provider base URL covers
-/// the whole matrix (the old Anthropic-native variant is gone).
+/// The supported provider set is exactly `openrouter | google |
+/// bytez.com` (PRD-DELTAS #73, amended 2026-09-27) — every one speaks
+/// OpenAI-compatible chat completions, so a single variant plus a
+/// per-provider base URL covers the whole matrix (the old
+/// Anthropic-native variant is gone).
 ///
 /// The key rides in `Zeroizing<String>` end-to-end (vault → adapter →
 /// request): dropping the adapter wipes it. Two residual copies are
@@ -45,12 +46,29 @@ pub enum DispatchError {
 #[derive(Clone)]
 pub enum ProviderAdapter {
     /// OpenAI-compatible chat completions (OpenRouter, Google Gemini
-    /// compat, Qwen compat, bytez gateway). The shell resolves the
-    /// provider id to its base URL; the adapter only carries it.
+    /// compat, bytez gateway). The shell resolves the provider id to
+    /// its base URL; the adapter only carries it.
     OpenAiCompat {
         base_url: String,
         api_key: Zeroizing<String>,
         model: String,
+        /// Whether to send `response_format: {"type":"json_object"}`.
+        ///
+        /// This is per-model, not per-provider. Sending it
+        /// unconditionally was a latent 400: of OpenRouter's 443
+        /// text-output models only 391 advertise the parameter, and a
+        /// handful (`openrouter/auto`, `openrouter/fusion`, …) advertise
+        /// none at all — so picking a flagship such as
+        /// `anthropic/claude-sonnet-4` failed on a request shape rather
+        /// than on anything the user could see.
+        ///
+        /// Derived from the live catalog via
+        /// [`crate::ai::catalog::json_mode_for`], which only turns it
+        /// *off* on positive evidence. Turning it off is safe: both
+        /// prompts already demand JSON in prose and the parser strips
+        /// fences and extracts the first balanced object, so the field
+        /// is a preference, not the contract.
+        json_mode: bool,
     },
 }
 
@@ -82,17 +100,20 @@ impl ProviderAdapter {
                 base_url,
                 api_key,
                 model,
+                json_mode,
             } => {
                 let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "model": model,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user}
                     ],
                     "temperature": 0.4,
-                    "response_format": {"type": "json_object"}
                 });
+                if *json_mode {
+                    body["response_format"] = serde_json::json!({"type": "json_object"});
+                }
                 let headers = vec![
                     (
                         "Authorization".into(),

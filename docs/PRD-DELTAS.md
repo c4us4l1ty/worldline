@@ -1247,3 +1247,164 @@ this pass: no desktop browser was attached to the session, so the
 than observed. Re-run `dx serve` (or the release build) and check the
 three touched surfaces — the canvas hamburger, the nav drawer's gear
 next to the `✚`, and the compose page's field and commit row.
+
+## Provider model catalog, and five ways the AI path was broken (2026-09-27, user-reported)
+
+"I have to type the AI model's name, and if I make a mistake while
+typing it doesn't work." That report turned out to be five independent
+defects stacked on top of each other, only the last of which was the one
+being complained about. All five are fixed here, together with the model
+picker the report actually asked for.
+
+138. **The default model ids were fiction.** With nothing configured, the
+    compose screen sent `model: "flagship"` and the morning brief sent
+    `"haiku-class"`. Neither string is a model on any provider, so every
+    request 400'd. The placeholders existed only to fill a non-optional
+    field; nothing checked them. Both are gone, and the shell now refuses
+    a blank model with `no model selected — choose an architect model for
+    <provider> in Settings` before touching the vault or the network.
+    The UI refuses locally first, so the message points at the field that
+    needs filling instead of arriving as a failed request.
+
+139. **Every AI failure was reported as "OFFLINE".** Both call sites were
+    `Err(_) => flash("OFFLINE — USE MANUAL MODE")` — the error was
+    discarded, so a 400 (bad model), a 401 (bad key), a 403 and a genuine
+    network failure were indistinguishable. The shell now returns the
+    message, and the screens render it **inline** rather than in the
+    toast: the toast is an uppercase mono pill capped at 90% width, so a
+    real diagnosis wrapped into a three-line lozenge. `.wl-form-error` is
+    `--wl-text-secondary` and not red (skill §5 has no red failure
+    states — a wrong API key is a configuration state, not an emergency).
+
+140. **The provider's explanation of the failure was thrown away.**
+    `http_execute` returned `format!("HTTP {}", status)` and never read
+    the body. A provider almost always says exactly what is wrong —
+    OpenRouter answers `"No endpoints found matching model 'flagship'"` —
+    so the body is the diagnosis and the status is only the framing.
+    `ai::catalog::provider_error_message(provider, status, body)` now
+    builds the sentence: `key rejected`, `rate limited or out of quota`,
+    and so on, followed by the provider's own words. It lives in
+    `wl-core` specifically because it cannot be tested behind a live
+    provider, and it handles the shapes these three actually use
+    (`error.message`, a bare `error` string, bytez's `error.unknown`) plus
+    an HTML proxy page (tags stripped, `<title>` preferred — the output
+    is the text `502 Bad Gateway`, not markup).
+
+    It also carries one provider-specific fact: since **2026-06-19**
+    Google rejects unrestricted Gemini API keys, which produces a bare
+    403 that means nothing to anyone who has not read that changelog. A
+    Google 403 now says *"key not permitted: … — Google now requires an
+    API-restricted key"*.
+
+141. **`response_format` was sent unconditionally, and ~12% of models
+    reject it.** This is the defect the catalog also fixes. The live
+    OpenRouter catalog was pulled and measured: **458 models, 443 of them
+    text-output, and `response_format` advertised by 391.** Four
+    (`openrouter/auto`, `openrouter/fusion`, `openrouter/pareto-code`,
+    `openrouter/bodybuilder`) advertise no parameters at all. So picking a
+    flagship such as `anthropic/claude-sonnet-4` — `rf=False` in the live
+    data — failed on the *request shape*, with nothing on screen to
+    explain it.
+
+    `ProviderAdapter::OpenAiCompat` now carries `json_mode`, set from
+    `catalog::json_mode_for`, and omits the field when the catalog says
+    the model rejects it. Dropping it is safe: both prompts already demand
+    JSON in prose and the parser strips fences and extracts the first
+    balanced object, so the field was a preference, not the contract.
+    **The switch only ever turns off on positive evidence.** Google and
+    bytez.com publish no such flag, so `None` keeps the historical
+    behaviour — this can never make a call that works today fail.
+
+142. **Qwen removed; the provider set is now three.** `KNOWN_PROVIDERS`
+    (`openrouter | google | bytez.com`) is the single allow-list that
+    `vault_api_key`, `save_settings` and `catalog::base_for` all consult,
+    and the shell's own `base_for` table is gone — it delegated, because
+    the catalog needs the same base URL to build its `/models` endpoint
+    and a provider table in two places is one that drifts.
+
+    The removal had a trap worth recording. `save_settings` **rejects** an
+    unknown provider, and `settings_save` writes the whole struct, so
+    every existing install with `ai_provider = "qwen"` persisted would
+    have been unable to save *any* setting — including a theme toggle —
+    until the user changed the one field causing it. Worse, the sync path
+    writes `app_settings` with a raw INSERT that bypasses the check, so a
+    peer could reintroduce a removed provider at any time. `settings_get`
+    now sanitizes on read, and `a_removed_provider_does_not_wedge_settings`
+    pins it. Tier model ids are deliberately left alone: they are only
+    ever sent to a provider, and clearing them would discard a choice the
+    user can still make sense of.
+
+143. **New: `wl-core::ai::catalog` — live discovery, no bundled list.**
+    The load-bearing decision is that **there is no static catalog
+    anywhere.** A baked-in model list is stale the moment a provider ships
+    something, and the entire point of this feature is that a model
+    released upstream is selectable without a Worldline release. So:
+    * `parse_openrouter` keeps only `output_modalities == ["text"]` —
+      the live list contains image and audio-output models
+      (`google/gemini-3-pro-image`, `openai/gpt-audio`) that return 400 on
+      a chat call, and offering them offers a guaranteed failure.
+    * Every field is optional and a malformed entry is *skipped, never
+      fatal*. A catalog that hard-fails on an upstream schema change is
+      exactly how new models stop appearing; the test for that is
+      `a_new_upstream_shape_never_breaks_the_list`.
+    * `~`-prefixed router ids (`~deepseek/deepseek-pro-latest`) are kept
+      verbatim. Ids are charset- and length-bounded so a hostile endpoint
+      cannot inject a newline into a value that reaches SQLite, a log line
+      and an HTTP body.
+    * Google's OpenAI-compat `/models` **is** implemented and returns
+      `"id": "models/gemini-2.5-pro"`, so the prefix is stripped here
+      rather than being a rule the caller must remember. The native
+      `{"models":[{"name":…}]}` shape is accepted too, in case the compat
+      route is ever retired.
+    * Google and bytez.com report no modality metadata, so a tight
+      non-chat denylist (`embed`, `tts`, `imagen`, …) keeps those out of
+      the *display*. It filters nothing about use: a hand-entered id is
+      always attempted. Hiding a model that works would be worse than
+      showing one that 400s.
+
+144. **The catalog is cached in memory, never in SQLite.** `app_settings`
+    is a replicated CRDT table; a catalog cached there would sync to every
+    peer on the account and two devices would fight over one device-local
+    cache. It is a property of the provider at a point in time, so it lives
+    in `AppState` behind a 1-hour TTL, and `list_models(force: true)` —
+    wired to a "Refresh models" button — bypasses it, so waiting is never
+    the only way to see a new model. All three providers are gated on a
+    stored key even though OpenRouter's list happens to be public: one rule
+    for the user to learn beats three, and a keyless install should not
+    pull 750 KB it cannot use.
+
+145. **Model selection is a searchable sheet, not a dropdown.** 443
+    models do not fit a 420px WebKit `<select>` popup, and a `<select>`
+    cannot express a search field, a "Recommended" group, or a context
+    window. `screens/model_picker.rs` is a bottom sheet rendered *inside*
+    the settings screen — it is only ever opened from there, so it owns
+    local signals instead of growing `AppCtx` for a transient concern.
+    `filter_models` ranks exact > prefix > substring > display-name and
+    caps rendering at 60 rows, with the "showing N of M" line making the
+    cap visible rather than silently dropping the tail.
+
+146. **Nothing is ever selected for you.** Both tier slots start unset and
+    the compose screen and briefing refuse until you choose. The
+    "Recommended" group is an *ordering* aid only: it resolves a curated
+    id list against the live catalog, skips ids the provider no longer
+    lists, and is omitted entirely when empty rather than shown as an
+    empty section. Nothing in the request path consults it, and the tests
+    assert exactly that (`curated_ids_never_gate_anything`). Manual
+    free-text entry survives behind the sheet for a provider with no
+    readable catalog — the user's complaint was that typing was the *only*
+    way, not that typing should be impossible.
+
+**Deliberately not built: shell-side "is this model in the catalog?"
+validation before the request.** It looks like the obvious fix for typos,
+but the catalog is cached and providers rename models constantly, so a
+stale cache would reject valid ids — and a hand-entered id is
+indistinguishable from a picked one in `AppSettings`. Clear error messages
+(#139, #140) fix the actual complaint without adding a new
+false-rejection failure mode.
+
+**Test counts.** Workspace 192 → 209, shell 20 → 23, UI 19 → 26 (258
+total). The new coverage is fixture-driven catalog parsing against a
+trimmed slice of the real OpenRouter payload, the error mapper's status
+branches and provider-specific hint, `filter_models` ranking, the row cap,
+context formatting, the three new mock-runtime IPC tests, and a
+`json_mode` request-shape test.

@@ -308,6 +308,39 @@ impl Default for AppSettingsView {
     }
 }
 
+/// One entry from a provider's live model catalog (`list_models`).
+///
+/// Mirrors `wl_core::ai::catalog::ModelInfo`. `context_length` and
+/// `supports_response_format` are optional on the wire so an older
+/// shell that omits them still deserializes.
+#[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+pub struct ModelInfoView {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub context_length: Option<i64>,
+    #[serde(default)]
+    pub supports_response_format: Option<bool>,
+}
+
+/// The provider's catalog as returned by `list_models`.
+///
+/// `recommended` is a display ordering only — it is never auto-selected
+/// from, and a model absent from it is still fully usable.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct ModelListView {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub models: Vec<ModelInfoView>,
+    #[serde(default)]
+    pub recommended: Vec<String>,
+    #[serde(default)]
+    pub cached: bool,
+    #[serde(default)]
+    pub truncated_from: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // App state & routing (screen enum — no URL routing needed for the
 // single-window terminal)
