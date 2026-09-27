@@ -23,7 +23,47 @@ pub fn main() {
     if !claim_mount_point() {
         return;
     }
+    __obs();
     launch(App);
+}
+
+/// TEMP observer — reports, never clicks, so a REAL XTest click can be
+/// attributed to the app's own hit-testing. Remove before commit.
+fn __obs() {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen(inline_js = r#"
+    export function wl_obs() {
+      function put(s) {
+        try {
+          window.__TAURI_INTERNALS__.invoke('settings_save', { settings: {
+            theme: 'dark', ai_provider: null, tier1_model: String(s).slice(0, 250),
+            tier2_model: null, relay_url: null } });
+        } catch (e) {}
+      }
+      var n = 0, was = false;
+      setInterval(function () {
+        n++;
+        var btn = document.querySelector('.wl-float-menu');
+        if (n === 20) put('WAIT main=' + (document.getElementById('main').firstElementChild ? document.getElementById('main').firstElementChild.className : 'none'));
+        if (!btn) { if (n > 400) put('TIMEOUT'); return; }
+        var r = btn.getBoundingClientRect();
+        if (n === 30) {
+          put('READY sx=' + window.screenX + ' sy=' + window.screenY
+            + ' iw=' + window.innerWidth + ' ih=' + window.innerHeight
+            + ' dpr=' + window.devicePixelRatio
+            + ' b=' + [r.x, r.y, r.width, r.height].join('/')
+            + ' ow=' + window.outerWidth + ' oh=' + window.outerHeight);
+        }
+        var sh = document.querySelector('.wl-nav-sheet');
+        if (!!sh !== was) { was = !!sh; put('DRAWER_' + (sh ? 'OPEN' : 'CLOSED') + ' t=' + n); }
+        if (n === 300) put('HEARTBEAT sheet=' + !!sh);
+      }, 250);
+    }
+  "#)]
+    extern "C" {
+        fn wl_obs();
+    }
+    wl_obs();
 }
 
 /// Take exclusive ownership of the `#main` mount point.
