@@ -11,6 +11,14 @@
 //! read-outs about the system's own behaviour. Everything here answers
 //! "where am I?" without leaving the surface you are already on.
 //!
+//! The sheet is FULL HEIGHT — top edge to bottom edge of the 747px frame.
+//! An intermediate build made it hug its content and stop halfway down,
+//! and the user rejected it: a drawer that ends mid-air leaves the canvas
+//! visible beneath it, and there is no way to tell from the outside whether
+//! the tap missed or the surface is broken. Full height, with the worldline
+//! readout absorbing the slack so the extra space lands inside the list
+//! region rather than becoming a void below the panel.
+//!
 //! The 2026-09-27 redesign fixed three things that made it read as
 //! inconsistent rather than as a system:
 //!
@@ -170,7 +178,12 @@ pub fn NavDrawer() -> Element {
                         }
                     }
 
-                    div { class: "wl-nav-group",
+                    // `.wl-nav-worldlines` is what makes the full-height
+                    // sheet not a full-height VOID: this group absorbs the
+                    // leftover height, so the empty space sits inside the
+                    // list region — where a list is expected to have room —
+                    // instead of below the whole panel. See wl.css.
+                    div { class: "wl-nav-group wl-nav-worldlines",
                         div { class: "wl-nav-label", "Active worldlines" }
                         if let Some(list) = &loaded {
                             if list.is_empty() {

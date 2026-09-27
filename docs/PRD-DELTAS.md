@@ -1733,3 +1733,212 @@ almost all its motion into the first ~30ms) and the canvas's
     and to the canvas; with the brief gone it is a rest beat with one
     affordance, "Return to the line", which is the honest shape for a
     screen whose whole job is to say stop.
+
+## The 12px floor, and a system that stopped drifting (2026-09-27, user-directed)
+
+A whole-app redesign from two pieces of user feedback: the hamburger panel
+did not look consistent, and the section labels ("INTELLIGENCE", "AI
+PROVIDER", the Nemotron model name) were unreadable on a small screen. The
+pin-above-other-windows feature was removed at the user's request.
+
+171. **12px is now a hard type floor, and every size is a named token.**
+    The stylesheet had 28 `font-size` declarations in the 9–11px band
+    across eleven classes, and the skill's own floor for mono telemetry was
+    12px — so the CSS had drifted below its own specification. Settings
+    stacked three label tiers at 11px / 11px / 12px that differed from one
+    another by one pixel of letter-spacing, which is what made
+    "INTELLIGENCE" and "AI PROVIDER (BYOK)" read as one undifferentiated
+    smudge rather than as a heading and a field. Nine tokens now
+    (`--t-display` … `--t-mono`), and the only bare pixel sizes left in the
+    file are 18 / 22 / 24 / 26 / 30px, each with a comment saying why it
+    is not on the scale.
+
+172. **Section headings are 17px sans in sentence case, not uppercase mono
+    micro-caps.** This reverses §2 of the skill, which previously called
+    for 10–11px mono caps. Uppercase small mono was doing a real job —
+    making a label distinguishable from the content beneath it — by a means
+    that does not survive a 420px window. Group identity now comes from
+    size and weight relative to what is labelled, which survives any
+    viewport. The mono eyebrow survives at 12px for genuine telemetry only:
+    HLC stamps, counts, `MOCK DATA`, `SEALED`.
+
+173. **`--wl-text-tertiary` is gone, and it was the cause of the
+    "inconsistent hamburger".** It was referenced by thirteen rules and
+    defined in none of them. A `color:` declaration naming an undefined
+    custom property is invalid at computed-value time, so every one of them
+    silently INHERITED — and in the control panel that meant "SYSTEM
+    TELEMETRY" and "ACTIVE WORLDLINES" rendered at full
+    `--wl-text-primary` linen, brighter than the 15px rows they were
+    heading. It also inverted `.wl-nav-chevron`, the worldline counts, and
+    every label on the Entropy Log and Trajectory pages. The text ladder is
+    now three steps (primary / secondary / muted), all clearing 5:1 on the
+    card surface, and the rule is absolute: **a group label is quieter than
+    what it labels.**
+
+174. **`.wl-chip` had two definitions and the second silently won.** One
+    10px uppercase pill with an elevated background, one 9px inline
+    lozenge with a transparent one. The "sealed" key chip in Settings and
+    the "blocked" chip in the Entropy Log were therefore the same class at
+    two different sizes. Collapsed to one 12px definition. `.wl-hud` is
+    gone entirely along with its last user.
+
+175. **Pin-above-other-windows is removed, everywhere, with no migration.**
+    The switch left Settings, the "Pin to top:" line left the telemetry
+    drawer, `set_always_on_top` and its `generate_handler!` entry left the
+    shell, the boot-time restore left `main.rs`, and `AppSettings.
+    always_on_top` left `wl-core`, the UI DTO, and the shim mock. The
+    `app_settings.always_on_top` COLUMN stays, on the same terms as the
+    `hotkey` column before it: dropping a column on a CRDT-synced singleton
+    costs a migration and buys nothing, because it keeps its
+    `NOT NULL DEFAULT` and SQLite supplies it for the omitted INSERT field.
+
+    The consequence worth stating is what happens to a device that has not
+    been updated: it keeps pinning its own window and keeps pushing the key,
+    and the new side ignores it. Two tests hold that line —
+    `settings_survive_a_row_written_by_a_build_that_still_had_the_pin`
+    (wl-core) and `a_settings_op_from_an_old_peer_still_applies` (wl-sync).
+    The second is the one that matters: REJECTING an old payload would wedge
+    that device's sync permanently, whereas ignoring a key it has stopped
+    caring about degrades cleanly.
+
+176. **The native `<select>` is retired from Settings.** The provider
+    chooser shipped as a **near-white field carrying #E5E2E0 text** inside
+    a graphite card. It was "fixed" once, with `color-scheme: dark` in
+    `:root` plus `appearance: none`, and restyled once, and it failed
+    again: `color-scheme` darkens the dropdown *popup* and `appearance: none`
+    styles the *closed* state, and neither reliably reaches the widget in
+    WebKitGTK. Restyling it a third time would have been the wrong move, so
+    the provider became a `.wl-value-row` opening a bottom sheet, the same
+    control as the two model slots. Settings now contains **no native form
+    widget at all** — one row type, one open gesture, one list rendering.
+    The compose screen's target-date horizon is the app's last `<select>`
+    and earns the exemption: a small closed control with no catalog to
+    search and no history of painting itself white.
+
+177. **`.wl-value-row` is the component for "a value chosen from a list",
+    and the value is 13px mono, not 12px.** A model id is the value that
+    gets sent and is compared character by character against a catalog; at
+    the telemetry size with `word-break: break-all`,
+    `nvidia/nemotron-3.5-lightning:free` was one squeezed line. It is
+    `--t-mono-lead` with a two-line clamp now. The row's third line is a
+    fact (the model's context window) or it is absent — no placeholder, no
+    `—`, because a rendered placeholder trains the eye to skip the line.
+
+178. **One circular control, defined once.** `.wl-float-btn` (the canvas
+    menu) and `.wl-back` (every secondary page's chevron) were separate 34px
+    definitions at different offsets, so the two controls occupying the
+    same corner on the same screen did not line up — which is most of what
+    "the hamburger looks inconsistent" meant in practice. Both now derive
+    from a single 38px `.wl-circle-btn`. The canvas button also carried a
+    `wl-float-menu` class with no rule anywhere in the stylesheet, so its
+    specificity was a mirage; that modifier now exists and does the one
+    thing it should.
+
+179. **The last three font glyphs are now inline SVG.** `✚` on the panel's
+    primary action, `›` on every trailing row, and `✕` in the choice sheet
+    were each defended as "unambiguous at this size". That was true of
+    their shape and false of their rendering: the same three marks sat at
+    three different sizes and baselines across three sheets because the
+    font stack decided, which is exactly the drift the SVG set exists to
+    remove. `IconNew`, `IconChevron` and `IconClose` replace them. The
+    evening check-in's `●`/`◐`/`○` is the sole remaining glyph, and it
+    stays because a half-filled circle is a typographic idiom with no
+    universally recognised drawn equivalent.
+
+180. **Settings has one save path: every field commits on `change`.** The
+    page previously had two — appearance switches applied and persisted on
+    click, text fields staged into a draft for a "Save settings" button —
+    and said so on screen, in a note under the button, which was an
+    admission that the model was wrong. Both are gone. `onchange` fires on
+    blur or Enter, never per keystroke, so an abandoned half-typed relay URL
+    is never written.
+
+    `settings_save` overwrites the whole settings row, so a commit cannot be
+    a patch. The rule is now: **send the last shell-confirmed state with
+    only the field the user just changed applied.** This is the old
+    `switch_payload`, generalised — the theme switch had that bespoke
+    payload for exactly this reason and was the only field that had it.
+    Flipping the theme can no longer save a half-typed relay URL; picking a
+    model can no longer save a half-typed API key. The one field
+    deliberately wider than its name is the provider, which also commits
+    both cleared model ids, because a stale id is a 404 the user cannot
+    interpret. A failed commit now REVERTS the draft to the last confirmed
+    state and says `NOT SAVED — …`; the old code flashed an error and left
+    the unsaved value on screen.
+
+181. **The control panel is 312px and hugs its content.** It was 273px,
+    which left ~200px of label column after the icon gutter — too narrow for
+    a goal title and a count on one line. The sheet is now a card anchored
+    top-left with `max-height: 100%`, so the long case still scrolls inside
+    the frame. Three separate designs have now tried to balance this panel
+    and all three produced a void: buttons pinned to the floor behind a
+    `flex: 1` spacer, then centred groups to "fill" a stretched sheet, then
+    full-height with a footer. The rule now encoded is that content ends
+    where it ends, and short is the normal case because most installs have
+    one or two goals. `WORLDLINE_CAP` dropped 4 → 3 for the same reason.
+
+182. **`.wl-section` fields are separated by a 1px hairline, not by 14px of
+    air.** This turned Settings from a stack of disconnected boxes into
+    cards that read as cards, and reclaimed roughly 40px of a 747px window.
+    It is the single highest-value layout change in the redesign and it
+    cost one line of CSS.
+
+183. **`preview.html` exists so this never has to be reviewed by reading
+    CSS again.** `crates/wl-app/ui/preview.html` renders every screen's
+    markup against the real `public/wl.css` with no wasm and no Tauri
+    shell. It lives beside `index.html` rather than in `public/`, so `dx`'s
+    asset copier never ships it into the bundle. It was added because the
+    only available verification path was a headless screenshot of a
+    partially-booted wasm app — which caught nothing — and the defects above
+    were found by reading a stylesheet. Two of them (the cascade-ordering bug
+    in §11 of `wl.css`, and the dead `--wl-text-tertiary`) were only ever
+    visible rendered.
+
+## Two defects found in the shipped build (2026-09-27, user-reported)
+
+184. **A coral focus ring was drawn around the entire 420×747 frame on
+    every launch.** The focus-ring rule ended in a bare
+    `[tabindex]:focus-visible`, which has specificity (0,2,0) and therefore
+    beat `.wl-root`'s own `outline: none` at (0,1,0). The canvas root
+    carries `tabindex="0"` and `autofocus` precisely so it can receive the
+    ⌘+Enter and Escape keydowns — which means it is focused
+    *programmatically on every boot*, which means the ring was not an edge
+    case but the first thing on screen.
+
+    The fix is `:not(.wl-root)` on the ring rule rather than a stronger
+    `outline: none` on the root, and the distinction matters: those
+    `tabindex` roots are EVENT TARGETS, not controls. A focus ring exists
+    to tell a keyboard user where they are among things they can operate;
+    a wrapper focused so it can observe a keystroke is not one of them.
+    Deleting `[tabindex]` from the rule outright would have been shorter and
+    would have silently un-ringed any future genuinely-focusable custom
+    control, so the exclusion is explicit.
+
+    Note what the fix is NOT: the `tabindex` is still there and the element
+    is still focusable. Suppressing the ring does not suppress focus, so
+    ⌘+Enter and Escape are unaffected. The `focus-visible` frame in
+    `preview.html` exists to keep this honest.
+
+185. **The control panel is full height again, at the user's direction.**
+    Delta 181 had the sheet hug its content. The user rejected that: a
+    drawer that ends mid-air leaves the canvas visible beneath it, and
+    there is no way to tell from the outside whether the tap missed or the
+    surface is broken. The sheet is now `height: 100%`, top edge to bottom
+    edge.
+
+    That reverses the *fix* in delta 181, not its *diagnosis*. The void was
+    real — a 747px sheet whose content ends at 400px has 350px of nothing
+    in it. The mistake was treating "the panel is too tall" as the problem
+    when the problem was "the panel has nothing to do with the extra
+    height". So the slack now goes to the worldline readout
+    (`.wl-nav-worldlines { flex: 1 }`), which puts the empty space INSIDE
+    the list region where a list is expected to have room, instead of below
+    the whole panel. The fixed things — the primary action, the two System
+    rows — keep their rhythm at the top, and Settings stays pinned to the
+    floor where a thumb expects it.
+
+    `justify-content: space-between` on the scroll region was the other
+    candidate and is wrong: it spreads the gaps evenly and pulls the
+    primary action away from the top of the sheet, which reads as a broken
+    layout rather than a tall one.
+

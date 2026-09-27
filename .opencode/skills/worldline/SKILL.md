@@ -33,46 +33,110 @@ Use this skill when:
 
 ## 2. Typography Specification
 
-| Role | Font Family | Weight | Style | Size / Line-Height / Tracking | Usage |
-|---|---|---|---|---|---|
-| Morning Brief / Hero | `Doppio One`, `Georgia`, serif | 400 | Normal | 38px / 1.15 / `-0.025em` | Morning greeting & audit titles |
-| Hero Italic Accent | `Doppio One`, `Georgia`, serif | 400 | Italic | 38px / 1.15 / `-0.02em` | Editorial focus word ("*trajectory*") |
-| Active Directive | `DM Sans`, `Outfit`, sans-serif | 700 | Normal | 24px / 1.30 / `-0.03em` | Core command ("Write 300 words") |
-| Card / Sub-Header | `DM Sans`, `Outfit`, sans-serif | 600 | Normal | 16px / 1.35 / `-0.02em` | Milestone title, modal headers |
-| Instruction / Body | `DM Sans`, `Outfit`, sans-serif | 400 | Normal | 14px / 1.55 / `-0.01em` | Execution context, progressive steps |
-| Controls / CTA | `DM Sans`, `Outfit`, sans-serif | 600 | Normal | 14px / 1.25 / `-0.005em` | Pill action buttons, completion CTA |
-| Telemetry / Crypto | `ui-monospace`, `SF Mono`, monospace | 500 | Normal | 12px / 1.35 / `+0.04em` | Timers, BIP-39 words, HLC indicators |
+**12px is the floor. Nothing in this product is rendered below it.** This is
+the single most load-bearing rule in this section, and it is stated first
+because the previous revision of this file was already below its own floor:
+the stylesheet had drifted to 9px and 10px in twenty-eight declarations, and
+a page ended up stacking three label tiers at 11px / 11px / 12px that
+differed from each other by one pixel of letter-spacing. At 420px wide those
+are not labels, they are texture. If a new element seems to need 11px, it
+needs *less content*, not smaller type.
+
+| Token | Size | Family | Weight | Role |
+|---|---|---|---|---|
+| `--t-display` | 30px | `Doppio One`, `Georgia`, serif | 400 | Hero: boot wordmark, empty-state statement, seed-phrase title |
+| `--t-page` | 24px | `Doppio One`, `Georgia`, serif | 400 | Page title, centred |
+| `--t-directive` | 24px | `DM Sans`, sans-serif | 700 | **The** active directive |
+| `--t-title` | 17px | `DM Sans`, sans-serif | 600 | Card / section / modal heading |
+| `--t-lead` | 16px | `DM Sans`, sans-serif | 500–600 | A value worth reading; primary CTA |
+| `--t-body` | 15px | `DM Sans`, sans-serif | 400 | Body copy, nav rows, model display names |
+| `--t-caption` | 13px | `DM Sans`, sans-serif | 400–500 | Notes, hints, field labels, empty states |
+| `--t-mono-lead` | 13px | `ui-monospace` | 500 | **Ids you read character by character** |
+| `--t-mono` | 12px | `ui-monospace` | 500 | Telemetry, counts, HLC, chips, keys |
+
+Three families, four weights, one floor. `--t-mono-lead` exists separately
+from `--t-mono` for one reason: a model id is *the value that gets sent*, and
+it is compared character by character against a catalog. Rendering it at
+the telemetry size made `nvidia/nemotron-3.5-lightning:free` a squeezed
+smudge. A seed word and a relay URL are the same class of thing — an exact
+string — and get the same treatment.
+
+### Group identity comes from size, not from case
+
+**Section headings are 17px sans, sentence case. They are not uppercase
+monospace micro-caps.** This reverses the previous specification, which
+called for 10–11px mono caps, and it is the largest single legibility win
+in the system. Uppercase small mono was doing a job — making a label
+distinguishable from the content beneath it — by a means that does not
+survive a 420px window.
+
+Identity now comes from *size and weight relative to what is labelled*,
+which survives any viewport. `.wl-section-title` is 17px/600 in
+`--wl-text-primary` against 15px/500 body and 13px/400 notes: the ladder is
+obvious without a single letterform trick.
+
+The mono eyebrow survives, at the 12px floor, for genuine telemetry groups
+only — HLC stamps, counts, a `MOCK DATA` marker, a `SEALED` chip. It is
+never a field label and never a section heading.
+
+### Three text steps, not four
+
+| Token | Dark | Light | Contrast on the card |
+|---|---|---|---|
+| `--wl-text-primary` | `#E5E2E0` | `#1D1C13` | 12.6:1 |
+| `--wl-text-secondary` | `#CAC6BC` | `#4A4740` | 9.9:1 |
+| `--wl-text-muted` | `#949087` | `#5E5A53` | 5.4:1 |
+
+Every step clears 5:1 against `--wl-surface-card`, which is what makes the
+small sizes usable. **A group label must be quieter than the rows it
+heads** — `--wl-text-muted`, not primary. There was a fourth step
+(`--wl-text-tertiary`) that was referenced by thirteen rules and defined in
+none of them; a declaration naming an undefined custom property is invalid
+at computed-value time and silently inherits, so those labels rendered
+*brighter* than the content beneath them. The token no longer exists, and
+the three-step ladder is short enough that a fourth step has nowhere
+honest to go.
 
 ### CSS Configuration
 ```css
 :root {
-  --font-directive: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-body: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-serif: 'Doppio One', Georgia, 'Times New Roman', serif;
 
-  --text-directive: 1.75rem;     /* 28px */
-  --text-directive-lead: 1.125rem;/* 18px */
-  --text-body: 0.9375rem;        /* 15px */
-  --text-caption: 0.8125rem;     /* 13px */
-  --text-mono-hud: 0.75rem;      /* 12px */
+  --t-display: 30px;  --t-page: 24px;  --t-directive: 24px;
+  --t-title: 17px;    --t-lead: 16px;  --t-body: 15px;
+  --t-caption: 13px;  --t-mono-lead: 13px;  --t-mono: 12px;
 }
 
-.display-directive-title {
-  font-family: var(--font-directive);
+/* The one thing in the app at --t-directive. */
+.wl-directive-title {
+  font-family: var(--font-sans);
   font-weight: 700;
-  font-size: var(--text-directive);
-  line-height: 1.25;
-  letter-spacing: -0.03em;
-  color: var(--color-text-primary);
+  font-size: var(--t-directive);
+  line-height: 1.3;
+  letter-spacing: -0.025em;
+  color: var(--wl-text-primary);
 }
 
-.hud-mono-tag {
+/* A section heading. NOT uppercase, NOT mono. See §2. */
+.wl-section-title {
+  font-family: var(--font-sans);
+  font-size: var(--t-title);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  color: var(--wl-text-primary);
+}
+
+/* Telemetry only. Never a field label, never a section heading. */
+.wl-eyebrow {
   font-family: var(--font-mono);
   font-weight: 500;
-  font-size: var(--text-mono-hud);
-  letter-spacing: 0.05em;
+  font-size: var(--t-mono);
+  letter-spacing: 0.09em;
   text-transform: uppercase;
+  color: var(--wl-text-muted);
 }
 ```
 
@@ -204,10 +268,40 @@ otherwise empty 273px sheet was the old drawer, and the void above them
 was the design: a menu that only routes to other menus contradicts a
 product whose premise is that you should never be browsing. The panel
 now answers "where am I?" without leaving the canvas — a primary action,
-a **System Telemetry** group (Entropy Log, Trajectory), an **Active
-Worldlines** readout, and Settings. The worldlines are a *readout*: no
-hover state, no pointer cursor, because a tappable row with no detail
-page behind it is a dead affordance.
+a **System** group (Entropy Log, Trajectory), an **Active worldlines**
+readout, and Settings. The worldlines are a *readout*: no hover state, no
+pointer cursor, because a tappable row with no detail page behind it is a
+dead affordance.
+
+**The panel is full height — top edge to bottom edge of the frame.**
+312px wide, `height: 100%`, anchored top-left. A drawer that stops halfway
+reads as a card that failed to open, not as a deliberate choice: the canvas
+stays visible beneath it and there is no way to tell from the outside whether
+the tap missed or the surface broke. This was tried the other way (hugging
+content, `max-height: 100%`) and the user rejected it in the first build
+that shipped.
+
+Full height creates a real problem — a 747px sheet whose content ends at
+400px has 350px of nothing in it — and the fix is **not** to shrink the
+panel. The slack goes to `.wl-nav-worldlines { flex: 1 }`, so the empty
+space lands INSIDE the readout region, where a list is expected to have
+room, and the fixed things (the primary action, the two System rows) keep
+their rhythm at the top with Settings pinned to the floor where a thumb
+expects it. `justify-content: space-between` on the scroll region is the
+wrong tool: it spreads the gaps evenly and pulls the primary action away
+from the top of the sheet.
+
+This is the fourth layout this panel has had. The first pinned two buttons
+to the floor behind a `flex: 1` spacer, where the spacer *was* the layout.
+The second centred the groups to "balance" a stretched sheet. The third
+hugged the content. All three manufactured a shape instead of reporting
+content, and the two voids were visible in every one.
+
+**Group labels in the panel are dimmer than the rows they head.** Mono
+eyebrow at the 12px floor, in `--wl-text-muted`, against 15px/500 rows in
+`--wl-text-primary`. When the group label is the *loudest* thing in the
+panel, the panel has no hierarchy — which is precisely what the dead
+`--wl-text-tertiary` bug produced.
 
 ```html
 <div class="wl-float-layer">
@@ -219,43 +313,78 @@ page behind it is a dead affordance.
 </div>
 ```
 
-**Icons are inline SVG, never font glyphs.** A glyph's weight, spacing, and (on many Linux desktops) its colour are chosen by the font stack — which is exactly where the drawer's settings-icon colour and size drift came from. Every icon strokes with `currentColor` so it inherits the theme tokens for free, is sized by CSS only (`.wl-icon` + a per-icon modifier, never a `width`/`height` attribute), and is `aria-hidden` because the control around it already carries the real `aria-label`. The `✚` create-goal glyph is the one deliberate exception: a plus is unambiguous at 20px and never suffered the drift.
+**Icons are inline SVG, never font glyphs — there are no exceptions left.**
+A glyph's weight, spacing, and (on many Linux desktops) its colour are
+chosen by the font stack, not by us. Every icon strokes with `currentColor`
+so it inherits the theme tokens for free, is sized by CSS only (`.wl-icon` +
+a per-icon modifier, never a `width`/`height` attribute), and is
+`aria-hidden` because the control around it already carries the real
+`aria-label`.
+
+This section previously excepted three glyphs — `✚` on the control panel's
+primary action, `›` on every trailing row, `✕` in the choice sheet — on the
+reasoning that a plus is "unambiguous at 20px". That was true of their
+*shape* and false of their *rendering*: the same three marks sat at three
+different sizes and baselines across three sheets because the font stack
+decided, which is exactly the drift the SVG set exists to remove. All three
+are paths now (`IconNew`, `IconChevron`, `IconClose`).
+
+The one remaining typographic mark is the evening check-in's `●` / `◐` / `○`.
+That one is a *state* rendered as one figure at three fill levels, and a
+half-filled circle is a typographic idiom with no universally recognised
+drawn equivalent. It is at 18px, in `--wl-text-secondary`, and it is the
+only glyph in the app.
 
 **The settings mark is a gear**, drawn as one filled path with `fill-rule="evenodd"`: the outer sub-path is the notched rim, the trailing circle sub-path is the hub hole, and evenodd knocks it out. It is therefore the one icon that is `fill: currentColor` while the others are stroked. Its geometry was measured off a reference mark (outer r 8.6 on a 24 grid, hole r 3.4 ≈ 0.40 of outer, root r 7.0, eight teeth at ±15°) after two attempts that were rendered and rejected: a stroked ring-plus-teeth version reads as a **sun**, and deeper/wider notches read as a **ship's wheel**. Rejected-by-rendering is the normal path for icon geometry here — none of these three could be judged by reading the path data.
 
+```html
+<div class="wl-float-layer">
+  <button class="wl-circle-btn wl-float-menu" aria-label="Open navigation">
+    <svg class="wl-icon-menu wl-icon" view_box="0 0 18 18" fill="none"
+         stroke="currentColor" stroke_width="1.6" stroke_linecap="round"
+         aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" /></svg>
+  </button>
+</div>
+```
+
+**There is one circular control, and it is defined once.** `.wl-circle-btn`
+is the 38px raised circle used by the canvas menu *and* by the back chevron
+on every secondary page. These were two separate 34px definitions with
+different offsets, so the two controls that occupy the same corner on the
+same screen did not line up — which is most of what "the hamburger looks
+inconsistent" meant in practice. One class, both call sites.
+
+The canvas's button also carried a `wl-float-menu` modifier with no rule
+anywhere in the stylesheet, so its specificity was a mirage. The modifier
+now exists and does exactly one thing: un-absolutise it for the page header.
+
 ```css
-/* Transparent to input: the layer spans the width but must not eat
-   clicks meant for the directive card beneath it. */
-.wl-float-layer {
-  position: absolute; top: 0; left: 0; right: 0; z-index: 10;
-  display: flex; align-items: flex-start; justify-content: space-between;
-  padding: 14px 16px 0;
-  pointer-events: none;
-}
-.wl-float-btn {
-  pointer-events: auto;
+.wl-circle-btn {
+  pointer-events: auto; position: relative;
   display: inline-flex; align-items: center; justify-content: center;
-  width: 34px; height: 34px; border-radius: 50%;
+  width: 38px; height: 38px; flex-shrink: 0;
+  border-radius: 50%;
   border: 1px solid var(--wl-border-subtle);
   background: var(--wl-surface-elevated);
-  color: var(--wl-text-primary);
-  font-size: 15px; line-height: 1; cursor: pointer;
-  /* The raised look: elevated surface + soft drop shadow, so it reads
-     as sitting above the content rather than embedded in it. */
-  box-shadow: 0 2px 8px rgba(19, 19, 18, 0.55);
-  /* Must name a token that EXISTS (`--duration-instant`). This once read
-     `var(--duration-fast)`, which is defined nowhere — the declaration
-     was invalid, so the transition silently collapsed to 0s. */
+  color: var(--wl-text-primary); line-height: 1; cursor: pointer;
+  /* The raised look: elevated surface + soft drop shadow, so it reads as
+     sitting above the content rather than embedded in it. */
+  box-shadow: var(--wl-raise);
   transition: transform var(--duration-instant) var(--ease-tactile),
               background-color var(--duration-instant) var(--ease-tactile);
 }
-.wl-float-btn svg { display: block; }
+.wl-circle-btn:hover:not(:disabled) { background: var(--wl-surface-high); }
+.wl-circle-btn svg { display: block; }
 ```
 
 Two rules this section now encodes:
 
 - **There is no session timer.** The `MM:SS` readout, its 1 Hz ticker, and the whole `TimerSession` state were removed 2026-09-26. The canvas shows no elapsed time at all; work is bounded by the directive, not by a clock. `elapsed_secs` survives only for sync freshness (`SYNCED · 42s ago`) in the telemetry drawer, which is not timer-shaped — do not reintroduce a timer from it.
-- **`.wl-hud` survives only as a generic inline status row** used by `byok.rs`. Its former `border-bottom` + `padding-bottom` (what made it read as a full-width bar) must **not** be restored.
+- **`.wl-hud` and `.wl-chip` each have exactly one definition.** Both were
+  declared twice with different geometry, and the second silently won
+  everywhere — which is why the "sealed" key chip in Settings and the
+  "blocked" chip in the Entropy Log were one class at two sizes. A duplicate
+  selector is not a style, it is a coin flip.
 
 ### A2. Centred Page Header (secondary screens)
 Goal creation and Settings open with the same fixed header: a **centred** title with a floating back chevron in the left gutter. The header sits outside the scroll region with `flex-shrink: 0`, so on a long page the way back never scrolls out of reach.
@@ -352,25 +481,25 @@ The focal heart of the application. Presents only one directive.
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 .wl-directive-step-badge {
-  font-family: var(--font-mono-telemetry); font-size: 11px;
+  font-family: var(--font-mono); font-size: var(--t-mono); font-weight: 500;
   text-transform: uppercase; color: var(--wl-accent-coral);
   letter-spacing: 0.05em; margin-bottom: 14px;
 }
 .wl-directive-title {
-  font-family: var(--font-sans-directive);
-  font-size: 24px; font-weight: 700;
+  font-family: var(--font-sans);
+  font-size: var(--t-directive); font-weight: 700;
   line-height: 1.3; letter-spacing: -0.025em;
   color: var(--wl-text-primary); margin: 0 0 14px 0;
 }
 .wl-directive-instruction {
-  font-size: 14px; line-height: 1.6;
+  font-size: var(--t-body); line-height: 1.6;
   color: var(--wl-text-secondary); margin: 0 0 24px 0;
 }
 .wl-code {
-  font-family: var(--font-mono-telemetry);
+  font-family: var(--font-mono);
   background: var(--wl-surface-elevated);
   padding: 2px 6px; border-radius: 4px;
-  color: var(--wl-text-primary); font-size: 12px;
+  color: var(--wl-text-primary); font-size: var(--t-mono);
 }
 .wl-progress-track {
   width: 100%; height: 4px;
@@ -476,20 +605,83 @@ Tactile 12-word recovery display during cryptographic account initialization.
 ```css
 .wl-seed-vault { display: flex; flex-direction: column; gap: 20px; }
 .wl-serif-title {
-  font-family: var(--font-serif); font-size: 28px; font-weight: 400;
+  font-family: var(--font-serif); font-size: var(--t-display); font-weight: 400;
   margin: 0 0 8px 0; color: var(--wl-text-primary);
 }
 .wl-italic-accent { font-style: italic; color: var(--wl-accent-coral); }
-.wl-seed-sub { font-size: 13px; line-height: 1.5; color: var(--wl-text-muted); margin: 0; }
+.wl-seed-sub { font-size: var(--t-caption); line-height: 1.5; color: var(--wl-text-muted); margin: 0; }
 .wl-seed-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .wl-seed-token {
   background-color: var(--wl-surface-card); border: 1px solid var(--wl-border-subtle);
-  border-radius: var(--wl-radius-pill); padding: 8px 12px;
-  font-family: var(--font-mono-telemetry); font-size: 13px; color: var(--wl-text-primary);
-  display: flex; align-items: center; gap: 8px;
+  border-radius: var(--wl-radius-pill); padding: 10px 14px;
+  /* The 12 seed words are the ONE thing in this product that must be
+     transcribed by hand, so they get --t-mono-lead rather than the
+     telemetry size. */
+  font-family: var(--font-mono); font-size: var(--t-mono-lead);
+  color: var(--wl-text-primary);
+  display: flex; align-items: center; gap: 10px;
 }
-.wl-seed-num { color: var(--wl-text-muted); font-size: 10px; }
+.wl-seed-num { color: var(--wl-text-muted); font-size: var(--t-mono); }
 ```
+
+### E. The Value Row
+Every "this is a value chosen from a list, not typed into" control is this
+one component. It replaced three different-looking controls in Settings —
+and one of the three was a native `<select>` that WebKitGTK painted as a
+**near-white field carrying #E5E2E0 text** inside a graphite card. It
+shipped twice: once "fixed" with `color-scheme: dark` plus
+`appearance: none`, and once restyled. Neither declaration reliably reaches
+the widget.
+
+**Settings now contains no native form widget at all.** The compose
+screen's target-date horizon is the app's last `<select>`, and it earns the
+exemption because it is a small closed control with no catalog to search and
+no history of painting itself white.
+
+```html
+<button class="wl-value-row">
+  <span class="wl-value-row-label">Architect model</span>
+  <span class="wl-value-row-value">anthropic/claude-sonnet-5</span>
+  <span class="wl-value-row-meta">1.0M context</span>
+  <span class="wl-value-row-go"><svg class="wl-icon wl-icon-chevron" …></svg></span>
+</button>
+```
+
+Three rules:
+
+- **The value is 13px mono, not 12px.** A model id is *the value that gets
+  sent* and is compared character by character against a catalog. At the
+  telemetry size with `word-break: break-all` it was one squeezed line; at
+  `--t-mono-lead` with a two-line clamp it is readable. A value the user
+  must verify does not get the size reserved for numbers they merely scan.
+- **The meta line is a fact or it is absent.** No placeholder, no `—`, no
+  "unknown". A rendered placeholder sits under every unset slot and trains
+  the eye to skip the line.
+- **The label is `--wl-text-secondary` and the value is
+  `--wl-text-primary`.** The label introduces; it does not compete.
+
+### F. Settings Commit Model
+**Every field commits on `change` — blur or Enter, never on `input`.** There
+is no Save button and there is no "appearance switches save themselves"
+footnote, because that footnote was an admission that the two-path model was
+wrong.
+
+`settings_save` overwrites the *whole* settings row, so a commit cannot be a
+patch. The rule is: **send the last shell-confirmed state with only the
+field the user just changed applied.** Flipping the theme therefore cannot
+save a half-typed relay URL, and picking a model cannot save a half-typed
+API key. The behaviour lives in one pure function (`commit_payload`) and is
+tested per-field.
+
+One field is deliberately wider than its name: changing the *provider* also
+commits both cleared model ids, because a model id is provider-specific and
+a stale one produces a 404 the user has no way to interpret. Both the draft
+and the payload must clear them, or the rows clear on screen while the old
+ids stay in the database.
+
+A failed commit reverts the draft to the last confirmed state and says so
+(`NOT SAVED — …`). Showing a value the database does not hold is worse than
+an error message.
 
 ---
 
@@ -497,16 +689,17 @@ Tactile 12-word recovery display during cryptographic account initialization.
 
 ### Do:
 - **Lock the Viewport:** Constrain the desktop UI to `420px × 747px` (`resizable: false`, `maximizable: false`). Never allow layout stretch on widescreen monitors.
+- **Never render below 12px.** The whole point of §2 is the floor. If something does not fit at 12px, it has too much text — shorten it, do not shrink it.
 - **Enforce the Single-Command Rule:** Only one active directive container may be rendered in the DOM at any given execution cycle.
 - **Emphasize Primary CTA Contrast:** The execution button (`.wl-btn-primary`) must always be rendered in warm cream `#DAD5C7` to act as an unequivocal behavioral magnet.
-- **Render Telemetry in Monospace:** All durations, HLC sequence stamps, and sync counts must use `var(--font-mono-telemetry)` to prevent tabular jitter. (Countdowns no longer exist — the session timer was removed 2026-09-26 — but the rule stands for whatever numeric readout comes next.)
+- **Render Telemetry in Monospace:** All durations, HLC sequence stamps, and sync counts must use `var(--font-mono)` at `var(--t-mono)` to prevent tabular jitter. Exact strings the user must verify — model ids, seed words, relay URLs — use `--t-mono-lead` instead. (Countdowns no longer exist — the session timer was removed 2026-09-26 — but the rule stands for whatever numeric readout comes next.)
 - **Require Confirmation on Escape Hatch:** The escape hatch (now `Escape`, formerly the `.wl-btn-escape` button) must open a modal requiring the user to categorize the stall (`Blocked`, `Scope`, `Energy`) before unmounting the directive.
-- **Use switches for boolean preferences.** Theme and window pin are `.wl-switch[role=switch]` with `aria-checked`, not a `<select>` and not a label-bearing button. They apply **and persist immediately** — a theme toggle that only takes effect on Save is a broken control, because you cannot evaluate a theme you are not allowed to see. Text fields still wait for the page's Save button; that two-path model is deliberate.
-- **A switch persists from shell-confirmed state, never from the local draft.** `settings_save` writes every field, so persisting the draft would silently commit whatever the user had half-typed into an unrelated field.
+- **Use switches for boolean preferences.** Theme is `.wl-switch[role=switch]` with `aria-checked`, not a `<select>` and not a label-bearing button. It applies **and persists immediately** — a theme toggle that only takes effect on save is a broken control, because you cannot evaluate a theme you are not allowed to see. (The window-pin switch is gone with the feature; PRD delta 175.)
+- **Every settings field commits on `change`, and every commit is scoped to one field.** See §4.F. A commit sends the last shell-confirmed state with one field applied — never the whole draft, and never the whole row.
 - **Switch state colours are absolute, not theme-derived.** The switch encodes "which theme is selected", not "what is currently rendered"; flipping its tokens with `data-theme` would invert the control the instant it took effect.
-- **The control panel is a readout, not a browser.** Active Worldlines rows carry no hover state and no pointer cursor. Do not make them tappable without a goal-detail page to land on.
+- **The control panel is a readout, not a browser.** Active worldlines rows carry no hover state and no pointer cursor. Do not make them tappable without a goal-detail page to land on.
 - **An inert number must say it is inert.** `estimate_adjustment` is observed and not applied (PRD delta 33); every surface showing it repeats that. A figure that looks like a setting but changes nothing is the one thing this system will not ship.
-- **Never fabricate a read-out under the mock.** Every `dx serve` response is canned. Anything the drawer renders from a command says `· MOCK` when `transport()` reports the mock, as the model catalog already does (PRD delta 148).
+- **Never fabricate a read-out under the mock.** Every `dx serve` response is canned. Anything the panel renders from a command says `· MOCK` when `transport()` reports the mock, as the model catalog already does (PRD delta 148).
 
 ### Don't:
 - **Never display a scrollable list of future tasks:** The home screen must never show what's coming up this afternoon or tomorrow.
@@ -516,6 +709,13 @@ Tactile 12-word recovery display during cryptographic account initialization.
 - **Never put a control back in the canvas chrome for convenience.** Sync moved to Settings deliberately, and the Complete/Bailout footer was removed entirely; the canvas keeps exactly one floating control.
 - **Never split a compose field into a title field plus a details field.** The user types intent in their own words and the architect names the goal; see §4.A3. Corollary: a goal title derived from a raw fragment must be clipped before it reaches `create_goal`, because the manual path seeds the first directive with that title verbatim.
 - **Never accent a page title.** Page titles are one plain serif line in `--wl-text-primary`. The coral beacon belongs to the active step badge, the create-goal button, and cryptographic security badges — not to a heading, and not to a decorative word inside one.
+- **Never label a group with something smaller or louder than what it labels.** A 10px uppercase group heading above 15px rows is the exact failure that made the control panel read as inconsistent: the group became the loudest object on screen. Labels are 12px mono muted; content is 15px primary.
+- **Never ship a native `<select>` you cannot fully style.** WebKitGTK paints its own closed state and `appearance: none` plus `color-scheme` do not reliably reach it. It shipped as a white box with linen text, twice. Settings has none.
+- **Never style the same class twice.** A duplicate selector is not a style, it is a coin flip on which one the engine picks — and it is invisible until someone notices the two call sites disagree.
+- **Never balance a panel by manufacturing empty space.** No `flex: 1` spacer, no centring to "fill" a stretched sheet. Content ends where it ends.
+- **Never name a token you have not defined.** `var(--foo)` with no `--foo` is invalid at computed-value time and silently inherits. That one bug inverted the control panel's entire hierarchy, and it was invisible in the source because the stylesheet parsed cleanly.
+- **Never ring a container.** The focus ring is for things a keyboard user can *operate*. `.wl-root` carries `tabindex="0"` and `autofocus` only so it can receive ⌘+Enter and Escape, which makes it an event target rather than a control — and a bare `[tabindex]:focus-visible` selector (specificity 0,2,0) beat its own `outline: none` (0,1,0), drawing a coral ring around the entire 420×747 frame on every launch. The rule excludes `.wl-root` explicitly; do not "simplify" that back to a bare `[tabindex]`, which would also un-ring a future real custom control. Suppressing the ring does not suppress focus, so the shortcuts are unaffected.
+- **Never let a drawer stop short of its frame's edge.** The control panel is `height: 100%`, top to bottom. A sheet that hugs its content and ends mid-air leaves the canvas showing beneath it, and the user cannot tell whether the tap missed or the surface broke. When a full-height panel would leave a void, the fix is to give the slack to the region that can grow (the worldline readout), never to shrink the panel.
 
 ---
 
@@ -528,8 +728,19 @@ Tactile 12-word recovery display during cryptographic account initialization.
 
 ## 7. Quick Start Checklist
 1. Bind `:root` tokens: Canvas `#131312`, Card `#20201F`, CTA `#DAD5C7`, Accent Coral `#E26D52`. (The card token is `#20201F`; an older revision of this file said `#1C1C1B` while contradicting itself two sections earlier.)
-2. Restrict root viewport bounds to `420px × 747px` fixed portrait mode.
-3. Wire typography: `Doppio One` for editorial headings and page titles, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry.
-4. Render exactly **one** primary directive card (`.wl-directive-card`) under exactly **one** floating control (the menu).
-5. Wire keyboard shortcuts: `⌘+Enter` triggers completion; `Escape` triggers the frictionful bailout drawer.
-6. Secondary pages centre their title over an absolutely-positioned back chevron; boolean preferences are switches that persist immediately.
+2. Use only the nine type tokens in §2. **Nothing below 12px.** Section headings are `.wl-section-title` (17px sans, sentence case) — never small uppercase mono.
+3. Restrict root viewport bounds to `420px × 747px` fixed portrait mode.
+4. Wire typography: `Doppio One` for editorial headings and page titles, `DM Sans` (700 bold) for the active Stackelberg command, `ui-monospace` for telemetry and for exact strings.
+5. Render exactly **one** primary directive card (`.wl-directive-card`) under exactly **one** floating control (`.wl-circle-btn`, the same class every back chevron uses).
+6. Wire keyboard shortcuts: `⌘+Enter` triggers completion; `Escape` triggers the frictionful bailout drawer.
+7. Secondary pages centre their title over an absolutely-positioned back chevron. Every settings field commits on `change`, scoped to that one field; there is no Save button.
+8. Any "choose a value" control is a `.wl-value-row` opening a bottom sheet. No native `<select>` in Settings.
+9. **Before committing, diff the token list**: every `var(--x)` in the stylesheet must have a matching `--x:`. An undefined one is silent.
+
+### Verifying a change
+`crates/wl-app/ui/preview.html` renders every screen's markup against the
+real `public/wl.css` with no wasm and no Tauri shell. Open it directly in a
+browser. It exists because the alternative was reviewing a design by reading
+a stylesheet — which is how thirteen rules came to reference a token that
+was defined nowhere, and how a cascade ordering mistake shipped a
+non-full-height control panel. **Render it.**
