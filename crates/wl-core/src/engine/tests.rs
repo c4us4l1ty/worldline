@@ -11,7 +11,7 @@ pub(crate) fn setup_full() -> Repos {
     let conn = open_in_memory().unwrap();
     let r = Repos::new(conn, 1);
     let g = r
-        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), None)
+        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), crate::domain::COMPLEXITY_DEFAULT, None)
         .unwrap();
     let m1 = r
         .create_milestone(&g.id, "Crypto core", None, 0, None)
@@ -28,10 +28,9 @@ pub(crate) fn setup_full() -> Repos {
         None,
         20,
         1,
-        "2026-09-13",
+        "2026-09-13", None,
         &[],
-        None,
-    )
+        None)
     .unwrap();
     // Progressive 60-min directive today (2 phases).
     r.create_directive(
@@ -40,7 +39,7 @@ pub(crate) fn setup_full() -> Repos {
         Some("Draft prose, no editing"),
         60,
         2,
-        "2026-09-13",
+        "2026-09-13", None,
         &[
             (
                 "Open IDE and write the function signature".into(),
@@ -49,8 +48,7 @@ pub(crate) fn setup_full() -> Repos {
             ),
             ("Implement core loop logic".into(), None, 25),
         ],
-        None,
-    )
+        None)
     .unwrap();
     r
 }
@@ -297,9 +295,9 @@ fn idle_when_queue_empty() {
     let e = Engine::new(&r, None);
     assert_eq!(e.activate_next(TODAY).unwrap(), EngineOutcome::Idle);
     // Future-scheduled directives do not activate early.
-    let g = r.create_goal("G", None, None, None).unwrap();
+    let g = r.create_goal("G", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
     let m = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
-    r.create_directive(&m.id, "Tomorrow task", None, 20, 1, "2026-09-14", &[], None)
+    r.create_directive(&m.id, "Tomorrow task", None, 20, 1, "2026-09-14", None, &[], None)
         .unwrap();
     assert_eq!(e.activate_next(TODAY).unwrap(), EngineOutcome::Idle);
     assert!(matches!(
@@ -318,7 +316,7 @@ fn overdue_directives_surface_first() {
         .into_iter()
         .nth(1)
         .unwrap();
-    r.create_directive(&m2.id, "Overdue task", None, 10, 1, "2026-09-10", &[], None)
+    r.create_directive(&m2.id, "Overdue task", None, 10, 1, "2026-09-10", None, &[], None)
         .unwrap();
     let e = engine(&r);
     let out = e.activate_next(TODAY).unwrap();
@@ -376,7 +374,7 @@ fn engine_rejects_malformed_dates_before_any_write() {
 
 /// Builds a 2-phase, 60-minute progressive directive.
 fn progressive_directive(r: &Repos, identity: Option<&Identity>) -> Directive {
-    let g = r.create_goal("Long haul", None, None, identity).unwrap();
+    let g = r.create_goal("Long haul", None, None, crate::domain::COMPLEXITY_DEFAULT, identity).unwrap();
     let m = r
         .create_milestone(&g.id, "Phase work", None, 0, identity)
         .unwrap();
@@ -386,10 +384,9 @@ fn progressive_directive(r: &Repos, identity: Option<&Identity>) -> Directive {
         None,
         60,
         2,
-        "2099-01-01",
+        "2099-01-01", None,
         &[("Warm up".into(), None, 20), ("Push".into(), None, 40)],
-        identity,
-    )
+        identity)
     .unwrap()
 }
 
@@ -464,7 +461,7 @@ fn ensure_phases_is_idempotent_and_preserves_good_rows() {
 #[test]
 fn a_directive_too_short_to_split_fails_with_an_actionable_error() {
     let r = setup_full();
-    let g = r.create_goal("Impossible", None, None, None).unwrap();
+    let g = r.create_goal("Impossible", None, None, crate::domain::COMPLEXITY_DEFAULT, None).unwrap();
     let m = r
         .create_milestone(&g.id, "Too many steps", None, 0, None)
         .unwrap();
@@ -476,10 +473,9 @@ fn a_directive_too_short_to_split_fails_with_an_actionable_error() {
             None,
             5,
             10,
-            "2099-01-01",
+            "2099-01-01", None,
             &vec![("s".into(), None, 1); 10],
-            None,
-        )
+            None)
         .unwrap();
     r.conn
         .lock()

@@ -498,13 +498,21 @@ fn apply_upsert(
     use wl_core::crdt::CrdtTable;
     match table {
         CrdtTable::Goals => {
+            // `complexity` is the user's own rating (1-5) and the prior for
+            // the calibration estimator. An OLD peer's payload has no such
+            // key, so it reads as the default rather than quarantining the
+            // whole goal — a device that has not been updated must not be
+            // able to wedge this one. Same rule as `hotkey` /
+            // `always_on_top` (PRD deltas 169, 175).
             conn.execute(
-                "INSERT INTO goals (id,title,description,target_date,status,hlc_timestamp)
-                 VALUES (?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(id) DO UPDATE SET title=?2,description=?3,target_date=?4,status=?5,hlc_timestamp=?6",
+                "INSERT INTO goals (id,title,description,target_date,status,complexity,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(id) DO UPDATE SET title=?2,description=?3,target_date=?4,status=?5,complexity=?6,hlc_timestamp=?7",
                 rusqlite::params![
                     record_id, get(f, "title"), get(f, "description"), get(f, "target_date"),
-                    get(f, "status").unwrap_or("active".into()), ts_s
+                    get(f, "status").unwrap_or("active".into()),
+                    wl_core::domain::clamp_complexity(f["complexity"].as_i64().unwrap_or(3)),
+                    ts_s
                 ],
             )?;
         }
@@ -521,13 +529,23 @@ fn apply_upsert(
             )?;
         }
         CrdtTable::Directives => {
+            // `depends_on` is the one prerequisite directive id, read from
+            // the payload and landing straight in the column with no
+            // cross-check — it is a replicated field, so a peer can send a
+            // cycle or a reference this device does not have. That is safe
+            // because `Repos::runnable_directives` checks one hop and never
+            // walks: a cycle is unsatisfiable, so both of its nodes simply
+            // stay queued, and a missing prerequisite counts as unmet until
+            // the peer's row arrives. It has to land verbatim: rewriting
+            // the edge here would make the local copy disagree with the
+            // merge head that decided this op won.
             conn.execute(
                 "INSERT INTO directives (id,milestone_id,title,execution_context,estimated_minutes,
-                    progressive_step,progressive_total,state,scheduled_for_date,hlc_timestamp)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                    progressive_step,progressive_total,state,scheduled_for_date,depends_on,hlc_timestamp)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
                  ON CONFLICT(id) DO UPDATE SET milestone_id=?2,title=?3,execution_context=?4,
                     estimated_minutes=?5,progressive_step=?6,progressive_total=?7,state=?8,
-                    scheduled_for_date=?9,hlc_timestamp=?10",
+                    scheduled_for_date=?9,depends_on=?10,hlc_timestamp=?11",
                 rusqlite::params![
                     record_id,
                     get(f, "milestone_id"),
@@ -538,6 +556,7 @@ fn apply_upsert(
                     f["progressive_total"].as_i64().unwrap_or(1),
                     get(f, "state").unwrap_or("queued".into()),
                     get(f, "scheduled_for_date").unwrap_or("1970-01-01".into()),
+                    get(f, "depends_on"),
                     ts_s
                 ],
             )?;

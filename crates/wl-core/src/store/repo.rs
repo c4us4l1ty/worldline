@@ -2,6 +2,7 @@
 //! enqueues the corresponding CRDT op into `crdt_outbox` (encrypted
 //! with the identity's payload key) so sync is durable-by-default.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -238,6 +239,7 @@ impl Repos {
         title: &str,
         description: Option<&str>,
         target_date: Option<&str>,
+        complexity: i64,
         identity: Option<&Identity>,
     ) -> Result<Goal, StoreError> {
         check_text("goal title", title, MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
@@ -246,6 +248,8 @@ impl Repos {
         if let Some(d) = target_date {
             check_date("goal target date", d).map_err(StoreError::Invalid)?;
         }
+        crate::domain::check_complexity("goal complexity", complexity)
+            .map_err(StoreError::Invalid)?;
         let id = new_id("goal");
         let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
@@ -256,17 +260,19 @@ impl Repos {
             description: description.map(Into::into),
             target_date: target_date.map(Into::into),
             status: GoalStatus::Active,
+            complexity,
             hlc_timestamp: ts,
         };
         tx.execute(
-            "INSERT INTO goals (id, title, description, target_date, status, hlc_timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO goals (id, title, description, target_date, status, complexity, hlc_timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id,
                 title,
                 description,
                 target_date,
                 "active",
+                complexity,
                 ts.to_string()
             ],
         )?;
@@ -286,8 +292,7 @@ impl Repos {
     pub fn active_goal(&self) -> Result<Option<Goal>, StoreError> {
         self.lock_conn()
             .query_row(
-                "SELECT id, title, description, target_date, status, hlc_timestamp
-                 FROM goals WHERE status = 'active' ORDER BY hlc_timestamp LIMIT 1",
+                &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE status = 'active' ORDER BY hlc_timestamp LIMIT 1"),
                 [],
                 goal_row,
             )
@@ -298,8 +303,7 @@ impl Repos {
     pub fn goal(&self, id: &str) -> Result<Option<Goal>, StoreError> {
         self.lock_conn()
             .query_row(
-                "SELECT id, title, description, target_date, status, hlc_timestamp
-                 FROM goals WHERE id = ?1",
+                &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE id = ?1"),
                 [id],
                 goal_row,
             )
@@ -467,8 +471,7 @@ impl Repos {
         }
         if identity.is_some() {
             let g = tx.query_row(
-                "SELECT id, title, description, target_date, status, hlc_timestamp
-                 FROM goals WHERE id = ?1",
+                &format!("SELECT {GOAL_COLUMNS} FROM goals WHERE id = ?1"),
                 [id],
                 goal_row,
             )?;
@@ -551,6 +554,7 @@ impl Repos {
         estimated_minutes: i64,
         progressive_total: i64,
         scheduled_for_date: &str,
+        depends_on: Option<&str>,
         phases: &[(String, Option<String>, i64)], // (title, instruction, minutes)
         identity: Option<&Identity>,
     ) -> Result<Directive, StoreError> {
@@ -559,6 +563,8 @@ impl Repos {
             .map_err(StoreError::Invalid)?;
         check_minutes("directive estimate", estimated_minutes).map_err(StoreError::Invalid)?;
         check_date("directive date", scheduled_for_date).map_err(StoreError::Invalid)?;
+        check_optional_text("prerequisite", depends_on, MAX_TITLE_CHARS)
+            .map_err(StoreError::Invalid)?;
         for (pt, pi, pm) in phases {
             check_text("phase title", pt, MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
             check_optional_text("phase instruction", pi.as_deref(), MAX_CONTEXT_CHARS)
@@ -592,13 +598,15 @@ impl Repos {
             progressive_total,
             state: DirectiveState::Queued,
             scheduled_for_date: scheduled_for_date.to_string(),
+            depends_on: depends_on.map(str::to_string),
             hlc_timestamp: ts,
         };
         tx.execute(
             "INSERT INTO directives (id, milestone_id, title, execution_context,
-                estimated_minutes, progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'queued', ?7, ?8)",
-            params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, ts.to_string()],
+                estimated_minutes, progressive_step, progressive_total, state, scheduled_for_date,
+                depends_on, hlc_timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'queued', ?7, ?8, ?9)",
+            params![id, milestone_id, title, execution_context, estimated_minutes, progressive_total, scheduled_for_date, depends_on, ts.to_string()],
         )?;
         Self::emit_on(
             &tx,
@@ -796,16 +804,13 @@ impl Repos {
     }
 
     fn directive_on(conn: &Connection, id: &str) -> Result<Option<Directive>, StoreError> {
-        conn
-            .query_row(
-                "SELECT id, milestone_id, title, execution_context, estimated_minutes,
-                        progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
-                 FROM directives WHERE id = ?1",
-                [id],
-                directive_row,
-            )
-            .optional()
-            .map_err(StoreError::Sqlite)
+        conn.query_row(
+            &format!("SELECT {DIRECTIVE_COLUMNS} FROM directives WHERE id = ?1"),
+            [id],
+            directive_row,
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)
     }
 
     /// The single active directive (Stackelberg invariant: ≤1 active).
@@ -815,10 +820,10 @@ impl Repos {
     pub fn active_directive(&self) -> Result<Option<Directive>, StoreError> {
         self.lock_conn()
             .query_row(
-                "SELECT id, milestone_id, title, execution_context, estimated_minutes,
-                        progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
-                 FROM directives WHERE state = 'active'
-                 ORDER BY hlc_timestamp DESC, id ASC LIMIT 1",
+                &format!(
+                    "SELECT {DIRECTIVE_COLUMNS} FROM directives WHERE state = 'active'
+                     ORDER BY hlc_timestamp DESC, id ASC LIMIT 1"
+                ),
                 [],
                 directive_row,
             )
@@ -826,35 +831,187 @@ impl Repos {
             .map_err(StoreError::Sqlite)
     }
 
-    /// Queued directives scheduled on or before `date` (execution pool
-    /// for today — NOT exposed as a list in the UI; engine only).
+    /// Upper bound on the number of directive rows the runnable-filter's
+    /// state map will hold in memory at once.
+    ///
+    /// `MAX_DEPENDENCY_NODES` is a *guard*, not a real limit: a plan is
+    /// capped at 5 milestones × 32 directives, so a legitimate table is
+    /// 160 rows. It exists because the filter below reads the whole table
+    /// once per canvas load, and `progressive_total` has already proved
+    /// that a replicated integer will happily arrive as 10^9.
+    const MAX_DEPENDENCY_NODES: usize = 4096;
+
+    /// `id -> state` for every directive, or `None` past the guard above.
+    ///
+    /// One pass rather than a query per candidate: `runnable_directives`
+    /// runs on the canvas's hot path, and a per-row lookup would make
+    /// activation O(n) round trips through a `Mutex<Connection>`.
+    fn directive_states(conn: &Connection) -> Result<Option<HashMap<String, String>>, StoreError> {
+        let mut stmt = conn.prepare("SELECT id, state FROM directives")?;
+        let mut rows = stmt.query([])?;
+        let mut map = HashMap::new();
+        while let Some(row) = rows.next()? {
+            if map.len() >= Self::MAX_DEPENDENCY_NODES {
+                return Ok(None);
+            }
+            map.insert(row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+        }
+        Ok(Some(map))
+    }
+
+    /// Whether `depends_on` is clear for `d` to run.
+    ///
+    /// **One hop, deliberately.** A directive's prerequisite being
+    /// `completed` is the whole condition, and the transitive part takes
+    /// care of itself: the engine only ever *activates* a directive whose
+    /// prerequisite is done, so `b completed` already implies `a
+    /// completed` in every state the engine can produce. An earlier version
+    /// of this walked the chain and returned true on the first `completed`
+    /// ancestor, which made a three-deep chain unlock its tail the moment
+    /// the HEAD was finished — the tail ran with an unfinished middle.
+    ///
+    /// One hop also means there is no loop to bound, and that is the second
+    /// reason for it: `depends_on` is a replicated column written verbatim
+    /// from a sealed payload, so a peer (or a half-applied merge) can land
+    /// `a -> b -> a` on a device, and the engine calls this on EVERY
+    /// canvas load. With no walk there is nothing to hang, and a cycle is
+    /// simply never satisfied — both nodes stay queued, which is the same
+    /// place an unmet prerequisite puts them.
+    ///
+    /// A prerequisite naming a directive this device does not have counts
+    /// as UNMET rather than met. A truncated pull must not be able to
+    /// unlock work whose ordering evidence is missing, and "unmet"
+    /// converges: once the peer's row arrives it is seen.
+    fn prerequisites_met(states: &HashMap<String, String>, depends_on: Option<&str>) -> bool {
+        match depends_on {
+            None => true,
+            Some(id) => states.get(id).map(String::as_str) == Some("completed"),
+        }
+    }
+
+    /// Queued directives scheduled on or before `date` whose prerequisite
+    /// is met (execution pool for today — NOT exposed as a list in the
+    /// UI; engine only).
     pub fn runnable_directives(&self, date: &str) -> Result<Vec<Directive>, StoreError> {
         let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, milestone_id, title, execution_context, estimated_minutes,
-                    progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
-             FROM directives
+        let Some(states) = Self::directive_states(&conn)? else {
+            return Err(StoreError::Invalid(
+                "too many directives to resolve the dependency order".into(),
+            ));
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {DIRECTIVE_COLUMNS} FROM directives
              WHERE state = 'queued' AND scheduled_for_date <= ?1
-             ORDER BY scheduled_for_date, hlc_timestamp, id",
-        )?;
+             ORDER BY scheduled_for_date, hlc_timestamp, id"
+        ))?;
         let rows = stmt
             .query_map([date], directive_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        drop(stmt);
+        Ok(rows
+            .into_iter()
+            .filter(|d| Self::prerequisites_met(&states, d.depends_on.as_deref()))
+            .collect())
     }
 
     pub fn next_runnable_directive(&self, date: &str) -> Result<Option<Directive>, StoreError> {
+        Ok(self.runnable_directives(date)?.into_iter().next())
+    }
+
+    /// Every goal's `(id, complexity)`, oldest first.
+    ///
+    /// The calibration estimator's starting set: a bucket exists because a
+    /// goal rated it. Ordered by HLC so `calibration`'s output is stable
+    /// across calls — the BTreeMap keys are stable already, but the
+    /// *insertion* order decides which `Bucket::prior` seeds an entry, and
+    /// two goals at the same rating seed it identically, so this is
+    /// belt-and-braces against a future change that makes them differ.
+    pub fn goals_by_complexity(&self) -> Result<Vec<Goal>, StoreError> {
         self.lock_conn()
-            .query_row(
-                "SELECT id, milestone_id, title, execution_context, estimated_minutes,
-                    progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
-             FROM directives WHERE state = 'queued' AND scheduled_for_date <= ?1
-             ORDER BY scheduled_for_date, hlc_timestamp, id LIMIT 1",
-                [date],
-                directive_row,
-            )
-            .optional()
+            .prepare(&format!(
+                "SELECT {GOAL_COLUMNS} FROM goals ORDER BY hlc_timestamp, id"
+            ))?
+            .query_map([], goal_row)?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::Sqlite)
+    }
+
+    /// Every directive's `(goal id, goal complexity, state,
+    /// scheduled_for_date)`.
+    ///
+    /// The estimator's evidence set. It joins through `milestones` because
+    /// the rating lives on the GOAL — a task is "heavy" because the
+    /// objective it belongs to is — and it carries the goal id so the
+    /// caller can group per goal before rolling up by rating. (Rolling up
+    /// first and then adding the total once per goal is a double count; see
+    /// the note on `engine::calibration::calibration`.)
+    ///
+    /// No date filter: the estimator wants the whole record, not a window.
+    /// A 14-day window is right for velocity (which is about pace) and
+    /// wrong here, where a single heavy goal from two years ago is still
+    /// the best evidence anyone has about heavy work.
+    pub fn directive_evidence(
+        &self,
+    ) -> Result<Vec<(String, i64, DirectiveState, String)>, StoreError> {
+        self.lock_conn()
+            .prepare(
+                "SELECT g.id, g.complexity, d.state, d.scheduled_for_date
+                 FROM directives d
+                 JOIN milestones m ON m.id = d.milestone_id
+                 JOIN goals g ON g.id = m.goal_id",
+            )?
+            .query_map([], |r| {
+                let goal_id: String = r.get(0)?;
+                let complexity = crate::domain::clamp_complexity(r.get::<_, i64>(1)?);
+                let state = parse_enum(
+                    "directive state",
+                    &r.get::<_, String>(2)?,
+                    DirectiveState::from_str,
+                )?;
+                Ok((goal_id, complexity, state, r.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
+    }
+
+    /// The directives named by `ids` that are not yet `completed`.
+    ///
+    /// The ledger's "what is blocking this" line. Ids this device does not
+    /// have are reported as blocking rather than dropped, for the same
+    /// reason `prerequisites_met` treats a missing prerequisite as unmet:
+    /// silence would read as "nothing blocks this", which is the one answer
+    /// a person cannot act on.
+    pub fn unmet_prerequisites(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, StoreError> {
+        let conn = self.lock_conn();
+        let mut out = HashMap::new();
+        for id in ids {
+            let Some(dep) = (|| {
+                conn.query_row(
+                    "SELECT depends_on FROM directives WHERE id = ?1",
+                    [id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(StoreError::Sqlite)
+            })()?
+            else {
+                continue;
+            };
+            let Some(dep) = dep else { continue };
+            let state: Option<String> = conn
+                .query_row("SELECT state FROM directives WHERE id = ?1", [&dep], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(StoreError::Sqlite)?;
+            if state.as_deref() != Some("completed") {
+                out.insert(id.clone(), vec![dep]);
+            }
+        }
+        Ok(out)
     }
 
     pub fn set_directive_state(
@@ -916,9 +1073,7 @@ impl Repos {
         )?;
         if let Some(identity) = identity {
             let d = conn.query_row(
-                "SELECT id, milestone_id, title, execution_context, estimated_minutes,
-                        progressive_step, progressive_total, state, scheduled_for_date, hlc_timestamp
-                 FROM directives WHERE id = ?1",
+                &format!("SELECT {DIRECTIVE_COLUMNS} FROM directives WHERE id = ?1"),
                 [id],
                 directive_row,
             )?;
@@ -1096,13 +1251,69 @@ impl Repos {
         )
     }
 
-    pub fn delete_bailout(&self, id: &str, identity: Option<&Identity>) -> Result<(), StoreError> {
-        self.delete_record(
-            crate::crdt::CrdtTable::Bailouts,
-            id,
-            "DELETE FROM bailouts WHERE id = ?1",
-            identity,
-        )
+    // ------------------------------------------------------------------
+    // Task ledger (2026-09-27)
+    // ------------------------------------------------------------------
+
+    /// Every task on the ledger, grouped-ready for the Entropy Log.
+    ///
+    /// Open work first, then the tasks already finished, and within each
+    /// the store's own ordering (scheduled date, then HLC). The UI groups
+    /// by goal; doing that client-side would need a second round trip per
+    /// row, so the join goes all the way up to the goal here.
+    ///
+    /// `blocked_by` is the unmet prerequisite's *title*, joined in. It is
+    /// the one field that makes this page worth more than a list: a task
+    /// sitting in the queue with nothing obviously wrong with it is
+    /// indistinguishable from a stalled app without it, and the answer
+    /// ("waiting on Draft the outline") is a sentence the user can act on.
+    ///
+    /// Inner joins are safe because `foreign_keys = ON` makes the
+    /// directives→milestones→goals chain unbreakable — a deleted parent
+    /// would have blocked the delete, not orphaned a row.
+    ///
+    /// `limit` is clamped rather than rejected, like the outbox reader's
+    /// sibling: a page size is a display choice, so an over-large request
+    /// widens to the cap instead of surfacing an error the page can do
+    /// nothing about.
+    pub fn task_ledger(&self, limit: usize) -> Result<Vec<LedgerRow>, StoreError> {
+        let limit = limit.min(MAX_LEDGER_ROWS) as i64;
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT d.id, g.id, g.title, g.complexity, m.id, m.title, d.title,
+                    d.execution_context, d.estimated_minutes, d.state,
+                    d.scheduled_for_date, d.progressive_step, d.progressive_total,
+                    (SELECT p.title FROM directives p WHERE p.id = d.depends_on) AS blocker
+             FROM directives d
+             JOIN milestones m ON m.id = d.milestone_id
+             JOIN goals g ON g.id = m.goal_id
+             ORDER BY (d.state = 'completed'), d.scheduled_for_date, d.hlc_timestamp, d.id
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok(LedgerRow {
+                    directive_id: r.get(0)?,
+                    goal_id: r.get(1)?,
+                    goal_title: r.get(2)?,
+                    complexity: crate::domain::clamp_complexity(r.get(3)?),
+                    milestone_id: r.get(4)?,
+                    milestone_title: r.get(5)?,
+                    title: r.get(6)?,
+                    execution_context: r.get(7)?,
+                    estimated_minutes: r.get(8)?,
+                    state: parse_enum(
+                        "directive state",
+                        &r.get::<_, String>(9)?,
+                        DirectiveState::from_str,
+                    )?,
+                    scheduled_for_date: r.get(10)?,
+                    phase: (r.get::<_, i64>(11)?, r.get::<_, i64>(12)?),
+                    blocked_by: r.get::<_, Option<String>>(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Reconciles the single-active invariant after a pull-apply batch:    /// LWW arbitration can merge `active` states from two devices. The
@@ -1141,6 +1352,66 @@ impl Repos {
         )?;
         tx.commit()?;
         Ok(parked)
+    }
+
+    /// Sets (or clears) a directive's single prerequisite.
+    ///
+    /// A second pass rather than a parameter on [`Self::create_directive`]
+    /// alone, because the plan's edges are expressed as indices into a list
+    /// the model is still writing: every directive has to exist before any
+    /// of them can be named. The caller creates first, then links.
+    ///
+    /// Refuses a self-reference and a two-node cycle here rather than
+    /// leaving it to `prerequisites_met`, because these are *user* edits on
+    /// the plan preview and the message is the feedback: a cycle is a thing
+    /// a person can do by tapping the wrong node, and the alternative is
+    /// work that silently never becomes runnable.
+    pub fn set_directive_depends_on(
+        &self,
+        id: &str,
+        depends_on: Option<&str>,
+        identity: Option<&Identity>,
+    ) -> Result<(), StoreError> {
+        check_optional_text("prerequisite", depends_on, MAX_TITLE_CHARS)
+            .map_err(StoreError::Invalid)?;
+        if let Some(dep) = depends_on {
+            if dep == id {
+                return Err(StoreError::Invalid("a task cannot depend on itself".into()));
+            }
+            if depends_on_reaches(&self.lock_conn(), dep, id, 0)? {
+                return Err(StoreError::Invalid(
+                    "that would make two tasks depend on each other".into(),
+                ));
+            }
+        }
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM directives WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::NotFound(format!("directive {id}")));
+        }
+        let ts = self.hlc.now(self.device);
+        tx.execute(
+            "UPDATE directives SET depends_on = ?2, hlc_timestamp = ?3 WHERE id = ?1",
+            params![id, depends_on, ts.to_string()],
+        )?;
+        let d = Self::directive_on(&tx, id)?
+            .ok_or_else(|| StoreError::NotFound(format!("directive {id}")))?;
+        Self::emit_on(
+            &tx,
+            identity,
+            crate::crdt::CrdtTable::Directives,
+            &d.id,
+            &Self::directive_json(&d),
+            ts,
+        )?;
+        self.persist_head_on(&tx)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Requeue a directive with a new estimate and date (scope
@@ -1499,105 +1770,6 @@ impl Repos {
     }
 
     // ------------------------------------------------------------------
-    // Bailouts
-    // ------------------------------------------------------------------
-
-    pub fn record_bailout(
-        &self,
-        directive_id: &str,
-        reason: BailoutReason,
-        note: Option<&str>,
-        identity: Option<&Identity>,
-    ) -> Result<Bailout, StoreError> {
-        // Spec cap (escape-hatch modal): truncate, never reject — the UI
-        // already trims to 140 chars; this keeps other producers honest.
-        let note: Option<String> = note.map(|n| n.chars().take(MAX_BAILOUT_NOTE_CHARS).collect());
-        let id = new_id("bail");
-        let mut conn = self.lock_conn();
-        let tx = conn.transaction()?;
-        let ts = self.hlc.now(self.device);
-        let b = Bailout {
-            id: id.clone(),
-            directive_id: directive_id.to_string(),
-            reason,
-            note: note.clone(),
-            hlc_timestamp: ts,
-        };
-        tx.execute(
-            "INSERT INTO bailouts (id, directive_id, reason, note, hlc_timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, directive_id, reason.as_str(), note, ts.to_string()],
-        )?;
-        Self::emit_on(
-            &tx,
-            identity,
-            crate::crdt::CrdtTable::Bailouts,
-            &b.id,
-            &Self::bailout_json(&b),
-            ts,
-        )?;
-        self.persist_head_on(&tx)?;
-        tx.commit()?;
-        Ok(b)
-    }
-
-    /// The escape-hatch ledger, newest first, joined all the way up to
-    /// the goal.
-    ///
-    /// The join is what makes this a *log* rather than a per-goal
-    /// lookup: the panel groups entries under their goal, and doing that
-    /// client-side would need a second round trip per row. Inner joins
-    /// are safe because `foreign_keys = ON` makes the
-    /// bailouts→directives→milestones→goals chain unbreakable — a
-    /// deleted parent would have blocked the delete, not orphaned a row.
-    ///
-    /// `still_blocked` is the *current* directive state, not the state
-    /// at bailout time: only an external dependency parks a directive
-    /// for good, while a miscalculated scope is requeued and an energy
-    /// bailout is skipped — so this flag, not the reason, is what
-    /// separates "needs the user" from "already handled".
-    ///
-    /// `limit` is clamped rather than rejected, unlike
-    /// [`Repos::pending_outbox`]: a log window is a display choice, so
-    /// an over-large request should widen to the cap instead of
-    /// surfacing an error the panel can do nothing about.
-    pub fn bailout_log(&self, limit: usize) -> Result<Vec<EntropyEntry>, StoreError> {
-        let limit = limit.min(MAX_ENTROPY_LOG_ROWS) as i64;
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT b.id, g.id, g.title, d.id, d.title, b.reason, b.note, b.hlc_timestamp,
-                    d.state = 'blocked' AS still_blocked
-             FROM bailouts b
-             JOIN directives d ON d.id = b.directive_id
-             JOIN milestones m ON m.id = d.milestone_id
-             JOIN goals g ON g.id = m.goal_id
-             ORDER BY b.hlc_timestamp DESC, b.id ASC
-             LIMIT ?1",
-        )?;
-        let rows = stmt
-            .query_map([limit], |r| {
-                let hlc = parse_hlc(&r.get::<_, String>(7)?)?;
-                Ok(EntropyEntry {
-                    id: r.get(0)?,
-                    goal_id: r.get(1)?,
-                    goal_title: r.get(2)?,
-                    directive_id: r.get(3)?,
-                    directive_title: r.get(4)?,
-                    reason: parse_enum(
-                        "bailout reason",
-                        &r.get::<_, String>(5)?,
-                        BailoutReason::from_str,
-                    )?,
-                    note: r.get(6)?,
-                    date: local_date_from_hlc(&hlc),
-                    still_blocked: r.get::<_, i64>(8)? != 0,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
 
@@ -1703,6 +1875,7 @@ impl Repos {
             "description": g.description,
             "target_date": g.target_date,
             "status": g.status.as_str(),
+            "complexity": g.complexity,
         })
     }
 
@@ -1726,6 +1899,7 @@ impl Repos {
             "progressive_total": d.progressive_total,
             "state": d.state.as_str(),
             "scheduled_for_date": d.scheduled_for_date,
+            "depends_on": d.depends_on,
         })
     }
 
@@ -1747,13 +1921,13 @@ impl Repos {
         })
     }
 
-    fn bailout_json(b: &Bailout) -> serde_json::Value {
-        serde_json::json!({
-            "directive_id": b.directive_id,
-            "reason": b.reason.as_str(),
-            "note": b.note,
-        })
-    }
+    // NOTE: there is deliberately no `bailouts_json`. The `bailouts` TABLE
+    // is still in the schema (migration 0001) and still has a `CrdtTable`
+    // arm on the sync side, because a device that has not been updated
+    // keeps pushing its rows and quarantining them would be a louder
+    // failure than ignoring them. Nothing WRITES one any more: the escape
+    // hatch was deleted 2026-09-27 and `bail_out` was its only writer. See
+    // delta 175 for why the column stayed while the feature went.
 
     fn settings_json(s: &AppSettings) -> serde_json::Value {
         serde_json::json!({
@@ -2032,28 +2206,72 @@ pub struct GoalProgress {
     pub milestones_total: usize,
 }
 
-/// One row of the escape-hatch ledger, denormalised with the goal and
-/// directive it belongs to.
+/// One task on the Entropy Log, denormalised with the goal and milestone
+/// it belongs to (2026-09-27).
+///
+/// This replaced `EntropyEntry`, which was a bailout row: the escape hatch
+/// is gone, so the ledger's spine is now every task, and the only write is
+/// a tick. The fields are the ones the page actually renders — nothing
+/// here is a normalised reference, because every consumer wants the joined
+/// text and a client-side lookup would be a second query per row.
 #[derive(Debug, Clone)]
-pub struct EntropyEntry {
-    pub id: String,
+pub struct LedgerRow {
+    pub directive_id: String,
     pub goal_id: String,
     pub goal_title: String,
-    pub directive_id: String,
-    pub directive_title: String,
-    pub reason: BailoutReason,
-    pub note: Option<String>,
-    /// Local YYYY-MM-DD the bailout was recorded on.
-    pub date: String,
-    /// The directive is *still* parked — see [`Repos::bailout_log`].
-    pub still_blocked: bool,
+    /// The goal's own *Estimated Complexity* rating, 1–5.
+    pub complexity: i64,
+    pub milestone_id: String,
+    pub milestone_title: String,
+    pub title: String,
+    pub execution_context: Option<String>,
+    pub estimated_minutes: i64,
+    pub state: DirectiveState,
+    pub scheduled_for_date: String,
+    /// `(step, total)` — the phase badge the canvas shows, carried here so
+    /// the ledger can say "phase 2 of 4" without a second round trip.
+    pub phase: (i64, i64),
+    /// The title of this task's prerequisite when that prerequisite is not
+    /// `completed`, else `None`.
+    ///
+    /// The subquery is a correlated `SELECT` on `depends_on` and NOT a
+    /// join: a task with no prerequisite must still appear, and an inner
+    /// join would drop exactly the rows that need explaining most.
+    /// `None` is therefore ambiguous between "blocked by nothing" and
+    /// "blocked by a row this device never pulled", and the UI resolves it
+    /// against `state` — the wording differs, the fact that it is blocked
+    /// does not.
+    pub blocked_by: Option<String>,
 }
 
-/// Upper bound on [`Repos::bailout_log`]. Matches the 1024-row ceiling
-/// the outbox and check-in readers already use: a local install's whole
-/// ledger is far smaller, and the cap exists so a stray `usize::MAX`
-/// cannot ask SQLite to materialise an unbounded result set.
-const MAX_ENTROPY_LOG_ROWS: usize = 1024;
+impl LedgerRow {
+    /// Whether this task is waiting on something.
+    ///
+    /// A `completed` task is never blocked, whatever a stale `depends_on`
+    /// says: the user ticked it, and re-deriving an outstanding obligation
+    /// from a completed row would put work back on the board that nobody
+    /// put there.
+    pub fn is_blocked(&self) -> bool {
+        self.state != DirectiveState::Completed && self.blocked_by.is_some()
+    }
+
+    /// The phase badge, or `None` for a monolithic task.
+    ///
+    /// The `step >= 1 && step <= total` filter is the same one the canvas
+    /// applies: a replicated `progressive_step` past the total is a merge
+    /// artefact, and rendering "Phase 9 of 4" is worse than rendering
+    /// nothing.
+    pub fn phase_view(&self) -> Option<(i64, i64)> {
+        let (step, total) = self.phase;
+        (total > 1 && step >= 1 && step <= total).then_some((step, total))
+    }
+}
+
+/// Upper bound on [`Repos::task_ledger`]. Matches the 1024-row ceiling the
+/// outbox and check-in readers already use: a local install's whole ledger
+/// is far smaller, and the cap exists so a stray `usize::MAX` cannot ask
+/// SQLite to materialise an unbounded result set.
+const MAX_LEDGER_ROWS: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Row mappers
@@ -2061,23 +2279,6 @@ const MAX_ENTROPY_LOG_ROWS: usize = 1024;
 
 fn parse_hlc(s: &str) -> Result<HlcTimestamp, rusqlite::Error> {
     HlcTimestamp::parse(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-}
-
-/// Local YYYY-MM-DD for an HLC's physical component.
-///
-/// The ledger has no date column (see `0001_init.sql`), so a bailout's
-/// day is reconstructed from its clock. This is total, not fallible: a
-/// degenerate clock — physical 0, which migration 0004 deliberately
-/// backfills onto legacy rows — renders as the epoch rather than
-/// failing, because dropping a real bailout from the log over an
-/// unreadable date is strictly worse than showing it dated 1970. An
-/// `i64` count of nanoseconds spans ~584 years, comfortably inside
-/// chrono's range, so there is no value this can panic on.
-fn local_date_from_hlc(ts: &HlcTimestamp) -> String {
-    chrono::DateTime::from_timestamp_nanos(ts.physical as i64)
-        .with_timezone(&chrono::Local)
-        .format("%Y-%m-%d")
-        .to_string()
 }
 
 /// A corrupt enum string in a row. Returned as a SQLite-mapping error
@@ -2111,6 +2312,42 @@ fn parse_enum<T>(
     })
 }
 
+/// Whether the chain starting at `from` arrives back at `target`.
+///
+/// Only ever used to refuse a **user** edit that would make two tasks
+/// depend on each other — the plan preview lets a person re-parent a node by
+/// tapping, and a cycle is a thing you can do by tapping the wrong one. The
+/// engine itself never walks, so this is the only place a chain is followed.
+///
+/// Bounded by [`Repos::MAX_DEPENDENCY_NODES`] hops for the same reason: the
+/// chain can already be circular before anyone tries to add to it. The
+/// bound is belt-and-braces — a `visited` set would do — but it costs
+/// nothing and makes "this cannot spin" true by construction rather than by
+/// argument.
+fn depends_on_reaches(
+    conn: &Connection,
+    from: &str,
+    target: &str,
+    hops: usize,
+) -> Result<bool, StoreError> {
+    if from == target {
+        return Ok(true);
+    }
+    if hops >= Repos::MAX_DEPENDENCY_NODES {
+        return Ok(true);
+    }
+    let next: Option<Option<String>> = conn
+        .query_row("SELECT depends_on FROM directives WHERE id = ?1", [from], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()
+        .map_err(StoreError::Sqlite)?;
+    match next {
+        Some(Some(next)) => depends_on_reaches(conn, &next, target, hops + 1),
+        _ => Ok(false),
+    }
+}
+
 fn goal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Goal> {
     Ok(Goal {
         id: r.get(0)?,
@@ -2118,9 +2355,19 @@ fn goal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Goal> {
         description: r.get(2)?,
         target_date: r.get(3)?,
         status: parse_enum("goal status", &r.get::<_, String>(4)?, GoalStatus::from_str)?,
-        hlc_timestamp: parse_hlc(&r.get::<_, String>(5)?)?,
+        complexity: crate::domain::clamp_complexity(r.get(5)?),
+        hlc_timestamp: parse_hlc(&r.get::<_, String>(6)?)?,
     })
 }
+
+/// The goal column list, in `goal_row` order, shared by every read.
+///
+/// One constant rather than the five hand-copied lists this file used to
+/// carry. Adding `complexity` meant editing all five, and the failure mode
+/// of missing one is a `column index out of range` at runtime on whichever
+/// path was missed — the class of bug this repo keeps paying for.
+const GOAL_COLUMNS: &str =
+    "id, title, description, target_date, status, complexity, hlc_timestamp";
 
 fn milestone_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Milestone> {
     Ok(Milestone {
@@ -2153,6 +2400,12 @@ fn directive_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Directive> {
             DirectiveState::from_str,
         )?,
         scheduled_for_date: r.get(8)?,
-        hlc_timestamp: parse_hlc(&r.get::<_, String>(9)?)?,
+        depends_on: r.get(9)?,
+        hlc_timestamp: parse_hlc(&r.get::<_, String>(10)?)?,
     })
 }
+
+/// The directive column list, in `directive_row` order, shared by every
+/// read. See [`GOAL_COLUMNS`] for why this is one constant.
+const DIRECTIVE_COLUMNS: &str = "id, milestone_id, title, execution_context, estimated_minutes, \
+     progressive_step, progressive_total, state, scheduled_for_date, depends_on, hlc_timestamp";

@@ -113,7 +113,7 @@ mod tests {
     fn target_velocity_formula() {
         let r = fresh();
         let g = r
-            .create_goal("Ship", None, Some("2026-09-23"), None)
+            .create_goal("Ship", None, Some("2026-09-23"), crate::domain::COMPLEXITY_DEFAULT, None)
             .unwrap(); // +10 days
         r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
         r.create_milestone(&g.id, "M2", None, 1, None).unwrap();
@@ -134,7 +134,7 @@ mod tests {
     fn skipped_days_shrink_future_estimates_never_punish() {
         let r = fresh();
         let g = r
-            .create_goal("Ship", None, Some("2026-10-13"), None)
+            .create_goal("Ship", None, Some("2026-10-13"), crate::domain::COMPLEXITY_DEFAULT, None)
             .unwrap();
         r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
         // 3 skipped days in a row.
@@ -152,7 +152,7 @@ mod tests {
     fn done_days_keep_full_pace() {
         let r = fresh();
         let g = r
-            .create_goal("Ship", None, Some("2026-10-13"), None)
+            .create_goal("Ship", None, Some("2026-10-13"), crate::domain::COMPLEXITY_DEFAULT, None)
             .unwrap();
         r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
         for d in ["2026-09-10", "2026-09-11", "2026-09-12"] {
@@ -168,7 +168,7 @@ mod tests {
     fn partial_counts_half() {
         let r = fresh();
         let g = r
-            .create_goal("Ship", None, Some("2026-10-13"), None)
+            .create_goal("Ship", None, Some("2026-10-13"), crate::domain::COMPLEXITY_DEFAULT, None)
             .unwrap();
         r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
         r.upsert_check_in("2026-09-12", CheckInOutcome::Partial, None, None)
@@ -182,7 +182,7 @@ mod tests {
     fn active_milestones_count_as_remaining() {
         let r = fresh();
         let g = r
-            .create_goal("Ship", None, Some("2026-09-23"), None)
+            .create_goal("Ship", None, Some("2026-09-23"), crate::domain::COMPLEXITY_DEFAULT, None)
             .unwrap();
         let m1 = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
         r.create_milestone(&g.id, "M2", None, 1, None).unwrap();
@@ -200,7 +200,7 @@ mod tests {
     fn demoted_milestones_do_not_count_as_remaining() {
         let r = fresh();
         let g = r
-            .create_goal("Ship", None, Some("2026-09-23"), None)
+            .create_goal("Ship", None, Some("2026-09-23"), crate::domain::COMPLEXITY_DEFAULT, None)
             .unwrap();
         let m1 = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
         r.create_milestone(&g.id, "M2", None, 1, None).unwrap();

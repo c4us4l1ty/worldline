@@ -11,6 +11,9 @@ fn repos() -> Repos {
     Repos::new(open_in_memory().unwrap(), 1)
 }
 
+/// The rating the compose screen sends when nobody touches the slider.
+const DEFAULT_COMPLEXITY: i64 = crate::domain::COMPLEXITY_DEFAULT;
+
 const PLAN_JSON: &str = r#"{"milestones":[
   {"title":"Crypto core","description":"Keys and E2EE","directives":[
     {"title":"Write BIP-39 test vectors","estimated_minutes":25,"phases":[]},
@@ -146,20 +149,21 @@ fn master_plan_end_to_end_with_injected_http() {
                 serde_json::json!({"choices":[{"message":{"content": PLAN_JSON}}]}).to_string(),
             )
         };
-        let (goal_id, plan) = AiDispatcher::master_plan(
+        let (persisted, plan) = AiDispatcher::master_plan(
             &provider,
             "Ship Worldline",
             Some("2026-10-01"),
+            DEFAULT_COMPLEXITY,
             execute,
             &r,
             None,
         )
         .unwrap();
         assert_eq!(plan.milestones.len(), 2);
-        let g = r.goal(&goal_id).unwrap().unwrap();
+        let g = r.goal(&persisted.goal_id).unwrap().unwrap();
         // `PLAN_JSON` carries no `title`, so the intent is the fallback.
         assert_eq!(g.title, "Ship Worldline");
-        let ms = r.milestones_for_goal(&goal_id).unwrap();
+        let ms = r.milestones_for_goal(&persisted.goal_id).unwrap();
         assert_eq!(ms.len(), 2);
     }
     // 3 directives per plan x 3 providers.
@@ -202,17 +206,18 @@ fn master_plan_prefers_the_architect_title_over_the_intent() {
             serde_json::json!({"choices":[{"message":{"content": PLAN_JSON_TITLED}}]}).to_string(),
         )
     };
-    let (goal_id, plan) = AiDispatcher::master_plan(
+    let (persisted, plan) = AiDispatcher::master_plan(
         &provider,
         "in n out burger",
         Some("2026-10-01"),
+        DEFAULT_COMPLEXITY,
         execute,
         &r,
         None,
     )
     .unwrap();
     assert_eq!(plan.title.as_deref(), Some("Ship Worldline v0.1"));
-    let g = r.goal(&goal_id).unwrap().unwrap();
+    let g = r.goal(&persisted.goal_id).unwrap().unwrap();
     assert_eq!(g.title, "Ship Worldline v0.1");
     // The model's description becomes the goal's framing.
     assert_eq!(
@@ -238,17 +243,18 @@ fn master_plan_falls_back_to_the_intent_when_no_title_is_offered() {
             serde_json::json!({"choices":[{"message":{"content": PLAN_JSON}}]}).to_string(),
         )
     };
-    let (goal_id, plan) = AiDispatcher::master_plan(
+    let (persisted, plan) = AiDispatcher::master_plan(
         &provider,
         "\n  in n out burger  \nthe rest of my rambling plan\nmore",
         None,
+        DEFAULT_COMPLEXITY,
         execute,
         &r,
         None,
     )
     .unwrap();
     assert!(plan.title.is_none());
-    let g = r.goal(&goal_id).unwrap().unwrap();
+    let g = r.goal(&persisted.goal_id).unwrap().unwrap();
     assert_eq!(g.title, "in n out burger");
 }
 
@@ -269,9 +275,9 @@ fn a_blank_architect_title_falls_back_rather_than_naming_the_goal_blank() {
             serde_json::json!({"choices":[{"message":{"content": blank}}]}).to_string(),
         )
     };
-    let (goal_id, _) =
-        AiDispatcher::master_plan(&provider, "in n out burger", None, execute, &r, None).unwrap();
-    assert_eq!(r.goal(&goal_id).unwrap().unwrap().title, "in n out burger");
+    let (persisted, _) =
+        AiDispatcher::master_plan(&provider, "in n out burger", None, DEFAULT_COMPLEXITY, execute, &r, None).unwrap();
+    assert_eq!(r.goal(&persisted.goal_id).unwrap().unwrap().title, "in n out burger");
 }
 
 /// The intent is prose and can be long. The fallback title must still fit
@@ -294,9 +300,9 @@ fn a_long_single_line_intent_still_produces_a_valid_title() {
     // One long line, no spaces near the clip point, to prove the word
     // boundary never yields an over-budget or empty title.
     let long = format!("{} {}", "a".repeat(600), "tail");
-    let (goal_id, _) =
-        AiDispatcher::master_plan(&provider, &long, None, execute, &r, None).unwrap();
-    let g = r.goal(&goal_id).unwrap().unwrap();
+    let (persisted, _) =
+        AiDispatcher::master_plan(&provider, &long, None, DEFAULT_COMPLEXITY, execute, &r, None).unwrap();
+    let g = r.goal(&persisted.goal_id).unwrap().unwrap();
     assert!(
         g.title.chars().count() <= crate::domain::MAX_TITLE_CHARS,
         "fallback title was {} chars, over the {} budget",
@@ -340,7 +346,7 @@ fn http_failure_maps_to_error() {
     let execute = |_: &str, _: &[(String, String)], _: &serde_json::Value| {
         Err::<String, String>("network down".to_string())
     };
-    let out = AiDispatcher::master_plan(&provider, "G", None, execute, &r, None);
+    let out = AiDispatcher::master_plan(&provider, "G", None, DEFAULT_COMPLEXITY, execute, &r, None);
     assert!(out.is_err());
 }
 
@@ -367,25 +373,25 @@ fn validation_bounds_and_persistence_preflight() {
     let mut plan = parse_plan(PLAN_JSON).unwrap();
     for minutes in [i64::MIN, 0, i64::MAX] {
         plan.milestones[0].directives[1].phases[0].minutes = minutes;
-        assert!(persist_plan(&r, None, &plan, None).is_err());
+        assert!(persist_plan(&r, None, &plan, DEFAULT_COMPLEXITY, None).is_err());
         assert!(parse_plan(&serde_json::to_string(&plan).unwrap()).is_err());
         assert!(r.active_goal().unwrap().is_none());
     }
     let mut plan = parse_plan(PLAN_JSON).unwrap();
     plan.milestones[0].directives[1].estimated_minutes = i64::MAX;
-    assert!(persist_plan(&r, None, &plan, None).is_err());
+    assert!(persist_plan(&r, None, &plan, DEFAULT_COMPLEXITY, None).is_err());
     for count in [1, 5] {
         let mut plan = parse_plan(PLAN_JSON).unwrap();
         let d = &mut plan.milestones[0].directives[1];
         d.phases = vec![d.phases[0].clone(); count];
-        assert!(persist_plan(&r, None, &plan, None).is_err());
+        assert!(persist_plan(&r, None, &plan, DEFAULT_COMPLEXITY, None).is_err());
     }
     let mut plan = parse_plan(PLAN_JSON).unwrap();
     plan.milestones[0].directives = vec![plan.milestones[0].directives[0].clone(); 33];
-    assert!(persist_plan(&r, None, &plan, None).is_err());
+    assert!(persist_plan(&r, None, &plan, DEFAULT_COMPLEXITY, None).is_err());
     let mut plan = parse_plan(PLAN_JSON).unwrap();
     plan.milestones[1].description = Some("x".repeat(16 * 1024 + 1));
-    assert!(persist_plan(&r, None, &plan, None).is_err());
+    assert!(persist_plan(&r, None, &plan, DEFAULT_COMPLEXITY, None).is_err());
     assert!(r.active_goal().unwrap().is_none());
 }
 
@@ -407,7 +413,7 @@ fn response_size_checked_before_parsing_and_persistence() {
         json_mode: true,
     };
     let result =
-        AiDispatcher::master_plan(&provider, "Goal", None, |_, _, _| Ok(raw.clone()), &r, None);
+        AiDispatcher::master_plan(&provider, "Goal", None, DEFAULT_COMPLEXITY, |_, _, _| Ok(raw.clone()), &r, None);
     assert!(matches!(
         result,
         Err(DispatchError::Invalid {
@@ -445,9 +451,9 @@ fn facades_reject_bad_input_before_any_http_call() {
         panic!("HTTP must not be attempted for invalid input")
     };
     // master_plan: blank intent, bad date, over-budget intent.
-    assert!(AiDispatcher::master_plan(&provider, "  ", None, no_http, &r, None).is_err());
+    assert!(AiDispatcher::master_plan(&provider, "  ", None, DEFAULT_COMPLEXITY, no_http, &r, None).is_err());
     assert!(
-        AiDispatcher::master_plan(&provider, "Goal", Some("next Friday"), no_http, &r, None)
+        AiDispatcher::master_plan(&provider, "Goal", Some("next Friday"), DEFAULT_COMPLEXITY, no_http, &r, None)
             .is_err()
     );
     // The intent is bounded by the description budget, not the old 16 KiB
@@ -456,6 +462,7 @@ fn facades_reject_bad_input_before_any_http_call() {
         &provider,
         &"c".repeat(crate::domain::MAX_DESCRIPTION_CHARS + 1),
         None,
+        DEFAULT_COMPLEXITY,
         no_http,
         &r,
         None

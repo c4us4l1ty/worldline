@@ -13,7 +13,7 @@ const TODAY: &str = "2026-09-13";
 
 fn repo_with_two_phase_directive() -> (Repos, String) {
     let r = Repos::new(open_in_memory().unwrap(), 1);
-    let g = r.create_goal("G", None, None, None).unwrap();
+    let g = r.create_goal("G", None, None, COMPLEXITY_DEFAULT, None).unwrap();
     let ms = r.create_milestone(&g.id, "M", None, 0, None).unwrap();
     let d = r
         .create_directive(
@@ -22,13 +22,12 @@ fn repo_with_two_phase_directive() -> (Repos, String) {
             None,
             30,
             2,
-            TODAY,
+            TODAY, None,
             &[
                 ("Phase one".into(), None, 5),
                 ("Phase two".into(), None, 25),
             ],
-            None,
-        )
+            None)
         .unwrap();
     (r, d.id)
 }
@@ -108,7 +107,7 @@ fn defect_hlc_not_persisted_across_restarts() {
     let conn = open_in_memory().unwrap();
     let before = {
         let r1 = Repos::new(conn, 1);
-        r1.create_goal("G", None, None, None).unwrap();
+        r1.create_goal("G", None, None, COMPLEXITY_DEFAULT, None).unwrap();
         let count: i64 = r1
             .conn
             .lock()
@@ -297,7 +296,7 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
         "legal winner thank year wave sausage worth useful legal winner thank yellow",
     )
     .unwrap();
-    let g = r.create_goal("Ship", None, None, Some(&identity)).unwrap();
+    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, Some(&identity)).unwrap();
     let m = r
         .create_milestone(&g.id, "M1", None, 0, Some(&identity))
         .unwrap();
@@ -308,13 +307,12 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
             None,
             30,
             2,
-            "2026-09-13",
+            "2026-09-13", None,
             &[
                 ("Write the spec".into(), Some("be thorough".into()), 5),
                 ("Ship it".into(), None, 25),
             ],
-            Some(&identity),
-        )
+            Some(&identity))
         .unwrap();
     // Mark step 1 done, as a real session would.
     assert_eq!(r.phases_for_directive(&d.id).unwrap().len(), 2);
@@ -378,7 +376,7 @@ fn defect_phase_repair_does_not_erase_titles_or_state() {
 #[test]
 fn defect_absurd_phase_count_is_rejected_before_allocating() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
-    let g = r.create_goal("Ship", None, None, None).unwrap();
+    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None).unwrap();
     let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let d = r
         .create_directive(
@@ -387,10 +385,9 @@ fn defect_absurd_phase_count_is_rejected_before_allocating() {
             None,
             30,
             2,
-            "2026-09-13",
+            "2026-09-13", None,
             &[("A".into(), None, 15), ("B".into(), None, 15)],
-            None,
-        )
+            None)
         .unwrap();
     r.conn
         .lock()
@@ -421,10 +418,10 @@ fn defect_milestone_is_not_completed_while_a_skipped_directive_remains() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
     let e = Engine::new(&r, None);
     let today = "2026-09-13";
-    let g = r.create_goal("Ship", None, None, None).unwrap();
+    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None).unwrap();
     let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let d = r
-        .create_directive(&m.id, "A", None, 20, 1, today, &[], None)
+        .create_directive(&m.id, "A", None, 20, 1, today, None, &[], None)
         .unwrap();
     let _ = e.activate_next(today).unwrap();
     // Energy bailout → skipped.
@@ -466,7 +463,7 @@ fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
     let r = Repos::new(open_in_memory().unwrap(), 1);
     let e = Engine::new(&r, None);
     let today = "2026-09-13";
-    let g = r.create_goal("Ship", None, None, None).unwrap();
+    let g = r.create_goal("Ship", None, None, COMPLEXITY_DEFAULT, None).unwrap();
     let m = r.create_milestone(&g.id, "M1", None, 0, None).unwrap();
     let d = r
         .create_directive(
@@ -475,10 +472,9 @@ fn defect_phase_step_past_the_total_is_clamped_instead_of_wedging() {
             None,
             30,
             2,
-            today,
+            today, None,
             &[("A".into(), None, 5), ("B".into(), None, 25)],
-            None,
-        )
+            None)
         .unwrap();
     let _ = e.activate_next(today).unwrap();
     r.conn

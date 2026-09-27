@@ -203,7 +203,7 @@ async fn offline_write_then_sync_converges_two_devices() {
     let a = Repos::new(conn_a, 1);
     a.insert_identity(&identity, true, &[]).unwrap();
     let g = a
-        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), None)
+        .create_goal("Ship Worldline v0.1", None, Some("2026-10-01"), wl_core::domain::COMPLEXITY_DEFAULT, None)
         .unwrap();
     let ms = a
         .create_milestone(&g.id, "Crypto core", None, 0, None)
@@ -215,13 +215,12 @@ async fn offline_write_then_sync_converges_two_devices() {
             None,
             60,
             2,
-            "2026-09-13",
+            "2026-09-13", None,
             &[
                 ("Signature first".into(), None, 5),
                 ("Core loop".into(), None, 25),
             ],
-            None,
-        )
+            None)
         .unwrap();
     // CRDT write-through: enqueue state of every mutated row.
     a.enqueue_outbox(
@@ -295,7 +294,7 @@ async fn delete_replicates_and_stays_deleted() {
     let id = Some(&identity);
 
     let a = Repos::new(open_in_memory().unwrap(), 1);
-    let g = a.create_goal("Doomed goal", None, None, id).unwrap();
+    let g = a.create_goal("Doomed goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, id).unwrap();
     let goal_hlc = g.hlc_timestamp.to_string();
     let ms = a
         .create_milestone(&g.id, "Doomed milestone", None, 0, id)
@@ -307,10 +306,9 @@ async fn delete_replicates_and_stays_deleted() {
             None,
             10,
             1,
-            "2026-09-13",
+            "2026-09-13", None,
             &[],
-            id,
-        )
+            id)
         .unwrap();
     sync_cycle(&a, &identity, &transport, 100).unwrap();
 
@@ -395,7 +393,7 @@ async fn equal_hlc_ops_converge_regardless_of_delivery_order() {
     let transport = AxumTransport { app, token };
 
     let maker = Repos::new(open_in_memory().unwrap(), 1);
-    let g = maker.create_goal("Forked goal", None, None, None).unwrap();
+    let g = maker.create_goal("Forked goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     // One tick, reused for both ops: identical full HLC, like two live
     // replicas forked from one data dir under a stopped clock.
     let hlc = maker.hlc.now(maker.device_id()).to_string();
@@ -461,7 +459,7 @@ async fn idempotent_repull_applies_nothing_twice() {
 
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Solo Goal", None, None, None).unwrap();
+    let g = a.create_goal("Solo Goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -500,7 +498,7 @@ async fn lww_conflict_resolves_identically_on_both_sides() {
     let conn_b = open_in_memory().unwrap();
     let b = Repos::new(conn_b, 2);
 
-    let g = a.create_goal("Same Goal", None, None, None).unwrap();
+    let g = a.create_goal("Same Goal", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     let goal_json = |status: &str, dev: u16| {
         serde_json::json!({"id": g.id, "title": "Same Goal", "description": null,
             "target_date": null, "status": status, "_dev": dev})
@@ -552,7 +550,7 @@ async fn write_through_syncs_all_tables() {
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
     let g = a
-        .create_goal("Write-through goal", Some("ctx"), Some("2026-10-01"), id)
+        .create_goal("Write-through goal", Some("ctx"), Some("2026-10-01"), wl_core::domain::COMPLEXITY_DEFAULT, id)
         .unwrap();
     let ms = a
         .create_milestone(&g.id, "Milestone one", Some("desc"), 0, id)
@@ -564,13 +562,12 @@ async fn write_through_syncs_all_tables() {
             Some("with care"),
             60,
             2,
-            "2026-09-13",
+            "2026-09-13", None,
             &[
                 ("Phase one".into(), Some("first".into()), 5),
                 ("Phase two".into(), None, 25),
             ],
-            id,
-        )
+            id)
         .unwrap();
     a.set_directive_state(&d.id, DirectiveState::Active, id)
         .unwrap();

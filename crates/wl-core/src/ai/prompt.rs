@@ -30,7 +30,19 @@ Directives longer than 30 minutes must be split into progressive phases of\
 /// prompt says so explicitly, because a model that assumes a tidy
 /// single-line GOAL field will otherwise read a paragraph as a title and
 /// plan against the whole thing verbatim.
-pub fn tier1_user(intent: &str, target_date: Option<&str>) -> String {
+///
+/// `complexity` is the user's own 1–5 *Estimated Complexity* rating and
+/// `record` is the calibration estimator's read of that same bucket. Both
+/// go in, and the reason `record` is here at all is that it is the
+/// estimator's **only consumer**: without it the number computed by
+/// `engine::calibration` would be displayed and never used, which is the
+/// inert-figure failure this product does not ship.
+pub fn tier1_user(
+    intent: &str,
+    target_date: Option<&str>,
+    complexity: i64,
+    record: Option<&str>,
+) -> String {
     let mut s = format!(
         "USER INTENT (their own words; may be a fragment, a paragraph,\
 or include constraints, hours/day, skills, and deadlines):\n{intent}\n"
@@ -38,14 +50,32 @@ or include constraints, hours/day, skills, and deadlines):\n{intent}\n"
     if let Some(t) = target_date {
         s.push_str(&format!("TARGET DATE: {t}\n"));
     }
-    let schema = "{\"title\":string,\"description\":string,\"milestones\":[{\"title\":string,\"description\":string,\"directives\":[{\"title\":string,\"execution_context\":string,\"estimated_minutes\":number,\"phases\":[{\"title\":string,\"instruction\":string,\"minutes\":number}]}]}]}";
+    if let Some(r) = record {
+        s.push_str(&format!("{r}\n"));
+    }
+    // The rating's effect on the plan is spelled out rather than implied.
+    // A model handed "difficulty: 4" with no guidance will either ignore
+    // it or treat it as licence to produce 32 tasks; both are wrong.
+    s.push_str(&format!(
+        "SIZE THE PLAN TO THE {complexity}/5 CALIBRATION ABOVE: \
+1–2 means one milestone and one or two short tasks; \
+3 means two or three milestones of ordinary work; \
+4–5 means three to five milestones, more conservative estimates, and \
+phases broken out earlier.\n"
+    ));
+    let schema = "{\"title\":string,\"description\":string,\"milestones\":[{\"title\":string,\"description\":string,\"rationale\":string,\"directives\":[{\"title\":string,\"execution_context\":string,\"estimated_minutes\":number,\"after\":number,\"phases\":[{\"title\":string,\"instruction\":string,\"minutes\":number}]}]}]}";
     s.push_str(&format!(
         "\nProduce a milestone plan. JSON schema:\n{schema}\n\
 title: name the goal yourself — short, imperative, under 60 characters.\
 Read it as an intent, not as a title to echo back.\
 description: optional one-sentence framing; may be empty.\
+rationale: ONE short sentence on why this milestone sits where it does.\
 Phases array: empty for directives <= 30 minutes, otherwise 2-4 phases\
-totaling approximately estimated_minutes. 2-5 milestones. No prose outside JSON."
+totaling approximately estimated_minutes. 2-5 milestones. No prose outside JSON.\n\
+after: the 0-based index of the directive that must be finished first, counted\
+across the whole plan in reading order. Use it ONLY where one task genuinely\
+cannot start before another. Leave it out for independent work — a plan with\
+an edge for everything is a plan the user cannot see the shape of."
     ));
     s
 }

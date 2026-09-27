@@ -14,6 +14,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_hlc_zero_backfill.sql"),
     include_str!("migrations/0005_record_heads.sql"),
     include_str!("migrations/0006_identity_singleton.sql"),
+    include_str!("migrations/0007_complexity_and_dependency.sql"),
 ];
 
 pub fn run(conn: &Connection) -> Result<(), StoreError> {

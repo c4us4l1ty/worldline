@@ -14,8 +14,22 @@ use crate::store::StoreError;
 pub enum DispatchError {
     #[error("store: {0}")]
     Store(#[from] StoreError),
-    #[error("response was not valid JSON: {0}")]
+    /// The response arrived but was not the JSON we asked for.
+    ///
+    /// Kept strictly separate from [`DispatchError::Transport`], which is
+    /// the fix for the bug that shipped: a request that timed out or never
+    /// reached the provider was reported through this variant, so a network
+    /// failure reached the user as *"response was not valid JSON: error
+    /// sending request for url (…)"*. That names a parsing problem where
+    /// the actual one was a network, which is the opposite of actionable.
+    #[error("the architect's reply was not usable JSON: {0}")]
     BadJson(String),
+    /// The HTTP hop itself failed: DNS, TLS, connect, timeout, body read.
+    ///
+    /// `#[source]`-free on purpose — the inner string is already
+    /// reqwest's own wording and duplicating it would print twice.
+    #[error("could not reach {provider}: {detail}")]
+    Transport { provider: String, detail: String },
     #[error("missing field {0}")]
     MissingField(&'static str),
     #[error("invalid value for {field}: {why}")]
@@ -94,6 +108,18 @@ impl std::fmt::Debug for ProviderAdapter {
     }
 }
 
+/// Ceiling on the architect's completion, in tokens.
+///
+/// The request used to send none, which made the response size bounded only
+/// by the provider's own default (often 8k) and left an unbounded
+/// completion free to run for minutes — the mechanism behind the button
+/// that said "Planning…" for two minutes and then failed. A valid plan is
+/// 1–5 milestones with a handful of directives and short phases; 4096
+/// tokens is roughly twice what the schema's maximum plausible plan needs,
+/// so a model that would overrun it was going to produce something the
+/// validator rejects anyway.
+pub const MAX_COMPLETION_TOKENS: u32 = 4096;
+
 impl ProviderAdapter {
     /// HTTP request (url, headers, json body) — executed by the shell
     /// layer (reqwest is native-only; the wasm UI never holds keys).
@@ -117,6 +143,8 @@ impl ProviderAdapter {
                         {"role": "user", "content": user}
                     ],
                     "temperature": 0.4,
+                    // Bounded, always. See the constant's doc.
+                    "max_tokens": MAX_COMPLETION_TOKENS,
                 });
                 if *json_mode {
                     body["response_format"] = serde_json::json!({"type": "json_object"});
@@ -129,6 +157,28 @@ impl ProviderAdapter {
                     ("Content-Type".into(), "application/json".into()),
                 ];
                 (url, headers, body)
+            }
+        }
+    }
+
+    /// The provider id this adapter talks to, for error messages.
+    ///
+    /// Derived from the base URL rather than stored, because the adapter
+    /// never carried a provider id and adding one means every construction
+    /// site in three crates grows a field for the sake of a string that is
+    /// already in the URL.
+    pub fn provider_label(&self) -> &'static str {
+        match self {
+            ProviderAdapter::OpenAiCompat { base_url, .. } => {
+                if base_url.contains("openrouter") {
+                    "openrouter"
+                } else if base_url.contains("googleapis") {
+                    "google"
+                } else if base_url.contains("bytez") {
+                    "bytez.com"
+                } else {
+                    "the provider"
+                }
             }
         }
     }
@@ -163,6 +213,17 @@ pub struct DirectiveDraft {
     pub estimated_minutes: i64,
     #[serde(default)]
     pub phases: Vec<PhaseDraft>,
+    /// The index — within this plan's directives, counted in reading order
+    /// across all milestones, from 0 — of the directive that must be
+    /// finished first.
+    ///
+    /// An **index**, not an id, and the reason is that the model has no way
+    /// to know our id scheme: `new_id("dir")` mints a uuid at write time.
+    /// Asking for an id would get a hallucinated string back, which reads
+    /// exactly like a real edge until you follow it. An index is checkable,
+    /// which is what makes the edge worth having at all.
+    #[serde(default)]
+    pub after: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -172,13 +233,20 @@ pub struct MilestoneDraft {
     pub description: Option<String>,
     #[serde(default)]
     pub directives: Vec<DirectiveDraft>,
+    /// One sentence on why this milestone sits where it does.
+    ///
+    /// Rendered as the plan preview's "Why this order" line. A stated
+    /// reason, not a chain of thought: the preview's job is to let a person
+    /// disagree with the sequencing, and a 2 000-token derivation is the
+    /// fastest way to make them skip it.
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 /// Full Tier-1 result: the goal the architect named, plus its milestone
 /// hierarchy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanResult {
-    /// Goal title the architect derived from the user's intent.
     ///
     /// The compose screen collects ONE free-text field ("in n out
     /// burger"), not a title, so the model is what names the goal. Both
@@ -192,6 +260,119 @@ pub struct PlanResult {
     #[serde(default)]
     pub description: Option<String>,
     pub milestones: Vec<MilestoneDraft>,
+}
+
+/// A fetched, repaired plan, and whether it is a real one.
+///
+/// The shape the compose screen's Generate button gets back. It is
+/// **not** persisted: the user sees it as a dependency graph, edits it, and
+/// only then calls `commit_plan`. A `fallback` preview still commits to the
+/// same screen, with one editable task in it, so "the architect did not
+/// come back with anything" never becomes "you have no goal".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlanPreview {
+    pub plan: PlanResult,
+    #[serde(default)]
+    pub repair: RepairReport,
+    /// The *Estimated Complexity* rating this plan was built for.
+    ///
+    /// Carried in the preview rather than re-sent by `commit_plan` for one
+    /// reason: a rating that has to survive two IPC calls as two separate
+    /// `Option`/int parameters is a rating that can be silently defaulted,
+    /// and a goal written at 3/5 when the user chose 5/5 poisons the
+    /// estimator permanently. Inside the payload there is nowhere for it to
+    /// go missing.
+    pub complexity: i64,
+    /// `Some(reason)` when the response was unusable and this is the seeded
+    /// one-task stand-in. The reason is shown to the user; a silent
+    /// downgrade would show them a one-task plan and let them believe the
+    /// architect produced it.
+    #[serde(default)]
+    pub fallback: Option<String>,
+}
+
+impl PlanPreview {
+    /// The one-task stand-in, built from the user's own words.
+    ///
+    /// Seeded the way the manual path seeds: a 25-minute first step titled
+    /// from the goal, on today's date, so the canvas has something runnable
+    /// the moment the plan is committed. 25 stays under the progressive
+    /// threshold, so there are no phase rows to author.
+    pub fn fallback(intent: &str, target_date: Option<&str>, complexity: i64) -> PlanPreview {
+        let title = fallback_title(intent);
+        PlanPreview {
+            plan: PlanResult {
+                title: Some(title.clone()),
+                description: None,
+                milestones: vec![MilestoneDraft {
+                    title: "First steps".into(),
+                    description: None,
+                    rationale: None,
+                    directives: vec![DirectiveDraft {
+                        title,
+                        execution_context: None,
+                        // The rating reaches the fallback too, but it does
+                        // not change the length of a first sitting: a 25
+                        // minute task is 25 minutes at any complexity.
+                        estimated_minutes: 25,
+                        phases: Vec::new(),
+                        after: None,
+                    }],
+                }],
+            },
+            repair: RepairReport::default(),
+            complexity,
+            fallback: Some(format!(
+                "The architect's plan could not be used, so this is a first step \
+                 from your own words instead{}.",
+                target_date
+                    .map(|d| format!(" (target {d})"))
+                    .unwrap_or_default()
+            )),
+        }
+    }
+
+    /// Whether this is the seeded stand-in.
+    pub fn is_fallback(&self) -> bool {
+        self.fallback.is_some()
+    }
+}
+
+impl PlanResult {
+    /// How many directives the plan holds, in reading order.
+    ///
+    /// The same order `persist_plan` mints ids in, so a draft's `after`
+    /// index and the collected id list agree by construction rather than by
+    /// two traversals that have to be kept in step.
+    pub fn directive_count(&self) -> usize {
+        self.milestones.iter().map(|m| m.directives.len()).sum()
+    }
+
+    /// The `index`-th directive's title, flattened the same way.
+    ///
+    /// Returns `None` past the end rather than panicking: the only caller
+    /// is the warning path for a malformed edge, and a malformed edge is
+    /// exactly the case that must not be able to take the process down.
+    pub fn directive_title(&self, index: usize) -> Option<&str> {
+        let mut left = index;
+        for m in &self.milestones {
+            if left < m.directives.len() {
+                return Some(m.directives[left].title.as_str());
+            }
+            left -= m.directives.len();
+        }
+        None
+    }
+
+    /// Every directive, flattened, in reading order.
+    pub fn directives(&self) -> impl Iterator<Item = &DirectiveDraft> {
+        self.milestones.iter().flat_map(|m| m.directives.iter())
+    }
+
+    /// The same order, mutably — `repair_plan`'s edge pass.
+    pub fn directives_mut(&mut self) -> impl Iterator<Item = &mut DirectiveDraft> {
+        self.milestones.iter_mut().flat_map(|m| m.directives.iter_mut())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +427,12 @@ fn extract_json_block(s: &str) -> Option<&str> {
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_DIRECTIVES_PER_MILESTONE: usize = 32;
+/// Ceiling on milestones, shared by `validate_plan` and `repair_plan`.
+///
+/// They were separate literals once, and the repair pass truncating to a
+/// different number than the validator accepted is precisely how a
+/// "repaired" plan could still be rejected. One constant, two readers.
+pub const MAX_MILESTONES: usize = 5;
 
 fn validate_response_size(raw: &str) -> Result<(), DispatchError> {
     if raw.len() > MAX_RESPONSE_BYTES {
@@ -432,24 +619,53 @@ pub fn fallback_title(intent: &str) -> String {
     }
 }
 
-/// Persists a Tier-1 plan: goal, milestones, directives.
+/// What `persist_plan` wrote, and what it had to leave out.
+///
+/// The warnings are not diagnostics — they are the only record of a plan
+/// that was *not* written as the architect drew it. An edge the model got
+/// wrong is dropped rather than failing the request (a plan with no ordering
+/// constraint is still a plan), and dropping it silently would show the
+/// user a preview that disagrees with what was committed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PersistedPlan {
+    pub goal_id: String,
+    /// Human-readable notes, in the order they were found.
+    pub warnings: Vec<String>,
+}
+
+/// Persists a Tier-1 plan: goal, milestones, directives, and the
+/// dependency edges between them.
 ///
 /// `goal_spec`: `(fallback_title, description, target_date)` — a new
 /// goal is created from it. (Restructuring an existing goal re-uses this
 /// with the goal closed and re-planned under a fresh goal.)
+///
+/// The whole [`PlanPreview`] rather than `(plan, complexity)`, because
+/// the rating has to reach `create_goal` and the only way to guarantee that
+/// is to not ask the caller to pass it separately. A rating dropped between
+/// the fetch and the write is a rating that silently becomes 3, and the
+/// estimator then learns from a bucket the user never chose.
 ///
 /// Title precedence: the architect's own `plan.title` wins, because the
 /// user gave it free text rather than a name and naming the goal is the
 /// model's job. `goal_spec`'s title is the fallback for a response that
 /// omitted one, and `"Untitled goal"` is the last resort so a goal is
 /// never created nameless.
+///
+/// **Two passes over the directives**, and the reason is the index-based
+/// edge: a draft names its prerequisite by position, but the id it will be
+/// stored under does not exist until the row is written. So every
+/// directive is created first, collecting ids in reading order, and only
+/// then are the edges linked. A single pass would have to guess ids.
 pub fn persist_plan(
     repos: &Repos,
     goal_spec: Option<(&str, Option<&str>, Option<&str>)>,
-    plan: &PlanResult,
+    preview: &PlanPreview,
     identity: Option<&Identity>,
-) -> Result<String, DispatchError> {
+) -> Result<PersistedPlan, DispatchError> {
+    let plan = &preview.plan;
     validate_plan(plan)?;
+    let mut warnings: Vec<String> = Vec::new();
     let (title, desc, target) = match goal_spec {
         Some((fallback, desc, target)) => {
             let title = plan
@@ -468,7 +684,7 @@ pub fn persist_plan(
                 .or(desc)
                 .map(str::to_string);
             let title = if title.trim().is_empty() {
-                "Untitled goal".to_string()
+                "Untitled goal".into()
             } else {
                 title
             };
@@ -485,7 +701,13 @@ pub fn persist_plan(
         }
     };
     let goal_id = repos
-        .create_goal(&title, desc.as_deref(), target.as_deref(), identity)?
+        .create_goal(
+            &title,
+            desc.as_deref(),
+            target.as_deref(),
+            preview.complexity,
+            identity,
+        )?
         .id;
     // CORE-3: a new plan supersedes the previous one. Without this every
     // `persist_plan` left the old goal `active` forever, so goals
@@ -493,6 +715,10 @@ pub fn persist_plan(
     // became an arbitrary tie-break. Runs AFTER the new goal exists so
     // `keep` can never archive the goal we just created.
     repos.archive_other_active_goals(&goal_id, identity)?;
+    // Pass 1: every directive, in reading order, collecting its new id so
+    // the `after` indices in pass 2 can be resolved to real ids.
+    let mut created: Vec<String> = Vec::with_capacity(plan.directive_count());
+    let mut edges: Vec<(usize, usize)> = Vec::new();
     for (i, m) in plan.milestones.iter().enumerate() {
         let ms = repos.create_milestone(
             &goal_id,
@@ -502,6 +728,7 @@ pub fn persist_plan(
             identity,
         )?;
         for d in &m.directives {
+            let index = created.len();
             let phases = super::prompt::phases_of(d);
             let total = if phases.is_empty() {
                 1
@@ -515,19 +742,350 @@ pub fn persist_plan(
             } else {
                 d.estimated_minutes
             };
-            repos.create_directive(
+            let row = repos.create_directive(
                 &ms.id,
                 &d.title,
                 d.execution_context.as_deref(),
                 mins,
                 total,
                 &crate::domain::today_local(),
+                None,
                 &phases,
                 identity,
             )?;
+            created.push(row.id);
+            if let Some(after) = d.after {
+                edges.push((index, after));
+            }
         }
     }
-    Ok(goal_id)
+    // Pass 2: the edges. Anything unusable is dropped and reported, never
+    // fatal — a plan the user can still run beats a plan that is refused
+    // over one bad index. `repair_plan` has already cleared the forward and
+    // self references, so this is the second gate rather than the first.
+    for (index, after) in edges {
+        let title = plan.directive_title(index).unwrap_or("a task");
+        if after >= index {
+            warnings.push(format!(
+                "“{title}” points at a task that comes after it; that link was dropped"
+            ));
+            continue;
+        }
+        if let Err(e) =
+            repos.set_directive_depends_on(&created[index], Some(&created[after]), identity)
+        {
+            warnings.push(format!(
+                "“{title}” could not be linked to its prerequisite: {e}"
+            ));
+        }
+    }
+    warnings.extend(preview.repair.notes.iter().cloned());
+    Ok(PersistedPlan {
+        goal_id,
+        warnings,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Repair — make an almost-right plan right
+// ---------------------------------------------------------------------------
+
+/// What repair had to change, in the order it found it.
+///
+/// Returned to the UI, not logged. A plan that was quietly reshaped is a
+/// plan the user approved a preview of, and the preview is the thing they
+/// are looking at when they decide whether to trust it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepairReport {
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl RepairReport {
+    fn note(&mut self, msg: String) {
+        self.notes.push(msg);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.notes.is_empty()
+    }
+}
+
+/// Brings a parsed plan inside the store's write boundary, in place.
+///
+/// The shape this replaces was **all-or-nothing**: `validate_plan` ran over
+/// the whole response and any single violation — one directive over 30
+/// minutes with no phases, a sixth milestone, a phase sum outside the 2×
+/// band — rejected the entire plan, so a user who paid for a BYOK call got
+/// no goal at all. The user's report was that the AI "doesn't make any task
+/// for me", and this is the code behind that.
+///
+/// So: clamp what can be clamped, synthesise what can be synthesised, and
+/// drop only what has to go. The only thing that still fails the whole
+/// response is having no usable directive at all, and the caller turns even
+/// that into a seeded first step rather than an error.
+///
+/// Deterministic, and a pure function of its input apart from the report —
+/// a plan repaired twice from the same JSON is the same plan.
+pub fn repair_plan(plan: &mut PlanResult, intent: &str) -> RepairReport {
+    let mut report = RepairReport::default();
+
+    // Title: a model that named nothing gets the user's own words, and an
+    // over-long one is clipped rather than rejected.
+    match plan.title.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() => {
+            if let Some(clipped) = clip(t, crate::domain::MAX_TITLE_CHARS) {
+                if clipped != t {
+                    report.note(format!(
+                        "The goal name was too long and was shortened to “{clipped}”."
+                    ));
+                    plan.title = Some(clipped.to_string());
+                }
+            }
+        }
+        _ => {
+            plan.title = Some(fallback_title(intent));
+            report.note("The architect did not name the goal; your own words were used.".into());
+        }
+    }
+    if let Some(d) = plan.description.as_deref() {
+        if let Some(clipped) = clip(d, crate::domain::MAX_DESCRIPTION_CHARS) {
+            if clipped != d {
+                report.note("The goal description was shortened to fit.".into());
+                plan.description = Some(clipped.to_string());
+            }
+        }
+    }
+
+    // Milestones: cap the count, then drop the empty ones — but never drop
+    // the last one, so "a plan with nothing in it" stays an error rather
+    // than becoming an empty goal.
+    if plan.milestones.len() > MAX_MILESTONES {
+        report.note(format!(
+            "Only the first {MAX_MILESTONES} milestones were kept; the rest were cut."
+        ));
+        plan.milestones.truncate(MAX_MILESTONES);
+    }
+    for m in plan.milestones.iter_mut() {
+        if let Some(clipped) = clip(&m.title, crate::domain::MAX_TITLE_CHARS) {
+            if clipped != m.title {
+                m.title = clipped.to_string();
+            }
+        }
+        m.title = repair_text(m.title.trim(), "Milestone", &mut report);
+    }
+    for m in plan.milestones.iter_mut() {
+        if let Some(clipped) =
+            clip(m.description.as_deref().unwrap_or(""), crate::domain::MAX_DESCRIPTION_CHARS)
+        {
+            if clipped != m.description.as_deref().unwrap_or("") {
+                m.description = Some(clipped.to_string());
+            }
+        }
+    }
+
+    // Directives, inside each milestone.
+    for m in plan.milestones.iter_mut() {
+        if m.directives.len() > MAX_DIRECTIVES_PER_MILESTONE {
+            report.note(format!(
+                "“{}” listed more than {MAX_DIRECTIVES_PER_MILESTONE} tasks; the extras were cut.",
+                m.title
+            ));
+            m.directives.truncate(MAX_DIRECTIVES_PER_MILESTONE);
+        }
+        for d in m.directives.iter_mut() {
+            repair_directive(d, &mut report);
+        }
+    }
+    // A milestone left with nothing in it is noise, and dropping it is safe
+    // as long as one survives — which the `directive_count` check in the
+    // caller enforces. One collapsed note rather than one per drop: five
+    // identical lines on a page whose whole job is to be scannable.
+    if plan.milestones.len() > 1 {
+        let before = plan.milestones.len();
+        plan.milestones.retain(|m| !m.directives.is_empty());
+        if plan.milestones.len() != before {
+            report.note(format!(
+                "{} milestone(s) with no usable tasks were dropped.",
+                before - plan.milestones.len()
+            ));
+        }
+    }
+
+    // Edges: a forward or self reference is not a plan defect, it is one
+    // bad index. `persist_plan` drops it and reports; clearing it here means
+    // the PREVIEW shows what will actually be written, which is the entire
+    // point of showing a preview.
+    let total = plan.directive_count();
+    for (i, d) in plan.directives_mut().enumerate() {
+        if let Some(after) = d.after {
+            if after >= i || after >= total {
+                d.after = None;
+            }
+        }
+    }
+    report
+}
+
+/// Clamps one directive's numbers and titles, or drops it if it has no
+/// usable identity left.
+fn repair_directive(d: &mut DirectiveDraft, report: &mut RepairReport) {
+    d.title = repair_text(d.title.trim(), "A task", report);
+    if let Some(clipped) = clip(
+        d.execution_context.as_deref().unwrap_or(""),
+        crate::domain::MAX_CONTEXT_CHARS,
+    ) {
+        if clipped != d.execution_context.as_deref().unwrap_or("") {
+            d.execution_context = Some(clipped.to_string());
+        }
+    }
+    // A nonpositive or absurd estimate is clamped rather than rejected: the
+    // store's bound is 1..=1440 and any value outside it is a model
+    // miscount, not a statement about the work.
+    if d.estimated_minutes <= 0 {
+        d.estimated_minutes = Directive::PROGRESSIVE_THRESHOLD_MINUTES;
+        report.note(format!(
+            "“{}” had no time estimate; {} minutes was assumed.",
+            d.title, d.estimated_minutes
+        ));
+    } else if d.estimated_minutes > crate::domain::MAX_MINUTES {
+        d.estimated_minutes = crate::domain::MAX_MINUTES;
+        report.note(format!(
+            "“{}” claimed more than a day; the estimate was capped.",
+            d.title
+        ));
+    }
+    // Phases: drop the unusable ones, then reconcile the estimate with what
+    // survived. The old validator rejected the whole plan when the sum fell
+    // outside a 2× band around the estimate; reconciling instead is the
+    // whole point, and the phase table WINS because it is what the user
+    // will actually be shown.
+    let before = d.phases.len();
+    d.phases
+        .retain(|p| p.minutes > 0 && p.minutes <= crate::domain::MAX_MINUTES);
+    if d.phases.len() != before {
+        report.note(format!(
+            "“{}” had phases with impossible times; {} were dropped.",
+            d.title,
+            before - d.phases.len()
+        ));
+    }
+    for p in d.phases.iter_mut() {
+        if let Some(clipped) = clip(&p.title, crate::domain::MAX_TITLE_CHARS) {
+            p.title = clipped.to_string();
+        }
+        if p.title.trim().is_empty() {
+            p.title = "Continue".into();
+        }
+    }
+    if !d.phases.is_empty() {
+        let sum: i64 = d.phases.iter().map(|p| p.minutes).sum();
+        // Rescale to the estimate so the badge and the phase table agree.
+        if sum != d.estimated_minutes {
+            rescale_phases(&mut d.phases, d.estimated_minutes);
+            report.note(format!(
+                "“{}” phases were rescaled to its {} minute estimate.",
+                d.title, d.estimated_minutes
+            ));
+        }
+    } else if d.estimated_minutes > Directive::PROGRESSIVE_THRESHOLD_MINUTES {
+        // The one synthesis: a long task with no phases cannot be stored
+        // (`create_directive` requires progressive rows above the
+        // threshold), and the old code REJECTED the plan for it. Split it
+        // deterministically instead, exactly the way `ensure_phases` does.
+        split_phases(d, report);
+    }
+}
+
+/// Rescales phase minutes to `total`, keeping each phase's share of the
+/// original and letting the last absorb the rounding.
+fn rescale_phases(phases: &mut [PhaseDraft], total: i64) {
+    let old: i64 = phases.iter().map(|p| p.minutes).sum();
+    if old <= 0 || total < phases.len() as i64 {
+        return;
+    }
+    let mut remaining = total;
+    let last = phases.len() - 1;
+    for (i, p) in phases.iter_mut().enumerate() {
+        p.minutes = if i == last {
+            remaining
+        } else {
+            let scaled = (i128::from(p.minutes) * i128::from(total) + i128::from(old) / 2)
+                / i128::from(old);
+            // One minute per remaining phase is the floor; anything less
+            // would make `create_directive` reject the whole row. The i128
+            // arithmetic is the same widening the store's own rescale uses,
+            // for the same reason: `total` is bounded by MAX_MINUTES but the
+            // product is not obviously so.
+            let headroom = (remaining - (last - i) as i64).max(1) as i128;
+            scaled.clamp(1, headroom) as i64
+        };
+        remaining -= p.minutes;
+    }
+}
+
+/// Splits a long directive into 2–4 even phases, in place.
+fn split_phases(d: &mut DirectiveDraft, report: &mut RepairReport) {
+    // Two phases for anything just over the threshold, three to four once
+    // there is enough time for the split to be worth the friction. The
+    // bounds are the same ones `validate_directive` used to enforce, so
+    // this cannot produce a row the store will reject.
+    let count = match d.estimated_minutes {
+        m if m <= 50 => 2,
+        m if m <= 120 => 3,
+        _ => 4,
+    }
+    .clamp(2, 4) as usize;
+    let each = (d.estimated_minutes / count as i64).max(1);
+    let mut phases = Vec::with_capacity(count);
+    for i in 0..count {
+        // The last phase absorbs the remainder so the sum is exact.
+        let minutes = if i + 1 == count {
+            d.estimated_minutes - each * (count as i64 - 1)
+        } else {
+            each
+        };
+        phases.push(PhaseDraft {
+            title: format!("Step {}", i + 1),
+            instruction: None,
+            minutes: minutes.max(1),
+        });
+    }
+    report.note(format!(
+        "“{}” had no steps for a {} minute task; it was split into {count}.",
+        d.title, d.estimated_minutes
+    ));
+    d.phases = phases;
+}
+
+/// A display name for something the model left blank.
+///
+/// `fallback` exists because a blank milestone title and a blank task title
+/// want different words, and a generic "Untitled" on every row of a
+/// five-milestone plan is a list the user cannot tell apart.
+fn repair_text(text: &str, fallback: &str, report: &mut RepairReport) -> String {
+    if !text.is_empty() {
+        return text.to_string();
+    }
+    report.note(format!("{fallback} had no name and was labelled “{fallback}”."));
+    fallback.to_string()
+}
+
+/// Clip to `max` characters, preferring a word boundary. `None` when the
+/// text already fits.
+///
+/// Owned rather than borrowed: every call site assigns the result back into
+/// the field being repaired, and a `&str` return would be a borrow of a
+/// local.
+fn clip(text: &str, max: usize) -> Option<String> {
+    if text.chars().count() <= max {
+        return None;
+    }
+    let clipped: String = text.chars().take(max).collect();
+    Some(match clipped.rfind(' ') {
+        Some(i) if i > 0 => clipped[..i].trim_end().to_string(),
+        _ => clipped,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -540,27 +1098,35 @@ pub fn persist_plan(
 pub struct AiDispatcher;
 
 impl AiDispatcher {
-    /// Tier 1 — Master Architect. Returns `(goal_id, plan)`.
+    /// Tier 1 — fetch a plan and return it **without writing anything**.
     ///
-    /// `intent` is the user's raw free text from the compose screen —
-    /// not a title. It may be a fragment ("in n out burger"), a
-    /// paragraph, or contain the constraints that used to live in their
-    /// own field. The architect names the goal from it; see
-    /// [`persist_plan`] for title precedence.
+    /// This is the billable half. The compose screen's Generate button
+    /// awaits this, shows a stage line while it runs, and lands on the plan
+    /// preview — and the user has not yet created a goal, a milestone or a
+    /// task. Backing out of the preview costs nothing because there is
+    /// nothing to back out of, which is the whole reason the call was split
+    /// in two: the old shape persisted the plan inside the request that
+    /// fetched it, so "let me look at it first" was not expressible.
+    ///
+    /// `complexity` is the user's *Estimated Complexity* rating, 1–5, and
+    /// `record` is the calibration estimator's read of the same bucket, so
+    /// the prompt can say what the rating has historically been worth
+    /// rather than treating opinion as fact.
+    ///
+    /// Validated before the call, not after: a blank intent or a bad rating
+    /// should not cost a billable request.
     #[allow(clippy::too_many_arguments)] // explicit params keep the injected-HTTP design testable.
-    pub fn master_plan<
-        F: Fn(&str, &[(String, String)], &serde_json::Value) -> Result<String, String>,
-    >(
+    pub fn master_plan_preview<F>(
         provider: &ProviderAdapter,
         intent: &str,
         target_date: Option<&str>,
+        complexity: i64,
+        record: Option<&str>,
         execute: F,
-        repos: &Repos,
-        identity: Option<&Identity>,
-    ) -> Result<(String, PlanResult), DispatchError> {
-        // Validate BEFORE the billable HTTP hop; persistence re-checks
-        // at the write boundary. The bound is the description budget,
-        // not the title budget: this is prose, not a name.
+    ) -> Result<PlanPreview, DispatchError>
+    where
+        F: Fn(&str, &[(String, String)], &serde_json::Value) -> Result<String, String>,
+    {
         crate::domain::check_text("intent", intent, crate::domain::MAX_DESCRIPTION_CHARS).map_err(
             |why| DispatchError::Invalid {
                 field: "intent",
@@ -573,21 +1139,80 @@ impl AiDispatcher {
                 why,
             })?;
         }
+        crate::domain::check_complexity("complexity", complexity).map_err(|why| {
+            DispatchError::Invalid {
+                field: "complexity",
+                why,
+            }
+        })?;
         let (url, headers, body) = provider.request(
             &super::prompt::tier1_system(),
-            &super::prompt::tier1_user(intent, target_date),
+            &super::prompt::tier1_user(intent, target_date, complexity, record),
         );
-        let raw = execute(&url, &headers, &body).map_err(DispatchError::BadJson)?;
+        // A transport failure is its own error now. This is the change that
+        // makes "Planning…" diagnosable: a timeout used to arrive as
+        // "response was not valid JSON: error sending request…", which
+        // blames the reply for a network problem.
+        let raw = execute(&url, &headers, &body).map_err(|detail| DispatchError::Transport {
+            provider: provider.provider_label().to_string(),
+            detail,
+        })?;
         validate_response_size(&raw)?;
         let resp: serde_json::Value =
             serde_json::from_str(&raw).map_err(|e| DispatchError::BadJson(e.to_string()))?;
         let text = provider
             .extract_text(&resp)
             .ok_or_else(|| DispatchError::BadJson("no content in response".into()))?;
-        let plan = parse_plan(&text)?;
+        let mut plan = parse_plan(&text)?;
+        let repair = repair_plan(&mut plan, intent);
+        // A plan with nothing in it cannot be previewed, and the honest
+        // answer to that is the seeded fallback rather than an error the
+        // user cannot act on.
+        if plan.directive_count() == 0 {
+            return Ok(PlanPreview::fallback(intent, target_date, complexity));
+        }
+        // Belt and braces: repair is meant to make this unreachable, and if
+        // it ever is not, the plan is still better than nothing.
+        validate_plan(&plan)?;
+        Ok(PlanPreview {
+            plan,
+            repair,
+            complexity,
+            fallback: None,
+        })
+    }
+
+    /// Tier 1, the old shape: fetch and persist in one call.
+    ///
+    /// Kept because the engine tests and the injected-HTTP test suite
+    /// exercise persistence through it, and because it is the honest
+    /// composition of the two halves. Nothing in the UI calls it: the
+    /// compose screen goes preview → commit, because a plan the user has
+    /// not seen must not be written.
+    #[allow(clippy::too_many_arguments)]
+    pub fn master_plan<F>(
+        provider: &ProviderAdapter,
+        intent: &str,
+        target_date: Option<&str>,
+        complexity: i64,
+        record: Option<&str>,
+        execute: F,
+        repos: &Repos,
+        identity: Option<&Identity>,
+    ) -> Result<(PersistedPlan, PlanResult), DispatchError>
+    where
+        F: Fn(&str, &[(String, String)], &serde_json::Value) -> Result<String, String>,
+    {
+        let preview =
+            Self::master_plan_preview(provider, intent, target_date, complexity, record, execute)?;
         // `intent` doubles as the title fallback: if the model named the
         // goal, this is ignored.
-        let goal_id = persist_plan(repos, Some((intent, None, target_date)), &plan, identity)?;
-        Ok((goal_id, plan))
+        let persisted = persist_plan(
+            repos,
+            Some((intent, None, target_date)),
+            &preview,
+            identity,
+        )?;
+        Ok((persisted, preview.plan))
     }
 }

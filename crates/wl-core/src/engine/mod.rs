@@ -7,6 +7,7 @@
 //! Pure synchronous logic over [`Repos`] — no timers, no async; the
 //! Tauri shell drives wall-clock events.
 
+pub mod calibration;
 pub mod velocity;
 
 use crate::crypto::identity::Identity;
@@ -37,14 +38,10 @@ pub enum EngineOutcome {
         /// Timer target: estimated minutes for the current phase/body.
         estimated_minutes: i64,
     },
-    /// Directive fully completed → next one unlocks.
+    /// Directive fully completed → next one unlocks. Carries the id
+    /// whether completion came from the canvas or from the ledger, so a
+    /// caller that re-reads the canvas does not have to know which.
     DirectiveCompleted { directive_id: String },
-    /// Bailout recorded; directive dormant; recovery offered.
-    BailedOut {
-        directive_id: String,
-        reason: BailoutReason,
-        recovery: Option<RecoveryAction>,
-    },
     /// Queue empty for today — calm idle state (never a backlog view).
     Idle,
     /// Check-in recorded.
@@ -52,21 +49,6 @@ pub enum EngineOutcome {
         date: String,
         outcome: CheckInOutcome,
     },
-}
-
-/// The low-cognitive recovery / advance action after a bailout (§5.3).
-#[derive(Debug, Clone, PartialEq)]
-pub enum RecoveryAction {
-    /// Downsized scope re-queued for tomorrow with halved estimate.
-    DownsizeAndRequeue {
-        directive_id: String,
-        new_minutes: i64,
-    },
-    /// Dormant until external dependency clears; engine advanced to
-    /// the next unblocked thread.
-    AdvanceUnblocked { next_directive_id: String },
-    /// Energy depletion: low-cognitive maintenance task offered.
-    LowCognitiveTask { directive_id: String },
 }
 
 pub struct Engine<'a> {
@@ -185,93 +167,84 @@ impl<'a> Engine<'a> {
     }
 
     // ------------------------------------------------------------------
-    // Escape hatch — Esc path with mandatory categorization (§5.3).
+    // Marking a task done — the ledger's only write.
     // ------------------------------------------------------------------
 
-    /// Records a bailout with a mandatory reason, parks the directive,
-    /// and reacts per the reason:
+    /// Marks an arbitrary directive `Completed`, from outside the canvas.
     ///
-    /// * `external_dependency` → directive `blocked` (dormant), advance
-    ///   to next unblocked thread;
-    /// * `miscalculated_scope` → scope downsized (estimate halved,
-    ///   floor 15 min) and re-queued for tomorrow;
-    /// * `energy_depletion` → directive `skipped` (velocity event,
-    ///   NOT a failure), low-cognitive recovery offered.
-    pub fn bail_out(
+    /// The canvas is read-only (2026-09-27: the ⌘+Enter and Escape
+    /// gestures were both removed, and the whole escape-hatch path with
+    /// them). So this is the only way a task ever resolves, and it has to
+    /// carry the entire state transition that `Engine::complete` used to
+    /// do for the ACTIVE directive:
+    ///
+    /// * **Every remaining phase is closed**, not just the current one. A
+    ///   tick is a statement about the task, and the ledger is task-level;
+    ///   advancing one phase per tap would mean four taps to say "done",
+    ///   which is a different control wearing the same clothes. Each step
+    ///   goes through `advance_progressive_step`, so HLC and the outbox
+    ///   are stamped exactly as they are on the canvas path.
+    /// * **The milestone is re-evaluated.** `maybe_complete_milestone`
+    ///   counts `blocked` as outstanding, so a milestone cannot be
+    ///   reported done with unreachable work inside it.
+    /// * **The Stackelberg invariant is left to the caller** to advance,
+    ///   exactly as `complete_directive` does: if the marked directive was
+    ///   the active one, the command then calls `Engine::current`, which
+    ///   activates the next thing or reports `Idle`. Duplicating that here
+    ///   would mean two places that know how to advance the canvas.
+    ///
+    /// Marking an already-`completed` directive is an idempotent no-op
+    /// rather than an error: the ledger's control is a tick, and a second
+    /// tap on a ticked row is a person confirming, not a mistake.
+    pub fn mark_complete(
         &self,
         date: &str,
-        reason: BailoutReason,
-        note: Option<&str>,
+        directive_id: &str,
     ) -> Result<EngineOutcome, EngineError> {
-        if crate::domain::check_date("date", date).is_err() {
-            return Err(StoreError::Invalid("bad date".into()).into());
-        }
-        let Some(d) = self.repos.active_directive()? else {
-            return Ok(EngineOutcome::Idle);
+        crate::domain::check_date("date", date).map_err(StoreError::Invalid)?;
+        let Some(d) = self.repos.directive(directive_id)? else {
+            return Err(StoreError::NotFound(format!(
+                "directive {directive_id}"
+            ))
+            .into());
         };
-        if reason == BailoutReason::MiscalculatedScope && date_plus_days(date, 1).is_none() {
-            return Err(StoreError::Invalid("bad date".into()).into());
+        if d.state == DirectiveState::Completed {
+            return Ok(EngineOutcome::DirectiveCompleted {
+                directive_id: d.id,
+            });
         }
-        // The STATE change is the event; the ledger row is the record of
-        // it. Recording first meant a failure in the second step (a
-        // peer-supplied `progressive_total` larger than the downsized
-        // estimate makes `reschedule_directive` reject) left a bailout
-        // row replicated to every device describing something that never
-        // happened, while the directive stayed active.
-        let recovery = match reason {
-            BailoutReason::ExternalDependency => {
-                self.repos
-                    .set_directive_state(&d.id, DirectiveState::Blocked, self.identity)?;
-                // Advance to the next unblocked queued thread.
-                let next = self.repos.next_runnable_directive(date)?;
-                Some(RecoveryAction::AdvanceUnblocked {
-                    next_directive_id: next.map(|n| n.id).unwrap_or_default(),
-                })
+        // Self-heal first, for the same reason `complete` does: a
+        // progressive directive whose phase rows went missing would make
+        // every `advance_progressive_step` fail, and the ledger would be
+        // the one surface that cannot tick a task off.
+        if d.uses_progressive_activation() {
+            self.current_phase_minutes(&d)?;
+        }
+        while d.progressive_step < d.progressive_total {
+            // `false` means the row moved under us (a concurrent sync
+            // merge). Re-read rather than trusting the snapshot, and bound
+            // the loop by the total so a peer that inflated
+            // `progressive_total` cannot spin it.
+            if !self
+                .repos
+                .advance_progressive_step(&d.id, self.identity)?
+            {
+                break;
             }
-            BailoutReason::MiscalculatedScope => {
-                // Downsize: halve the estimate (floor 15 min) and
-                // requeue for tomorrow.
-                let new_minutes = (d.estimated_minutes / 2).max(15);
-                self.downsize_directive(&d, new_minutes, date)?;
-                Some(RecoveryAction::DownsizeAndRequeue {
-                    directive_id: d.id.clone(),
-                    new_minutes,
-                })
+            let fresh = self
+                .repos
+                .directive(&d.id)?
+                .ok_or_else(|| StoreError::NotFound(format!("directive {}", d.id)))?;
+            if fresh.progressive_step >= d.progressive_total {
+                break;
             }
-            BailoutReason::EnergyDepletion => {
-                self.repos
-                    .set_directive_state(&d.id, DirectiveState::Skipped, self.identity)?;
-                Some(RecoveryAction::LowCognitiveTask {
-                    directive_id: d.id.clone(),
-                })
-            }
-        };
-        // Ledger last: it must describe a transition that actually
-        // happened. Recorded first, a failure in the branch above (a
-        // peer-supplied `progressive_total` larger than the downsized
-        // estimate makes `reschedule_directive` reject) left a bailout
-        // row replicated to every device describing an event that never
-        // occurred, while the directive stayed active.
+        }
         self.repos
-            .record_bailout(&d.id, reason, note, self.identity)?;
-        Ok(EngineOutcome::BailedOut {
+            .set_directive_state(&d.id, DirectiveState::Completed, self.identity)?;
+        self.maybe_complete_milestone(&d.milestone_id)?;
+        Ok(EngineOutcome::DirectiveCompleted {
             directive_id: d.id,
-            reason,
-            recovery,
         })
-    }
-
-    /// Halves-estimate requeue used by scope downsizing.
-    fn downsize_directive(
-        &self,
-        d: &Directive,
-        new_minutes: i64,
-        today: &str,
-    ) -> Result<(), EngineError> {
-        let tomorrow = date_plus_days(today, 1).ok_or(StoreError::Invalid("bad date".into()))?;
-        self.repos
-            .reschedule_directive(&d.id, new_minutes, &tomorrow, self.identity)?;
-        Ok(())
     }
 
     // ------------------------------------------------------------------

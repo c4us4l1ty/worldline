@@ -22,6 +22,15 @@ pub struct Goal {
     pub target_date: Option<String>,
     /// `active` | `achieved` | `archived`
     pub status: GoalStatus,
+    /// The user's own rating of how big this objective is, 1–5.
+    ///
+    /// Set once, at goal creation, from the compose screen's
+    /// *Estimated Complexity* control. It is the **prior** for the
+    /// Beta-Bernoulli estimator in [`crate::engine::calibration`] — the
+    /// rating is the prior, and every completion or stall afterwards moves
+    /// it. Stored per goal rather than per directive because a goal-level
+    /// rating is the only one a person can answer before a plan exists.
+    pub complexity: i64,
     pub hlc_timestamp: HlcTimestamp,
 }
 
@@ -116,6 +125,15 @@ pub struct Directive {
     pub state: DirectiveState,
     /// YYYY-MM-DD
     pub scheduled_for_date: String,
+    /// The one directive that must be `completed` before this one becomes
+    /// runnable, or `None` for "nothing blocks this".
+    ///
+    /// A single prerequisite rather than a list, because that is what the
+    /// architect can actually reason about in a plan it just wrote, and
+    /// because a chain resolves one link at a time
+    /// ([`crate::store::repo::Repos::runnable_directives`]) without any
+    /// transitive walk a malformed edge could send into a loop.
+    pub depends_on: Option<String>,
     pub hlc_timestamp: HlcTimestamp,
 }
 
@@ -253,50 +271,6 @@ impl CheckInOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// Bailout — frictionful escape hatch ledger (PRD §5.3).
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Bailout {
-    pub id: String,
-    pub directive_id: String,
-    pub reason: BailoutReason,
-    pub note: Option<String>,
-    pub hlc_timestamp: HlcTimestamp,
-}
-
-/// The three mandatory stall categories. The task cannot simply be
-/// swiped away — categorization is the friction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BailoutReason {
-    /// External dependency blocked (e.g. waiting for client feedback).
-    ExternalDependency,
-    /// Task was significantly larger than planned.
-    MiscalculatedScope,
-    /// Cognitive/physical exhaustion.
-    EnergyDepletion,
-}
-
-impl BailoutReason {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BailoutReason::ExternalDependency => "external_dependency",
-            BailoutReason::MiscalculatedScope => "miscalculated_scope",
-            BailoutReason::EnergyDepletion => "energy_depletion",
-        }
-    }
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "external_dependency" => Some(BailoutReason::ExternalDependency),
-            "miscalculated_scope" => Some(BailoutReason::MiscalculatedScope),
-            "energy_depletion" => Some(BailoutReason::EnergyDepletion),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // AppSettings — non-secret local config. BYOK API keys and the mnemonic
 // live ONLY in the Stronghold vault, never in SQLite.
 // ---------------------------------------------------------------------------
@@ -424,6 +398,58 @@ pub fn check_minutes(field: &'static str, minutes: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Lowest / highest / default *Estimated Complexity* rating.
+///
+/// The scale is five stops because that is what survives a 420px control
+/// built from five buttons (see `.wl-calibration`): each stop keeps a 44px
+/// touch target, which seven would not. The default is the middle stop, so
+/// a user who never touches the slider contributes an uninformative Beta
+/// rather than a confident wrong one.
+pub const COMPLEXITY_MIN: i64 = 1;
+pub const COMPLEXITY_MAX: i64 = 5;
+pub const COMPLEXITY_DEFAULT: i64 = 3;
+
+/// Word for a rating, or `None` when the rating is out of range.
+///
+/// Returns `Option` rather than a placeholder so a corrupt replicated
+/// `goals.complexity` renders nothing rather than labelling 3/5 work
+/// "standard" — the same rule the entropy log follows for an unrecognised
+/// bailout reason.
+pub fn complexity_label(complexity: i64) -> Option<&'static str> {
+    if !(COMPLEXITY_MIN..=COMPLEXITY_MAX).contains(&complexity) {
+        return None;
+    }
+    Some(COMPLEXITY_WORDS[(complexity - COMPLEXITY_MIN) as usize])
+}
+
+/// The five stops, in rating order. A table rather than a derivation
+/// because the wording is a product decision: the estimator is primed by
+/// the *number* while the user is choosing by the *word*, and "light+" has
+/// no single-word synonym.
+const COMPLEXITY_WORDS: [&str; 5] = ["light", "light+", "standard", "heavy", "deep"];
+
+/// Rejects a rating outside 1–5 at the write boundary.
+pub fn check_complexity(field: &'static str, complexity: i64) -> Result<(), String> {
+    if !(COMPLEXITY_MIN..=COMPLEXITY_MAX).contains(&complexity) {
+        return Err(format!(
+            "{field} must be within {COMPLEXITY_MIN}–{COMPLEXITY_MAX}"
+        ));
+    }
+    Ok(())
+}
+
+/// Coerces a rating into 1–5, for read paths over replicated rows.
+///
+/// A peer can write `complexity = 0` or `99`: the CHECK constraint is a
+/// local write boundary, and `apply_upsert` reads the value out of a sealed
+/// payload with no such check. Rather than reject the op — which would
+/// quarantine an entire goal over one field and wedge sync — the value is
+/// clamped on read, because a nonsensical estimate of "standard" is a far
+/// better outcome than a goal that cannot be pulled.
+pub fn clamp_complexity(complexity: i64) -> i64 {
+    complexity.clamp(COMPLEXITY_MIN, COMPLEXITY_MAX)
+}
+
 /// Today's local date as YYYY-MM-DD.
 pub fn today_local() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
@@ -459,6 +485,7 @@ mod tests {
             progressive_total: 3,
             state: DirectiveState::Queued,
             scheduled_for_date: today_local(),
+            depends_on: None,
             hlc_timestamp: HlcTimestamp {
                 physical: 1,
                 counter: 0,
@@ -510,16 +537,13 @@ mod tests {
         for s in ["queued", "active", "completed", "blocked", "skipped"] {
             assert_eq!(DirectiveState::from_str(s).unwrap().as_str(), s);
         }
-        for s in [
-            "external_dependency",
-            "miscalculated_scope",
-            "energy_depletion",
-        ] {
-            assert_eq!(BailoutReason::from_str(s).unwrap().as_str(), s);
-        }
         for s in ["done", "partial", "skipped"] {
             assert_eq!(CheckInOutcome::from_str(s).unwrap().as_str(), s);
         }
+        // No round-trip for the three bailout reasons: `BailoutReason` went
+        // with the escape hatch (2026-09-27) and there is no decoder left
+        // to pin. The `bailouts` TABLE stays in the schema and is no longer
+        // written — same terms as `app_settings.hotkey` (delta 175).
         assert!(GoalStatus::from_str("nope").is_none());
     }
 

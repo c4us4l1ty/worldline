@@ -154,7 +154,7 @@ async fn defect_pull_cursor_never_persisted_full_history_repulled() {
     // Device A: one write, pushed.
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Solo", None, None, None).unwrap();
+    let g = a.create_goal("Solo", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -196,7 +196,7 @@ async fn defect_pull_overwrites_newer_local_state_no_lww_check() {
     // Device A pushes a STALE goal status (older HLC).
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Race", None, None, None).unwrap();
+    let g = a.create_goal("Race", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -210,7 +210,7 @@ async fn defect_pull_overwrites_newer_local_state_no_lww_check() {
     // Device B already has NEWER local state for the same row (later HLC).
     let conn_b = open_in_memory().unwrap();
     let b = Repos::new(conn_b, 2);
-    let g_local = b.create_goal("Race", None, None, None).unwrap();
+    let g_local = b.create_goal("Race", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     // Force B's row to a newer HLC and status 'archived' (terminal state).
     let newer_ts = {
         let ts = b.hlc.now(2);
@@ -290,7 +290,7 @@ async fn defected_outbox_never_drains_on_idempotent_repush() {
 
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Drain", None, None, None).unwrap();
+    let g = a.create_goal("Drain", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -564,7 +564,7 @@ async fn defect_poison_op_wedges_pull_cursor_forever() {
     // Device A: one good write, pushed.
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Solo", None, None, None).unwrap();
+    let g = a.create_goal("Solo", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -622,7 +622,7 @@ async fn defect_pull_never_merges_remote_clock() {
 
     let conn_a = open_in_memory().unwrap();
     let a = Repos::new(conn_a, 1);
-    let g = a.create_goal("Clock", None, None, None).unwrap();
+    let g = a.create_goal("Clock", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     a.enqueue_outbox(
         &identity,
         "goals",
@@ -814,7 +814,7 @@ async fn defect_relay_rewriting_the_hlc_is_detected_and_quarantined() {
     let transport = AxumTransport { app, token };
 
     let repos = Repos::new(open_in_memory().unwrap(), 2);
-    let g = repos.create_goal("Mine", None, None, None).unwrap();
+    let g = repos.create_goal("Mine", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
 
     // An honest op for `g`, sealed correctly.
     let honest_hlc = "00000000000000000009.00000.00001";
@@ -869,7 +869,7 @@ async fn defect_relay_relabelling_the_operation_id_is_detected() {
     let transport = AxumTransport { app, token };
 
     let repos = Repos::new(open_in_memory().unwrap(), 2);
-    let g = repos.create_goal("Mine", None, None, None).unwrap();
+    let g = repos.create_goal("Mine", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     let hlc = "00000000000000000009.00000.00001";
     let sealed = wl_core::crypto::aead::seal(
         &identity,
@@ -912,7 +912,7 @@ async fn defect_maxed_wire_hlc_cannot_brick_the_local_clock() {
     let transport = AxumTransport { app, token };
 
     let repos = Repos::new(open_in_memory().unwrap(), 2);
-    let g = repos.create_goal("Mine", None, None, None).unwrap();
+    let g = repos.create_goal("Mine", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None).unwrap();
     let maxed = "18446744073709551615.65535.00001";
     let fields = serde_json::json!({
         "title": "Poison", "description": null, "target_date": null, "status": "active"
@@ -953,7 +953,7 @@ async fn defect_maxed_wire_hlc_cannot_brick_the_local_clock() {
     }
     // A real write still lands.
     repos
-        .create_goal("After the storm", None, None, None)
+        .create_goal("After the storm", None, None, wl_core::domain::COMPLEXITY_DEFAULT, None)
         .expect("local writes must still work");
     assert!(repos.goal(&g.id).unwrap().is_some());
 }
@@ -1120,7 +1120,7 @@ async fn defect_deleting_one_phase_keeps_the_others_on_peers() {
     // Every writer needs the identity: without it nothing is enqueued
     // for the outbox and the peer's FK chain has no root.
     let g = a
-        .create_goal("Ship it", None, None, Some(&identity))
+        .create_goal("Ship it", None, None, wl_core::domain::COMPLEXITY_DEFAULT, Some(&identity))
         .unwrap();
     let m = a
         .create_milestone(&g.id, "M1", None, 0, Some(&identity))
@@ -1132,10 +1132,9 @@ async fn defect_deleting_one_phase_keeps_the_others_on_peers() {
             None,
             30,
             2,
-            "2026-09-13",
+            "2026-09-13", None,
             &[("A".into(), None, 5), ("B".into(), None, 25)],
-            Some(&identity),
-        )
+            Some(&identity))
         .unwrap();
     assert_eq!(a.phases_for_directive(&d.id).unwrap().len(), 2);
 
