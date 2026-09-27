@@ -63,7 +63,6 @@ fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
     ])
 }
 
-
 /// Records a fatal startup failure somewhere a GUI user can find it
 /// and retitle the window so it does not look like a healthy app that
 /// happens to be blank.
@@ -103,7 +102,7 @@ fn warn_dev_mode_loads_a_dev_server() {
         return;
     }
     eprintln!(
- "\n  Worldline was built WITHOUT `custom-protocol`.\n  \
+        "\n  Worldline was built WITHOUT `custom-protocol`.\n  \
  The window will load http://localhost:1420 (tauri.conf.json devUrl) and\n  \
  show \"Could not connect to localhost\" if nothing serves that port.\n  \
  That is the browser's error page, not a broken app.\n\n  \

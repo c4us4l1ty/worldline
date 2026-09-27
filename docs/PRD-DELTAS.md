@@ -2225,3 +2225,67 @@ auto-activating, the vacuous `missing_phase_rows_are_rebuilt_from_the_estimate`
 directive and never exercised the repair it names), and the same-day check-in
 convergence test that asserted `(applied, quarantined) == (1, 0)` for an op
 that had stopped quarantining.
+
+### Verified by battle test, not by assertion
+
+218. **The live chain was exercised end to end over real TCP, not only in
+    process.** A throwaway harness drove a release `wl-relay` over a real
+    socket: `/auth/challenge` -> Ed25519 `/auth/verify` -> sealed push ->
+    pull -> decrypt -> LWW apply on a second device, which converged on
+    the written goal. It also confirmed the two properties that are easy
+    to claim and hard to prove: **replaying a consumed challenge returns
+    401** (the challenge is strictly one-shot, and now burns on a bad
+    signature too), and **an anonymous `/sync/push` returns 401**. The
+    harness is deleted; the assertions it made permanent live in
+    `wl-relay/tests/adversarial.rs` and `wl-sync/tests/adversarial.rs`.
+
+    Idle cost, measured on the release binary rather than asserted: **0
+    ticks in 30 s (0.0000% of one core), 6 MiB RSS, 13 threads** for the
+    relay. The debug binary costs 0.067% and 85 MiB, so the number that
+    matters for a shipped install is the smaller one.
+
+219. **`prune-dx-dist.sh` silently did nothing on an absolute path.** It
+    unconditionally prefixed the repo root, so an absolute dist
+    directory — which its own usage line invites — resolved to a
+    nonexistent path and exited 0 having pruned nothing. A clean exit
+    from a pruner that pruned nothing reads as a pass.
+
+220. **The release bundle shipped two debug HTML files that were not in
+    `public/` any more.** `dx build` copies `public/` verbatim and never
+    deletes, and the pruner only ever looked at `assets/*-dx*`, so
+    anything that had ever lived in `public/` stayed in the dist forever
+    and was embedded into the shipped app by Tauri. Removing the source
+    was never sufficient; the artefact has to be swept too. The pruner now
+    sweeps the bundle root against an allowlist plus whatever `index.html`
+    actually references.
+
+221. **A `tauri.conf.json` comment key is not free.** Documenting the
+    `csp` / `devCsp` split with a `_why` key fails the build:
+    `tauri-build` validates the security schema and rejects unknown
+    fields. The rationale therefore lives in `build.rs`, next to the rest
+    of this failure mode. Worth recording because the obvious way to
+    annotate JSON is unavailable in exactly the file where a reader most
+    needs it.
+
+### Removed
+
+222. **Temporary diagnostic scaffolding, both halves.** `__temp::diag_sink`
+    was registered in `generate_handler!` — a live, webview-reachable IPC
+    command appending an attacker-controlled string to a fixed path with
+    no size, encoding, or path bound. Its `PROBE` script was handed to
+    `win.eval()`, the one mechanism in the app not subject to the CSP,
+    and installed capture-phase listeners over the whole document
+    (**including the seed-phrase and API-key fields**) plus a
+    `setInterval(…, 300)` that only cleared on the happy path. A parallel
+    copy in the UI crate called `settings_save` on every probe tick. All
+    of it is gone, and `grep` for `__temp` / `diag_sink` now returns
+    nothing. The mount-point guard (`__wl_mounted__`) is unrelated and
+    stays.
+
+223. **A dev binary that looks broken when it is not.** `build.rs` already
+    warned at compile time, but the person who needs the message is the one
+    *running* the binary. `main()` now prints it to stderr on launch
+    whenever `custom-protocol` is off, naming both correct commands
+    (`cargo tauri dev`, which starts the server; and a `custom-protocol`
+    build, which embeds the bundle). Diagnostics only — no blocking, no
+    fallback, no behaviour change.

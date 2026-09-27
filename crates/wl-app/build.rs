@@ -27,6 +27,24 @@
 //! This cannot be fixed by asserting: the bundle really is present, and
 //! the binary really is valid. So it is surfaced as a loud build warning
 //! naming both correct commands, rather than left to be rediscovered.
+//
+// **3. Two different CSPs, and they must not be confused.**
+// `tauri.conf.json` carries both `csp` (shipped builds) and `devCsp`
+// (applied when `custom-protocol` is OFF):
+//
+// * `csp` — `connect-src 'self'`. The webview only ever talks to its
+//   own embedded bundle; every relay and provider request is made by
+//   the Rust side with reqwest, which the CSP does not govern. The
+//   previous policy allowed ANY localhost port in shipped builds, a
+//   standing SSRF surface for any script executing in the webview.
+// * `devCsp` — additionally `ws://localhost:1420` and its http
+//   equivalent, for `dx serve`'s hot-reload socket, scoped to that one
+//   port and to loopback. Tauri only applies this when
+//   `custom-protocol` is off, so it never reaches a shipped build.
+//
+// Neither object may carry an extra key: `tauri-build` validates the
+// security schema and fails the build on an unknown field, so a comment
+// key (the obvious way to annotate this in JSON) is not available.
 
 fn main() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
