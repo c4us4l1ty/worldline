@@ -60,7 +60,18 @@ jobs:
           echo "$RUNNER_TEMP/worldline-bin" >> "$GITHUB_PATH"
       - name: Build embedded Android app
         working-directory: crates/wl-app
-        run: cargo tauri android build --ci --debug --apk --target aarch64 armv7 x86_64
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/android-build.log"
+          if ! cargo tauri android build --ci --debug --apk --target aarch64 armv7 x86_64 2>&1 | tee "$log"; then
+            # Keep the underlying tool error visible in the check annotation.
+            detail="$(tail -c 3500 "$log")"
+            detail="${detail//%/%25}"
+            detail="${detail//$'\r'/%0D}"
+            detail="${detail//$'\n'/%0A}"
+            echo "::error title=Android APK build failed::$detail"
+            exit 1
+          fi
       - name: Check APK signature, minimum Android version, and native libraries
         working-directory: crates/wl-app
         run: |

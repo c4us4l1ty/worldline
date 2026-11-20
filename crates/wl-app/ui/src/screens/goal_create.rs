@@ -453,7 +453,9 @@ pub fn GoalCreateScreen() -> Element {
             let outcome = invoke::<serde_json::Value>("create_goal", req).await;
             // Released on both arms, and fallibly: the page may already
             // be gone, and the signal it belongs to with it.
-            crate::app::set_if_alive(&manual_busy, false);
+            if !crate::app::set_if_alive(&manual_busy, false) {
+                return;
+            }
             match outcome {
                 Ok(_) => {
                     flash(&ctx, "GOAL CREATED — FIRST TASK READY");
@@ -507,7 +509,14 @@ pub fn GoalCreateScreen() -> Element {
                     // the request is already paid for, so it is
                     // abandoned, not undone.
                     disabled: submitting,
-                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
+                    onclick: move |_| {
+                        // Android Back may arrive before the disabled state
+                        // has rendered, so enforce it in the handler too.
+                        if !ctx.plan_stage.peek().is_busy() && !*manual_busy.peek() {
+                            let mut s = ctx.screen;
+                            s.set(Screen::Canvas);
+                        }
+                    },
                     IconBack {}
                 },
                 // The last native `<select>` in the app. It is the one
