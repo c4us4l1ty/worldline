@@ -30,11 +30,12 @@ grep -q '^Status: ok$' <<< "$startup" || fail "Activity did not report successfu
 
 # File checks are debug-only. Assert the Rust library initialized its private
 # state, not just that the launcher activity started. Never read file contents.
+# On Android 8, invoke test as a shell builtin instead of having run-as
+# look for a standalone executable. Use ps instead of assuming pidof exists.
+files="run-as $package /system/bin/sh -c 'test -s worldline/worldline.sqlite && test -s worldline/.vault-key && test -s worldline/device_id'"
 for ((attempt = 0; attempt < 30; attempt++)); do
-    if adb shell run-as "$package" test -s worldline/worldline.sqlite &&
-       adb shell run-as "$package" test -s worldline/.vault-key &&
-       adb shell run-as "$package" test -s worldline/device_id &&
-       adb shell pidof "$package" > /dev/null; then
+    if adb shell "$files" &&
+       adb shell ps -A | tr -d '\r' | awk -v package="$package" '$NF == package { found = 1 } END { exit !found }'; then
         echo 'Android 8.0 native startup passed'
         exit 0
     fi
@@ -43,5 +44,5 @@ done
 
 state="$(adb shell run-as "$package" ls -a worldline 2>&1 || true)"
 logs="$(adb logcat -d -s AndroidRuntime RustStdoutStderr | tail -c 2200 || true)"
-fail "Native state did not initialize. App directory: $state
+fail "Could not confirm native state and a running app. App directory: $state
 $logs"
