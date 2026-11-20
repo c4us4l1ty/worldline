@@ -8,7 +8,7 @@
 //! (`ui/target/dx/wl-ui/release/web/public`). Building against a missing
 //! (never built / `cargo clean`ed) dist produces a binary that boots a
 //! silently BLANK window. Building the UI first is required:
-//!   cd crates/wl-app/ui && ../../scripts/dx.sh build --release
+//!   cd crates/wl-app/ui && ../../../scripts/build-ui.sh
 //!
 //! **2. Debug binary without the dev server — "Could not connect to
 //! localhost: Connection refused".** Tauri picks its frontend source at
@@ -51,7 +51,7 @@ fn main() {
     let dist = manifest.join("ui/target/dx/wl-ui/release/web/public");
     assert!(
         dist.join("index.html").exists(),
-        "frontend bundle missing at {} — build it first: cd crates/wl-app/ui && ../../scripts/dx.sh build --release",
+        "frontend bundle missing at {} — build it first: cd crates/wl-app/ui && ../../../scripts/build-ui.sh",
         dist.display()
     );
 
@@ -59,7 +59,10 @@ fn main() {
     // the embedded bundle. Warn at build time, where the message can
     // actually be read, instead of leaving a browser error page in the
     // window.
-    if std::env::var_os("CARGO_FEATURE_CUSTOM_PROTOCOL").is_none() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if !matches!(target_os.as_str(), "android" | "ios")
+        && std::env::var_os("CARGO_FEATURE_CUSTOM_PROTOCOL").is_none()
+    {
         println!(
             "cargo:warning=BUILT WITHOUT `custom-protocol`: this binary loads \
              http://localhost:1420 (tauri.conf.json devUrl), NOT the embedded \

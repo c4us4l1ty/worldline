@@ -74,69 +74,89 @@ pub fn CheckInScreen() -> Element {
         });
     };
 
+    let unlocked = ctx.identity_status.read().unlocked;
     let v = ctx.velocity.read().clone();
     let pct = (v.estimate_adjustment * 100.0).round();
 
     rsx! {
-        div {
-            class: "wl-scroll-region",
-            tabindex: "0",
-            h1 { class: "wl-serif-title",
-                "Evening " span { class: "wl-italic-accent", "recalibration" }
+        div { class: "wl-page",
+            div { class: "wl-page-head",
+                button {
+                    class: "wl-circle-btn wl-back",
+                    "data-back-layer": "page",
+                    aria_label: "Back to the line",
+                    disabled: *busy.read(),
+                    onclick: move |_| { let mut screen = ctx.screen; screen.set(Screen::Canvas); },
+                    crate::icons::IconBack {}
+                }
+                h1 { class: "wl-page-title", "Evening check-in" }
             }
-            p { class: "wl-body-muted", style: "margin-bottom: 18px;",
-                "Today's vector audit. Skips are velocity adjustments, not failures — the system recalibrates like a GPS, never like an alarm."
-            }
+            div { class: "wl-scroll-region",
+                h2 { class: "wl-serif-title",
+                    "Evening " span { class: "wl-italic-accent", "recalibration" }
+                }
+                p { class: "wl-body-muted", style: "margin-bottom: 18px;",
+                    "Today's vector audit. Skips are velocity adjustments, not failures — the system recalibrates like a GPS, never like an alarm."
+                }
 
-            if !*submitted.read() {
-                div { class: "wl-fieldset",
-                    textarea {
-                        class: "wl-textarea",
-                        placeholder: "Optional: what happened today?",
-                        disabled: *busy.read(),
-                        value: "{note.read().clone()}",
-                        oninput: move |e| note.set(e.value()),
+                if !unlocked {
+                    p { class: "wl-body-muted", "Create or unlock your identity in Settings to record a check-in." }
+                    button {
+                        class: "wl-btn-ghost",
+                        style: "margin-top: 14px;",
+                        onclick: move |_| { let mut screen = ctx.screen; screen.set(Screen::Settings); },
+                        "Open Settings"
                     }
-                }
-                div { class: "wl-checkin-row",
-                    button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("done"),
-                        span { class: "wl-checkin-glyph", "●" }
-                        span { class: "wl-checkin-label", "Done" }
+                } else if !*submitted.read() {
+                    div { class: "wl-fieldset",
+                        textarea {
+                            class: "wl-textarea",
+                            placeholder: "Optional: what happened today?",
+                            disabled: *busy.read(),
+                            value: "{note.read().clone()}",
+                            oninput: move |e| note.set(e.value()),
+                        }
                     }
-                    button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("partial"),
-                        span { class: "wl-checkin-glyph", "◐" }
-                        span { class: "wl-checkin-label", "Partial" }
+                    div { class: "wl-checkin-row",
+                        button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("done"),
+                            span { class: "wl-checkin-glyph", "●" }
+                            span { class: "wl-checkin-label", "Done" }
+                        }
+                        button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("partial"),
+                            span { class: "wl-checkin-glyph", "◐" }
+                            span { class: "wl-checkin-label", "Partial" }
+                        }
+                        button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("skipped"),
+                            span { class: "wl-checkin-glyph", "○" }
+                            span { class: "wl-checkin-label", "Skipped" }
+                        }
                     }
-                    button { class: "wl-checkin-choice", disabled: *busy.read(), onclick: move |_| record("skipped"),
-                        span { class: "wl-checkin-glyph", "○" }
-                        span { class: "wl-checkin-label", "Skipped" }
+                } else {
+                    div { class: "wl-directive-card", style: "margin-bottom: 12px; padding: 18px;",
+                        div { class: "wl-directive-step-badge", "Trajectory computation" }
+                        p { class: "wl-body-muted wl-mono", "Remaining scope: {v.milestones_remaining} directives" }
+                        p { class: "wl-body-muted wl-mono", "Days to horizon: {v.days_remaining} days" }
+                        p { class: "wl-body-muted wl-mono", "Required velocity: {v.target_per_day:.2} / day" }
+                        p { class: "wl-body-muted wl-mono", "Rolling average: {v.completion_ratio:.2} · observed adjustment {pct}% (not yet applied to future estimates)" }
+                        p { class: "wl-body-muted", style: "margin-top: 8px;",
+                            "V_target = remaining milestones / remaining days. No debt carried forward. Plan recalculated cleanly."
+                        }
                     }
-                }
-            } else {
-                div { class: "wl-directive-card", style: "margin-bottom: 12px; padding: 18px;",
-                    div { class: "wl-directive-step-badge", "Trajectory computation" }
-                    p { class: "wl-body-muted wl-mono", "Remaining scope: {v.milestones_remaining} directives" }
-                    p { class: "wl-body-muted wl-mono", "Days to horizon: {v.days_remaining} days" }
-                    p { class: "wl-body-muted wl-mono", "Required velocity: {v.target_per_day:.2} / day" }
-                    p { class: "wl-body-muted wl-mono", "Rolling average: {v.completion_ratio:.2} · observed adjustment {pct}% (not yet applied to future estimates)" }
-                    p { class: "wl-body-muted", style: "margin-top: 8px;",
-                        "V_target = remaining milestones / remaining days. No debt carried forward. Plan recalculated cleanly."
+                    p { class: "wl-body-muted", style: "margin-top: 4px;",
+                        "Trajectory recorded. Tomorrow's plans still use raw estimates — the observed adjustment above is not applied yet."
                     }
-                }
-                p { class: "wl-body-muted", style: "margin-top: 4px;",
-                    "Trajectory recorded. Tomorrow's plans still use raw estimates — the observed adjustment above is not applied yet."
-                }
-                button {
-                    class: "wl-btn-primary",
-                    style: "margin-top: 14px;",
-                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Dormant; } },
-                    "Commit vector & rest"
-                }
-                button {
-                    class: "wl-btn-ghost",
-                    style: "margin-top: 8px;",
-                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
-                    "Return to the line"
+                    button {
+                        class: "wl-btn-primary",
+                        style: "margin-top: 14px;",
+                        onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Dormant; } },
+                        "Commit vector & rest"
+                    }
+                    button {
+                        class: "wl-btn-ghost",
+                        style: "margin-top: 8px;",
+                        onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
+                        "Return to the line"
+                    }
                 }
             }
         }

@@ -1,0 +1,100 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/android.yml'
+      - 'Cargo.toml'
+      - 'crates/**'
+      - 'scripts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '4'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check touch navigation and CSS
+        run: |
+          node --test scripts/test-webview-bridge.cjs
+          scripts/css-lint.py --against ''
+      - name: Set up Android SDK and Rust targets
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;29.0.13846066'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.13846066" >> "$GITHUB_ENV"
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add wasm32-unknown-unknown aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+      - name: Install pinned Tauri and Dioxus CLIs
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -O https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.11.4/cargo-tauri-x86_64-unknown-linux-gnu.tgz
+          curl -fsSL -O https://github.com/DioxusLabs/dioxus/releases/download/v0.7.10/dx-x86_64-unknown-linux-gnu.tar.gz
+          sha256sum --check <<'SUMS'
+          6864602a34292aa6f2ad40ae019eebe5c1064d6c623fe20696a8a8974067e60b  cargo-tauri-x86_64-unknown-linux-gnu.tgz
+          4363e4ed2a3f1eb7f4d38d2d59aed59ce43271c44c16b425e92c89a64761fbe7  dx-x86_64-unknown-linux-gnu.tar.gz
+          SUMS
+          mkdir -p "$RUNNER_TEMP/worldline-bin"
+          tar -xzf cargo-tauri-x86_64-unknown-linux-gnu.tgz -C "$RUNNER_TEMP/worldline-bin"
+          tar -xzf dx-x86_64-unknown-linux-gnu.tar.gz -C "$RUNNER_TEMP/worldline-bin"
+          echo "$RUNNER_TEMP/worldline-bin" >> "$GITHUB_PATH"
+      - name: Build embedded Android app
+        working-directory: crates/wl-app
+        run: cargo tauri android build --ci --debug --apk --target aarch64 armv7 x86_64
+      - name: Check APK signature, minimum Android version, and native libraries
+        working-directory: crates/wl-app
+        run: |
+          shopt -s nullglob
+          apks=(gen/android/app/build/outputs/apk/universal/debug/*.apk)
+          test "${#apks[@]}" -eq 1
+          apk="${apks[0]}"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+          test "$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" | sed -n "s/^sdkVersion:'\([0-9]*\)'$/\1/p")" = 26
+          unzip -Z1 "$apk" > "$RUNNER_TEMP/worldline-apk-files.txt"
+          grep -Fx 'lib/arm64-v8a/libwl_app_lib.so' "$RUNNER_TEMP/worldline-apk-files.txt"
+          grep -Fx 'lib/armeabi-v7a/libwl_app_lib.so' "$RUNNER_TEMP/worldline-apk-files.txt"
+          grep -Fx 'lib/x86_64/libwl_app_lib.so' "$RUNNER_TEMP/worldline-apk-files.txt"
+          cp "$apk" "$RUNNER_TEMP/Worldline-debug.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Worldline-Android-debug
+          path: ${{ runner.temp }}/Worldline-debug.apk
+          if-no-files-found: error
+
+  android-8-smoke:
+    needs: apk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Worldline-Android-debug
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install and launch the APK on Android 8.0
+        uses: reactivecircus/android-emulator-runner@c9c93e6ba9c4194322e114c40970d5983d9a07cc # v2.38.0
+        with:
+          api-level: 26
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash scripts/smoke-android.sh Worldline-debug.apk

@@ -3,8 +3,12 @@ name = "wl-app"
 version = "0.1.0"
 edition = "2021"
 license = "UNLICENSED"
-description = "Worldline desktop client (Tauri v2 + Dioxus)"
+description = "Worldline native client (Tauri v2 + Dioxus)"
 default-run = "wl-app"
+
+[lib]
+name = "wl_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [workspace]
 

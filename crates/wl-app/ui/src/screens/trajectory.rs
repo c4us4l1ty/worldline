@@ -95,6 +95,7 @@ pub fn TrajectoryScreen() -> Element {
             div { class: "wl-page-head",
                 button {
                     class: "wl-circle-btn wl-back",
+                    "data-back-layer": "page",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },

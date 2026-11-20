@@ -3,7 +3,7 @@
 //! Enforces the worldline skill invariants:
 //! * Exactly ONE directive rendered at any moment (skill §5 "Do").
 //! * 9:16 fixed portrait layout (420×747 desktop, fluid mobile).
-//! * ⌘+Enter completes; Escape opens the frictionful bailout modal.
+//! * The canvas is read-only; the menu leads to the task ledger.
 //! * Zero future lists, zero streaks, zero alarm red.
 //!
 //! Every screen renders under `.wl-root` (a flex column owned by
@@ -68,7 +68,7 @@ fn claim_mount_point() -> bool {
 
 /// Which IPC transport the shim resolved: `native` when it reached
 /// Tauri's injected `__TAURI_INTERNALS__`, `mock` when it fell back to
-/// the browser harness, `none` when `invoke-shim.js` never loaded.
+/// the browser harness, `none` when the shim or bundled bridge is missing.
 ///
 /// Surfaced on the boot-failure screen because "the window is showing
 /// canned data" and "the window is showing my data" look identical
@@ -79,12 +79,7 @@ pub fn transport() -> &'static str {
     use wasm_bindgen::prelude::*;
     #[wasm_bindgen(inline_js = r#"
     export function wl_transport() {
-      if (typeof window.wlInvoke !== "function") { return "none"; }
-      try {
-        const t = window.__TAURI_INTERNALS__;
-        if (t && typeof t.invoke === "function") { return "native"; }
-      } catch (e) { /* not a Tauri webview */ }
-      return "mock";
+      return typeof window.wlTransport === "function" ? window.wlTransport() : "none";
     }
   "#)]
     extern "C" {
@@ -122,6 +117,7 @@ pub fn autofocus_compose() {
     #[wasm_bindgen(inline_js = r#"
     export function wl_autofocus_compose() {
       try {
+        if (window.matchMedia("(pointer: coarse)").matches) return;
         const el = document.querySelector(".wl-compose");
         if (el && document.activeElement !== el) { el.focus(); }
       } catch (e) {}

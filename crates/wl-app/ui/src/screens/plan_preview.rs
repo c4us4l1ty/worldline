@@ -263,6 +263,7 @@ pub fn PlanPreviewScreen() -> Element {
             div { class: "wl-page-head",
                 button {
                     class: "wl-circle-btn wl-back",
+                    "data-back-layer": "page",
                     aria_label: "Back to the objective",
                     title: "Back",
                     disabled: stage.is_busy(),

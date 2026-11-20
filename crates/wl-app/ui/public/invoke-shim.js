@@ -13,6 +13,14 @@
     return null;
   }
 
+  function bundled() {
+    return window.location.hostname === 'tauri.localhost' || window.location.protocol === 'tauri:';
+  }
+
+  window.wlTransport = function () {
+    return native() ? 'native' : bundled() ? 'none' : 'mock';
+  };
+
   var mockDb = {
     identity: null,
     directive: null,
@@ -350,10 +358,30 @@
     },
   };
 
+  // Android's system Back follows the same controls as a tap. Dismiss
+  // one layer at a time; a disabled control consumes Back without
+  // navigating away from an in-flight write. No target means the host
+  // may use the platform default (for example on the root canvas).
+  window.wlHandleBack = function () {
+    for (var layer of ['picker', 'nav', 'telemetry', 'page']) {
+      var button = document.querySelector('button[data-back-layer="' + layer + '"]');
+      if (button) {
+        if (!button.disabled) button.click();
+        return true;
+      }
+    }
+    // Don't leave onboarding before the one-time recovery words are saved.
+    return !!document.querySelector('[data-back-protected]');
+  };
+
   window.wlInvoke = function (cmd, args) {
     var n = native();
     if (n) {
       return n(cmd, args);
+    }
+    // Bundled native pages must never look healthy with fixture data.
+    if (bundled()) {
+      return Promise.reject('Worldline native command bridge is unavailable');
     }
     if (MOCKS[cmd]) {
       return MOCKS[cmd](args || {});

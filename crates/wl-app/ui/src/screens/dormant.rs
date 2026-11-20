@@ -30,6 +30,7 @@ pub fn DormantScreen() -> Element {
                 div { style: "display: flex; flex-direction: column; gap: 8px; margin-top: 18px;",
                     button {
                         class: "wl-btn-primary",
+                        "data-back-layer": "page",
                         onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
                         "Return to the line"
                     }

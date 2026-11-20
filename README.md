@@ -32,7 +32,7 @@ Worldline/
 │   │                  opaque ciphertext routing; sqlite dev / postgres prod)
 │   ├── wl-sync/       Offline outbox drain + pull/apply + deterministic merge
 │   └── wl-app/        Tauri v2 desktop shell (420×747, non-maximizable)
-│       └── ui/        Dioxus (wasm) frontend — the 9:16 single-directive canvas
+│       └── ui/        Shared Dioxus (wasm) single-directive canvas
 ```
 
 **Identity (PRD §3):** 128-bit OS entropy → 12-word BIP-39 mnemonic →
@@ -64,6 +64,14 @@ cargo test --workspace        # 283 tests: crypto vectors, HLC, CRDT convergence
                               # engine invariants, relay auth/pull, two-device sync
 cargo run -p wl-relay         # blind relay on 127.0.0.1:8080 (SQLite backend)
 ```
+
+### Android client (Android 8.0+, no server needed to launch)
+
+Use the **Android APK** workflow artifact for a debug build, or build and
+install it locally with the [Android setup guide](docs/ANDROID.md). The app
+bundles the UI and uses the same Rust engine, SQLite and Stronghold vault
+as desktop. Manual goals and the task ledger work offline; AI planning and
+cross-device sync require separate configuration in Settings.
 
 ### Desktop client (needs Tauri's Linux deps once)
 ```bash
@@ -116,8 +124,8 @@ cargo tauri build --no-bundle                   # from crates/wl-app
 > like a broken app but is not one. Use the release binary above, or
 > `cargo tauri dev`, which starts the server for you.
 
-There is no JavaScript toolchain in this repo (no node, no bun — the UI is
-Rust/Dioxus compiled to wasm). All commands above are cargo/tauri/dx.
+The UI is Rust/Dioxus compiled to wasm; building it does not require Node or
+npm. The optional WebView bridge tests use Node's built-in test runner.
 
 ## Design system
 
@@ -127,8 +135,8 @@ beacon (the active step badge and the create-goal button — the session timer
 that used to be its headline use was removed 2026-09-26), DM Sans / Doppio
 One / ui-monospace typography, zero-guilt velocity treatment. Exactly one
 directive is rendered at any moment, over a single floating menu control.
-⌘+Enter completes; Escape opens the frictionful bailout modal (categorize:
-blocked / scope / energy). No streaks, no backlog views, no alarm red.
+The canvas is read-only; open the menu to resolve tasks in the Entropy Log
+or run the evening check-in. No streaks, no alarm red.
 Secondary pages centre their title over a floating back chevron;
 appearance preferences are switches, and sync lives in Settings rather than
 on the canvas. Goal creation is a compose screen: one bare free-text field
@@ -143,7 +151,7 @@ and needs no API key.
   enter SQLite, the DOM, or the relay.
 - PRD deltas are logged in `docs/PRD-DELTAS.md`.
 
-## Verification status (CI-free repo; commands)
+## Verification commands
 
 | Scope              | Command                                            | Status |
 |--------------------|----------------------------------------------------|--------|
@@ -153,3 +161,5 @@ and needs no API key.
 | UI wasm + tests    | `cd crates/wl-app/ui && cargo test -p wl-ui` + `cargo check --target wasm32-unknown-unknown` | 76 pass, clean |
 | Desktop shell      | `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` | 32 pass, clean (live-relay handshake, vault round-trip, real-IPC arg-binding tests) |
 | Desktop bundle     | `cd crates/wl-app && cargo tauri build` (after setup script) | by user |
+| WebView bridge     | `node --test scripts/test-webview-bridge.cjs` | covers Android Back and mock/native separation |
+| Android APK        | `cd crates/wl-app && cargo tauri android build --debug --apk` (see [Android setup](docs/ANDROID.md)) | Android APK workflow |

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <!-- The vault snapshot, key file and SQLite database share this app-private
+         directory. Never move them through OS backup or device migration. -->
+    <cloud-backup>
+        <exclude domain="root" path="worldline" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="worldline" />
+    </device-transfer>
+</data-extraction-rules>
