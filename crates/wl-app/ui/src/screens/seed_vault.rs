@@ -195,7 +195,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
 
     rsx! {
         div { class: "wl-scroll-region",
-            section { class: "wl-seed-vault",
+            section { class: "wl-seed-vault", "data-back-protected": "true",
                 div { class: "wl-seed-header",
                     h2 { class: "wl-serif-title",
                         "Secret " span { class: "wl-italic-accent", "recovery" } " phrase"
@@ -340,7 +340,7 @@ pub fn SeedVaultScreen(phrase: Vec<String>, verify_indices: Vec<usize>) -> Eleme
                         input {
                             class: "wl-verify-slot",
                             key: "verify-{row}",
-                            r#type: "text",
+                            r#type: "password",
                             placeholder: "Word {idx + 1:02}",
                             autocomplete: "off",
                             autocapitalize: "off",

@@ -266,14 +266,10 @@ pub fn GoalCreateScreen() -> Element {
     // it is a different command with a different lifetime, and because
     // the AI flow's stage already covers its own button.
     let manual_busy = use_signal(|| false);
+    let submitting = busy || *manual_busy.read();
 
-    // Autofocus + auto-grow. `autofocus` on the textarea is unreliable
-    // under a client-rendered tree — WebKit honours it during parsing, not
-    // on an attribute set after insertion — so the field is focused
-    // explicitly once the node exists. The growth, though, is not an
-    // effect's job: the textarea node is stable across renders (Dioxus
-    // diffs it in place; the busy state only rewrites the button labels),
-    // so the height is re-measured from the event that can change it.
+    // Focus after Dioxus renders on desktop. Touch users open the keyboard
+    // by tapping the field; seeing the whole form first matters on a phone.
     use_effect(move || {
         crate::app::autofocus_compose();
         // The pre-flight is free and local, and re-running it on every
@@ -297,7 +293,7 @@ pub fn GoalCreateScreen() -> Element {
     let generate_blocked = readiness.as_ref().is_some_and(|r| !r.can_generate());
 
     let create_ai = move |_| {
-        if busy {
+        if ctx.plan_stage.peek().is_busy() || *manual_busy.peek() {
             return;
         }
         let text = intent.read().clone();
@@ -419,32 +415,21 @@ pub fn GoalCreateScreen() -> Element {
     };
 
     let create_manual = move |_| {
-        if busy {
+        // Read the live signals: two taps can land before the next render.
+        if ctx.plan_stage.peek().is_busy() || *manual_busy.peek() {
             return;
         }
-        // A SECOND guard, and the only one that actually covers this
-        // path. `busy` is derived from `ctx.plan_stage`, which the AI
-        // flow sets and the manual path never touches — so it was always
-        // `false` here, and two taps in the same frame issued two
-        // `create_goal` calls and wrote two goals. The user could do it
-        // with one double-tap, and the button stayed live for the whole
-        // round trip.
-        if manual_busy.read().clone() {
-            return;
-        }
-        let mut mb = manual_busy;
-        mb.set(true);
         let ctx = ctx;
         let raw = intent.read().clone();
-        if raw.trim().is_empty() {
-            flash(&ctx, "DESCRIBE THE OBJECTIVE FIRST");
-            return;
-        }
         let (title, description) = split_intent(&raw);
         if title.is_empty() {
             flash(&ctx, "DESCRIBE THE OBJECTIVE FIRST");
             return;
         }
+        // Claim the write only after validation, so an empty tap never
+        // leaves the form permanently stuck in the submitting state.
+        let mut mb = manual_busy;
+        mb.set(true);
         let date = horizon_date(
             HORIZONS
                 .get(horizon.peek().parse::<usize>().unwrap_or(0))
@@ -468,7 +453,9 @@ pub fn GoalCreateScreen() -> Element {
             let outcome = invoke::<serde_json::Value>("create_goal", req).await;
             // Released on both arms, and fallibly: the page may already
             // be gone, and the signal it belongs to with it.
-            crate::app::set_if_alive(&manual_busy, false);
+            if !crate::app::set_if_alive(&manual_busy, false) {
+                return;
+            }
             match outcome {
                 Ok(_) => {
                     flash(&ctx, "GOAL CREATED — FIRST TASK READY");
@@ -499,13 +486,14 @@ pub fn GoalCreateScreen() -> Element {
     let fill = complexity_fill(rating);
 
     rsx! {
-        div { class: "wl-page",
+        div { class: "wl-page wl-compose-page",
             // Edge controls on their own row, title centred beneath. See
             // the `wl-page-bar` note in wl.css for why these cannot share
             // a row with the title.
             div { class: "wl-page-bar",
                 button {
                     class: "wl-circle-btn wl-back",
+                    "data-back-layer": "page",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     // Disabled while a call is in flight, like the
@@ -520,8 +508,15 @@ pub fn GoalCreateScreen() -> Element {
                     // about, and it is the honest affordance for that:
                     // the request is already paid for, so it is
                     // abandoned, not undone.
-                    disabled: busy,
-                    onclick: move |_| { { let mut s = ctx.screen; *s.write() = Screen::Canvas; } },
+                    disabled: submitting,
+                    onclick: move |_| {
+                        // Android Back may arrive before the disabled state
+                        // has rendered, so enforce it in the handler too.
+                        if !ctx.plan_stage.peek().is_busy() && !*manual_busy.peek() {
+                            let mut s = ctx.screen;
+                            s.set(Screen::Canvas);
+                        }
+                    },
                     IconBack {}
                 },
                 // The last native `<select>` in the app. It is the one
@@ -536,6 +531,7 @@ pub fn GoalCreateScreen() -> Element {
                     aria_label: "Target date",
                     title: "Target date",
                     value: "{horizon.read()}",
+                    disabled: submitting,
                     onchange: move |e| horizon.set(e.value()),
                     // Keyed like every other list in the app: the
                     // options are stable, so Dioxus should diff them by
@@ -556,12 +552,11 @@ pub fn GoalCreateScreen() -> Element {
                 class: "wl-compose",
                 rows: 1,
                 maxlength: MAX_INTENT_CHARS,
-                autofocus: true,
                 spellcheck: true,
                 placeholder: "What do you want to accomplish?",
                 "aria-label": "Describe the objective in your own words",
                 value: "{intent.read().clone()}",
-                disabled: busy,
+                disabled: submitting,
                 oninput: move |e| {
                     // Client-side mirror of the shell's cap so the field
                     // cannot be typed past what `master_plan_preview`
@@ -603,7 +598,7 @@ pub fn GoalCreateScreen() -> Element {
                             aria_pressed: if i + 1 == rating { "true" } else { "false" },
                             aria_label: complexity_word(i + 1),
                             title: complexity_word(i + 1),
-                            disabled: busy,
+                            disabled: submitting,
                             onclick: move |_| complexity.set(i + 1),
                             span { class: "wl-calibration-dot" }
                         }
@@ -637,7 +632,7 @@ pub fn GoalCreateScreen() -> Element {
             }
 
             div { class: "wl-actions-row",
-                button { class: "wl-btn-primary", disabled: busy || generate_blocked,
+                button { class: "wl-btn-primary", disabled: submitting || generate_blocked,
                     onclick: create_ai,
                     if busy { "Working…" } else { "Generate" }
                 }
@@ -653,9 +648,9 @@ pub fn GoalCreateScreen() -> Element {
                     // styling already keeps it subordinate to Generate.
                     button { class: "wl-btn-ghost",
                         title: "Create manually — no API key required",
-                        disabled: *manual_busy.read(),
+                        disabled: submitting,
                         onclick: create_manual,
-                        "Create manually"
+                        if submitting { "Creating…" } else { "Create manually" }
                     }
                 }
             }

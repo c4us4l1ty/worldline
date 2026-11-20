@@ -20,3 +20,10 @@ js-sys = "0.3"
 [features]
 default = ["web"]
 web = ["dioxus/web"]
+
+# This standalone workspace is what ships inside the Android/Desktop app.
+# Optimize the embedded WebAssembly for size instead of Cargo's speed default.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

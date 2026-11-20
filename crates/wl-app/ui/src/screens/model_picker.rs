@@ -295,6 +295,7 @@ pub fn ModelPicker(
                     h2 { class: "wl-picker-title", "{tier.label()}" }
                     button {
                         class: "wl-picker-close",
+                        "data-back-layer": "picker",
                         aria_label: "Close",
                         onclick: move |_| on_close.call(()),
                         IconClose {}
@@ -459,6 +460,7 @@ pub fn ProviderPicker(
                     h2 { class: "wl-picker-title", "AI provider" }
                     button {
                         class: "wl-picker-close",
+                        "data-back-layer": "picker",
                         aria_label: "Close",
                         onclick: move |_| on_close.call(()),
                         IconClose {}

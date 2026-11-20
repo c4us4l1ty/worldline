@@ -9,14 +9,17 @@ cargo fmt --all               # run before committing
 scripts/css-lint.py           # THE gate for any wl.css change (8 checks)
 ```
 
-- Desktop shell (`crates/wl-app`) is EXCLUDED from the workspace because it
-  needs webkit/gtk dev headers. Do NOT add it to workspace members. Verify it
+- Native shell (`crates/wl-app`) is EXCLUDED from the workspace because it
+  needs webkit/gtk dev headers on Linux desktop. Do NOT add it to workspace members. Verify it
   only after `scripts/setup-linux.sh`; in restricted environments check logic
   via `wl-core` tests instead.
   Shell gates (run from repo root):
   `cargo test/clippy --manifest-path crates/wl-app/Cargo.toml` (must be
   warning-free) + `cargo fmt --manifest-path crates/wl-app/Cargo.toml`.
   Includes a live-relay handshake test (spins up `wl-relay` on ephemeral TCP).
+- Android uses the same native shell. See `docs/ANDROID.md` for SDK setup,
+  an embedded test APK build, and device smoke checks. Keep the checked-in
+  `crates/wl-app/gen/android` project; do not overwrite its activity or manifest.
 - UI crate: `cd crates/wl-app/ui && cargo check --target wasm32-unknown-unknown`.
   It is also standalone (own `[workspace]` table) — keep it that way.
 
@@ -26,7 +29,7 @@ Tauri picks its frontend source from the `custom-protocol` Cargo feature:
 
 | Build | Feature | Loads | Needs a server? |
 |---|---|---|---|
-| `cargo tauri build` | ON | embedded `frontendDist` bundle | no |
+| `cargo tauri build` / `cargo tauri android build` | ON | embedded `frontendDist` bundle | no |
 | `cargo tauri dev` | OFF | `devUrl` = `http://localhost:1420` | yes (it starts one) |
 | plain `cargo build` / `cargo run` | OFF | `devUrl` = `http://localhost:1420` | **yes, and nothing starts it** |
 
@@ -45,8 +48,8 @@ unless `dx serve --port 1420` is already up.
 - Daily use: `cargo tauri build --no-bundle`, then run
   `crates/wl-app/target/release/wl-app` directly.
 - Relay: `./target/debug/wl-relay` (already built; ~0 idle CPU).
-- No JS toolchain exists here (no node/bun) — UI is Rust/Dioxus→wasm; all
-  commands are cargo/tauri/dx.
+- UI builds are Rust/Dioxus→wasm, with no JS package manager. The small
+  bridge regression test is `node --test scripts/test-webview-bridge.cjs`.
 - **Look at the UI before changing it: `scripts/dx.sh serve --port 1420`.**
   It draws every screen against the real `public/wl.css` in a browser,
   backed by the mock shell in `public/invoke-shim.js`. A headless

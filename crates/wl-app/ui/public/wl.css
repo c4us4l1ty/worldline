@@ -2383,6 +2383,44 @@ button:disabled { cursor: not-allowed; }
 /* This disabled `transition` only, so every `animation` still ran for
    users who asked for none of it. Both properties have to go, or the
    setting is decorative. */
+/* Phones use all available height, including after the Android IME
+   resizes the native WebView. Keep desktop's 420×747 geometry unchanged. */
+@media (pointer: coarse) {
+  html body { max-width: 520px; }
+  body #main { height: 100%; max-height: none; }
+
+  .wl-root button,
+  .wl-root select { touch-action: manipulation; }
+
+  .wl-root .wl-circle-btn,
+  .wl-root .wl-nav-close,
+  .wl-root .wl-picker-close {
+    width: 48px;
+    height: 48px;
+  }
+
+  .wl-root .wl-page-head { min-height: 58px; }
+  .wl-root .wl-directive-container { padding-top: 76px; }
+  .wl-root .wl-nav-row,
+  .wl-root .wl-horizon,
+  .wl-root .wl-calibration-stop,
+  .wl-root .wl-task-card-summary { min-height: 48px; }
+
+  /* Keep the field usable with the keyboard up. When all of the controls
+     don't fit, swipe to the actions rather than shrinking the field to 0. */
+  .wl-page.wl-compose-page {
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+  .wl-compose-page .wl-compose { min-height: 104px; }
+}
+
+@media (pointer: coarse) and (max-height: 440px) {
+  body > #main { padding-block: 10px; }
+  .wl-root .wl-page-title--compose { padding-top: 12px; }
+  .wl-root .wl-picker-sheet { max-height: 100%; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

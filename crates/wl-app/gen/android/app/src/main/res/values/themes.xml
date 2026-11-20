@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.wl_app" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/worldline_canvas</item>
+    </style>
+</resources>

@@ -64,6 +64,7 @@ pub fn TelemetryDrawer() -> Element {
                     h2 { class: "wl-modal-header", "System telemetry & vault" }
                     button {
                         class: "wl-btn-ghost wl-drawer-close",
+                        "data-back-layer": "telemetry",
                         onclick: move |_| { { let mut t = ctx.telemetry_open; *t.write() = false; } },
                         "Close"
                     }

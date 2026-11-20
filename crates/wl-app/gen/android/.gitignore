@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+.kotlin/
+.idea/
+/local.properties
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+/tauri.settings.gradle
+key.properties
+keystore.properties
+*.jks
+*.keystore

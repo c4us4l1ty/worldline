@@ -2,7 +2,7 @@
 //! device id, relay session, provider model catalog cache.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,12 +68,18 @@ pub struct AppState {
     pub catalog: Mutex<HashMap<String, CatalogEntry>>,
 }
 
+/// Keep the Android vault's permission changes scoped to our own subdirectory,
+/// not the package root shared with Android and the WebView.
+pub(crate) fn data_dir(app: &tauri::AppHandle) -> tauri::Result<PathBuf> {
+    let dir = app.path().app_data_dir()?;
+    #[cfg(target_os = "android")]
+    let dir = dir.join("worldline");
+    Ok(dir)
+}
+
 impl AppState {
     pub fn new(app: &tauri::AppHandle) -> Result<Self, ShellError> {
-        let dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| ShellError::Io(e.to_string()))?;
+        let dir = data_dir(app).map_err(|e| ShellError::Io(e.to_string()))?;
         // The vault opens FIRST because it is what puts the data
         // directory at `0700` (`vault::private_directory`). Opening the
         // database first created it `0644` inside a `0755` directory,

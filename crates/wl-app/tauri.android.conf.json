@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Worldline",
+        "backgroundColor": "#131312",
+        "useHttpsScheme": true
+      }
+    ]
+  },
+  "bundle": {
+    "targets": "all",
+    "android": {
+      "minSdkVersion": 26,
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}

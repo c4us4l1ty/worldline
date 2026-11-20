@@ -1,0 +1,7 @@
+/build/
+/src/main/**/generated/
+/src/main/jniLibs/
+/src/main/assets/
+/tauri.build.gradle.kts
+/proguard-tauri.pro
+/tauri.properties

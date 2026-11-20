@@ -443,6 +443,7 @@ pub fn SettingsScreen(sheet_open: Signal<bool>) -> Element {
             div { class: "wl-page-head",
                 button {
                     class: "wl-circle-btn wl-back",
+                    "data-back-layer": "page",
                     aria_label: "Back to the line",
                     title: "Back to the line",
                     onclick: move |_| { { let mut sc = ctx.screen; *sc.write() = Screen::Canvas; } },

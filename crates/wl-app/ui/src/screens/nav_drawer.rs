@@ -151,6 +151,7 @@ pub fn NavDrawer() -> Element {
                     h2 { class: "wl-nav-wordmark", "Worldline" }
                     button {
                         class: "wl-nav-close",
+                        "data-back-layer": "nav",
                         aria_label: "Close control panel",
                         title: "Close",
                         onclick: close,
@@ -185,6 +186,13 @@ pub fn NavDrawer() -> Element {
                             onclick: go(Screen::Trajectory),
                             span { class: "wl-nav-row-icon", crate::icons::IconVelocity {} }
                             span { class: "wl-nav-row-label", "Trajectory" }
+                            span { class: "wl-nav-chevron", crate::icons::IconChevron {} }
+                        }
+                        button {
+                            class: "wl-nav-row",
+                            onclick: go(Screen::EveningCheckIn),
+                            span { class: "wl-nav-row-icon", crate::icons::IconMoon {} }
+                            span { class: "wl-nav-row-label", "Evening check-in" }
                             span { class: "wl-nav-chevron", crate::icons::IconChevron {} }
                         }
                     }

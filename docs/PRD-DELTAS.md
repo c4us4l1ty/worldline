@@ -2941,3 +2941,12 @@ over it.**
     one-shot take, explicit discard, sweep — because a cache that
     silently diverges is worse than no cache: the caps would then be
     enforced against a fiction while the table grew without bound.
+
+255. **Android hosts the same single-directive canvas as desktop.** The
+    native Android activity owns system-bar, cutout and keyboard insets;
+    the shared UI uses a fluid height and larger tap targets on touch screens.
+    Back closes the active sheet or uses the page's existing back action,
+    and Evening check-in is available from the menu without a keyboard.
+    No new storage or sync model: Android keeps the existing engine, SQLite,
+    Stronghold and encrypted relay, with the app data excluded from OS backup
+    and transfer. The Android debug APK is a test artifact, not a release.
