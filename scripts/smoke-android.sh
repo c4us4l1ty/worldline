@@ -6,13 +6,27 @@ apk="${1:?usage: smoke-android.sh <debug-apk>}"
 package=com.worldline.app.debug
 activity="$package/com.worldline.app.MainActivity"
 
-[[ "$(adb shell getprop ro.build.version.sdk | tr -d '\r')" == 26 ]]
-adb install -r "$apk"
-adb shell pm clear "$package"
+fail() {
+    local detail="$1"
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+        detail="${detail//%/%25}"
+        detail="${detail//$'\r'/%0D}"
+        detail="${detail//$'\n'/%0A}"
+        printf '::error title=Android 8 smoke test::%s\n' "$detail"
+    else
+        printf '%s\n' "$detail" >&2
+    fi
+    exit 1
+}
 
-startup="$(adb shell am start -W -n "$activity" | tr -d '\r')"
+[[ "$(adb shell getprop ro.build.version.sdk | tr -d '\r')" == 26 ]] || fail 'Expected an API 26 emulator'
+install="$(adb install -r "$apk" 2>&1)" || fail "Could not install APK: $install"
+printf '%s\n' "$install"
+clear="$(adb shell pm clear "$package" 2>&1)" || fail "Could not reset app data: $clear"
+
+startup="$(adb shell am start -W -n "$activity" 2>&1 | tr -d '\r')" || fail "Could not launch app: $startup"
 printf '%s\n' "$startup"
-grep -q '^Status: ok$' <<< "$startup"
+grep -q '^Status: ok$' <<< "$startup" || fail "Activity did not report successful launch: $startup"
 
 # File checks are debug-only. Assert the Rust library initialized its private
 # state, not just that the launcher activity started. Never read file contents.
@@ -27,6 +41,7 @@ for ((attempt = 0; attempt < 30; attempt++)); do
     sleep 1
 done
 
-echo 'Android 8.0 startup failed: app did not initialize its SQLite store and vault key' >&2
-adb logcat -d -t 200 -s AndroidRuntime RustStdoutStderr >&2
-exit 1
+state="$(adb shell run-as "$package" ls -a worldline 2>&1 || true)"
+logs="$(adb logcat -d -s AndroidRuntime RustStdoutStderr | tail -c 2200 || true)"
+fail "Native state did not initialize. App directory: $state
+$logs"
