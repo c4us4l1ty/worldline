@@ -31,10 +31,17 @@ jobs:
         run: |
           node --test scripts/test-webview-bridge.cjs
           scripts/css-lint.py --against ''
-      - name: Set up Android SDK and Rust targets
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      - name: Install Android platform and NDK
+        shell: bash
         run: |
+          trap 'echo "::error::Android SDK setup failed: $BASH_COMMAND"' ERR
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;29.0.13846066'
           echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.13846066" >> "$GITHUB_ENV"
+      - name: Install Rust targets
+        shell: bash
+        run: |
           rustup update stable --no-self-update
           rustup default stable
           rustup target add wasm32-unknown-unknown aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
@@ -85,6 +92,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: Worldline-Android-debug
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
       - name: Enable KVM for the emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
